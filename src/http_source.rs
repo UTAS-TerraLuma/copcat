@@ -10,7 +10,7 @@ use copc_streaming::{ByteSource, CopcError};
 
 /// Upper bound on concurrent range requests in one [`ByteSource::read_ranges`]
 /// call. Enough to hide per-request latency without hammering object stores.
-const MAX_PARALLEL_REQUESTS: usize = 8;
+pub const MAX_PARALLEL_REQUESTS: usize = 8;
 
 pub struct HttpSource {
     url: String,

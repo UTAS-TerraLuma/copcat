@@ -1,12 +1,10 @@
-//! Loading COPC point clouds from local files or HTTP(S) URLs.
+//! COPC file locations, metadata and coordinate conversion.
 
 use std::path::PathBuf;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
-use copc_streaming::{ByteSource, CopcError, CopcStreamingReader, Fields, FileSource};
+use copc_streaming::{CopcError, CopcHeader};
 use glam::Vec3;
-
-use crate::http_source::HttpSource;
 
 /// Where a COPC file lives, parsed from the text the user pasted.
 #[derive(Debug, PartialEq)]
@@ -38,35 +36,51 @@ impl Location {
     }
 }
 
-/// The subset of a COPC file the viewer has loaded.
-pub struct PointCloud {
+/// Summary of an opened COPC file, from its header.
+pub struct CloudInfo {
     pub source: String,
     pub total_points: u64,
     pub bounds_min: [f64; 3],
     pub bounds_max: [f64; 3],
-    /// Centre of the COPC octree. `positions` are relative to this.
-    pub origin: [f64; 3],
-    /// Point positions in metres, relative to `origin`.
+    /// Centre of the COPC octree. Every position on the GPU is relative to this.
     ///
     /// Georeferenced coordinates (e.g. UTM eastings of ~600,000 m) only keep
     /// ~6 cm of precision in an `f32`, which the GPU needs. Subtracting the
     /// origin in `f64` first keeps sub-millimetre precision near the site.
-    pub positions: Vec<[f32; 3]>,
-    pub load_time: Duration,
+    pub origin: [f64; 3],
+    /// Time to read the header and the whole octree hierarchy.
+    pub open_time: Duration,
+    /// Whether the point format stores RGB colour.
+    pub has_rgb: bool,
 }
 
-impl PointCloud {
-    /// The file's bounding box relative to `origin`, in the same space as `positions`.
+impl CloudInfo {
+    pub fn from_header(header: &CopcHeader, source: &str, open_time: Duration) -> Self {
+        let las_header = header.las_header();
+        let bounds = las_header.bounds();
+        Self {
+            source: source.trim().to_owned(),
+            total_points: las_header.number_of_points(),
+            bounds_min: [bounds.min.x, bounds.min.y, bounds.min.z],
+            bounds_max: [bounds.max.x, bounds.max.y, bounds.max.z],
+            origin: header.copc_info().center,
+            open_time,
+            has_rgb: las_header.point_format().has_color,
+        }
+    }
+
+    /// The file's bounding box relative to `origin`, in the same space as the points.
     pub fn local_bounds(&self) -> (Vec3, Vec3) {
-        let to_local = |p: [f64; 3]| {
-            Vec3::new(
-                (p[0] - self.origin[0]) as f32,
-                (p[1] - self.origin[1]) as f32,
-                (p[2] - self.origin[2]) as f32,
-            )
-        };
+        let to_local = |p: [f64; 3]| Vec3::from_array(to_local(p, self.origin));
         (to_local(self.bounds_min), to_local(self.bounds_max))
     }
+}
+
+/// Converts a world position to `f32` metres relative to `origin`.
+pub fn to_local(position: [f64; 3], origin: [f64; 3]) -> [f32; 3] {
+    let [x, y, z] = position;
+    let [ox, oy, oz] = origin;
+    [(x - ox) as f32, (y - oy) as f32, (z - oz) as f32]
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -79,70 +93,6 @@ pub enum LoadError {
     OpenFile { path: PathBuf, source: CopcError },
     #[error(transparent)]
     Copc(#[from] CopcError),
-}
-
-/// Loads the header and the root octree node (level 0) of a COPC file.
-///
-/// This blocks on file or network IO, so call it off the UI thread.
-pub fn load_root_node(input: &str) -> Result<PointCloud, LoadError> {
-    let started = Instant::now();
-    let mut cloud = match Location::parse(input)? {
-        Location::Http(url) => read_root_node(HttpSource::new(url))?,
-        Location::File(path) => {
-            let file = FileSource::open(&path).map_err(|source| LoadError::OpenFile {
-                path: path.clone(),
-                source,
-            })?;
-            read_root_node(file)?
-        }
-    };
-    cloud.source = input.trim().to_owned();
-    cloud.load_time = started.elapsed();
-    Ok(cloud)
-}
-
-/// Generic over the byte source so local files and HTTP share one code path.
-///
-/// `copc-streaming` is async, but both sources block internally, so driving
-/// it with `pollster` on the caller's thread needs no async runtime.
-fn read_root_node<S: ByteSource>(source: S) -> Result<PointCloud, LoadError> {
-    pollster::block_on(async {
-        let mut reader = CopcStreamingReader::open(source).await?;
-
-        let las_header = reader.header().las_header();
-        let total_points = las_header.number_of_points();
-        let bounds = las_header.bounds();
-        let bounds_min = [bounds.min.x, bounds.min.y, bounds.min.z];
-        let bounds_max = [bounds.max.x, bounds.max.y, bounds.max.z];
-        let copc_info = reader.copc_info();
-        let [cx, cy, cz] = copc_info.center;
-        let root_bounds = copc_info.root_bounds();
-
-        // A query rather than fetching `VoxelKey::ROOT` directly, so a file
-        // whose root node holds no points loads as empty instead of failing.
-        let chunks = reader
-            .query_chunks_to_level(&root_bounds, 0, Fields::Z)
-            .await?;
-        let positions = chunks
-            .iter()
-            .flat_map(|chunk| {
-                chunk
-                    .positions()
-                    .expect("chunks were fetched with Fields::Z")
-            })
-            .map(|[x, y, z]| [(x - cx) as f32, (y - cy) as f32, (z - cz) as f32])
-            .collect();
-
-        Ok(PointCloud {
-            source: String::new(),
-            total_points,
-            bounds_min,
-            bounds_max,
-            origin: [cx, cy, cz],
-            positions,
-            load_time: Duration::ZERO,
-        })
-    })
 }
 
 #[cfg(test)]
@@ -183,25 +133,9 @@ mod tests {
         assert_eq!(error.to_string(), "no file path or URL given");
     }
 
-    /// Hits the network, so it only runs with `cargo test -- --ignored`.
     #[test]
-    #[ignore]
-    fn load_root_node_should_read_autzen_over_https() {
-        let cloud =
-            load_root_node("https://s3.amazonaws.com/hobu-lidar/autzen-classified.copc.laz")
-                .unwrap();
-        assert_eq!(cloud.positions.len(), 61_201);
-    }
-
-    /// Metashape writes 0xAABB in the laszip VLR's reserved field, which
-    /// copc-reader 0.9 rejected. Hits the network, like the test above.
-    #[test]
-    #[ignore]
-    fn load_root_node_should_read_metashape_file_with_aabb_vlr_reserved() {
-        let cloud = load_root_node(
-            "https://object-store.rc.nectar.org.au/v1/AUTH_4df2f67c2eed48a2aaeeed008a4bf0de/naturescan-drone/NSNSMDD001_20260425_m3m01/level2_ard/NSNSMDD001_20260425_m3m01_pc.copc.laz",
-        )
-        .unwrap();
-        assert!(!cloud.positions.is_empty());
+    fn to_local_should_keep_millimetres_at_utm_scale() {
+        let [x, _, _] = to_local([600_000.123, 0.0, 0.0], [600_000.0, 0.0, 0.0]);
+        assert!((x - 0.123).abs() < 1e-6, "{x}");
     }
 }

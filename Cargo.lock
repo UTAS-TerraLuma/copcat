@@ -2722,9 +2722,11 @@ dependencies = [
  "eframe",
  "glam",
  "pollster 0.4.0",
+ "raw-window-handle",
  "thiserror 2.0.21",
  "ureq",
  "url",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

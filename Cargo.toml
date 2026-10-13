@@ -9,10 +9,18 @@ copc-streaming = "0.2.0"
 eframe = "0.36.2"
 glam = { version = "0.34.1", features = ["bytemuck"] }
 pollster = "0.4"
+raw-window-handle = "0.6"
 thiserror = "2.0.21"
 # No gzip: compressing an already-compressed LAZ range only adds work.
 ureq = { version = "3", default-features = false, features = ["rustls"] }
 url = "2.5.8"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_UI_HiDpi",
+    "Win32_UI_WindowsAndMessaging",
+] }
 
 [profile.dev.package."*"]
 opt-level = 2

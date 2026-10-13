@@ -48,10 +48,16 @@ impl OrbitCamera {
         self.target + direction * self.distance
     }
 
-    pub fn view_projection(&self, aspect: f32) -> Mat4 {
-        // Clip planes scale with distance so depth precision follows the zoom level.
+    /// Near and far clip distances. They scale with distance so depth precision
+    /// follows the zoom level.
+    pub fn clip_planes(&self) -> (f32, f32) {
         let near = (self.distance * 0.01).max(1e-3);
         let far = self.distance + self.scene_radius * 4.0;
+        (near, far)
+    }
+
+    pub fn view_projection(&self, aspect: f32) -> Mat4 {
+        let (near, far) = self.clip_planes();
         let view = view::look_at_mat4(self.eye(), self.target, Vec3::Z);
         // glam's "directx" convention (depth 0..1, Y up) is also wgpu's.
         let projection = proj::directx::perspective(self.fov_y, aspect, near, far);

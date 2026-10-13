@@ -2,7 +2,11 @@ mod app;
 mod camera;
 mod cloud;
 mod http_source;
+mod loader;
+mod lod;
 mod renderer;
+#[cfg(windows)]
+mod windows_dpi;
 
 use eframe::egui;
 
