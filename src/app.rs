@@ -122,22 +122,12 @@ impl eframe::App for ViewerApp {
 
         egui::Panel::top("url_bar").show(ui, |ui| self.url_bar(ui));
 
-        if let LoadState::Loaded(cloud) = &self.state {
-            egui::Panel::left("cloud_info").show(ui, |ui| {
-                cloud_summary(ui, cloud);
-                ui.separator();
-                ui.add(egui::Slider::new(&mut self.point_size, 1.0..=10.0).text("Point size"));
-                ui.separator();
-                ui.label("Drag: orbit\nRight-drag: pan\nScroll: zoom\nDouble-click: reset view");
-            });
-        }
-
         // The 3D view fills its panel edge to edge; the text states keep margins.
         let frame = match self.state {
             LoadState::Loaded(_) => egui::Frame::NONE,
             _ => egui::Frame::central_panel(ui.style()),
         };
-        egui::CentralPanel::default()
+        let central = egui::CentralPanel::default()
             .frame(frame)
             .show(ui, |ui| match &self.state {
                 LoadState::Idle => {
@@ -164,6 +154,26 @@ impl eframe::App for ViewerApp {
                     ui.label(error);
                 }
             });
+
+        // Floats over the 3D view rather than taking a side panel, so long
+        // sources can't squeeze the viewport. Shown after the central panel so
+        // its default position can sit just inside the viewport's corner.
+        if let LoadState::Loaded(cloud) = &self.state {
+            egui::Window::new("Point cloud")
+                .default_pos(central.response.rect.min + egui::vec2(8.0, 8.0))
+                .collapsible(true)
+                .resizable(false)
+                .max_width(360.0)
+                .show(ui.ctx(), |ui| {
+                    cloud_summary(ui, cloud);
+                    ui.separator();
+                    ui.add(egui::Slider::new(&mut self.point_size, 1.0..=10.0).text("Point size"));
+                    ui.separator();
+                    ui.label(
+                        "Drag: orbit\nRight-drag: pan\nScroll: zoom\nDouble-click: reset view",
+                    );
+                });
+        }
     }
 }
 
@@ -216,13 +226,15 @@ fn cloud_summary(ui: &mut egui::Ui, cloud: &PointCloud) {
     let [max_x, max_y, max_z] = cloud.bounds_max;
     let [ox, oy, oz] = cloud.origin;
 
-    ui.heading("Point cloud");
     egui::Grid::new("cloud_summary")
         .num_columns(2)
         .striped(true)
         .show(ui, |ui| {
+            // Full URLs run to hundreds of characters; the file name is enough
+            // to identify the cloud, with the full source on hover.
             ui.label("Source");
-            ui.label(&cloud.source);
+            ui.add(egui::Label::new(file_name(&cloud.source)).truncate())
+                .on_hover_text(&cloud.source);
             ui.end_row();
 
             ui.label("Total points");
@@ -250,4 +262,33 @@ fn cloud_summary(ui: &mut egui::Ui, cloud: &PointCloud) {
             ui.label(format!("{:.2} s", cloud.load_time.as_secs_f64()));
             ui.end_row();
         });
+}
+
+/// The last segment of a URL or path, ignoring any query string.
+fn file_name(source: &str) -> &str {
+    let without_query = source.split(['?', '#']).next().unwrap_or(source);
+    without_query
+        .trim_end_matches(['/', '\\'])
+        .rsplit(['/', '\\'])
+        .next()
+        .filter(|name| !name.is_empty())
+        .unwrap_or(source)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn file_name_should_take_last_url_segment_without_query() {
+        assert_eq!(
+            file_name("https://example.com/a/b/site.copc.laz?sig=abc"),
+            "site.copc.laz"
+        );
+    }
+
+    #[test]
+    fn file_name_should_handle_windows_paths() {
+        assert_eq!(file_name(r"C:\data\site 1.copc.laz"), "site 1.copc.laz");
+    }
 }

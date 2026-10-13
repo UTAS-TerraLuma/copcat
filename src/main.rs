@@ -1,6 +1,7 @@
 mod app;
 mod camera;
 mod cloud;
+mod http_source;
 mod renderer;
 
 use eframe::egui;

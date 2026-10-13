@@ -1,14 +1,12 @@
 //! Loading COPC point clouds from local files or HTTP(S) URLs.
 
-use std::fs::File;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use copc_reader::{
-    BoundsSelection, ColumnData, ColumnSelection, CopcRangeReader, HttpRangeReader,
-    LasColumnBatch, LasDimension, LodSelection, PointQuery, RangeRead,
-};
+use copc_streaming::{ByteSource, CopcError, CopcStreamingReader, Fields, FileSource};
 use glam::Vec3;
+
+use crate::http_source::HttpSource;
 
 /// Where a COPC file lives, parsed from the text the user pasted.
 #[derive(Debug, PartialEq)]
@@ -29,8 +27,8 @@ impl Location {
             return Ok(Self::Http(input.to_owned()));
         }
         if input.starts_with("file://") {
-            let url = url::Url::parse(input)
-                .map_err(|_| LoadError::InvalidFileUrl(input.to_owned()))?;
+            let url =
+                url::Url::parse(input).map_err(|_| LoadError::InvalidFileUrl(input.to_owned()))?;
             let path = url
                 .to_file_path()
                 .map_err(|()| LoadError::InvalidFileUrl(input.to_owned()))?;
@@ -78,14 +76,9 @@ pub enum LoadError {
     #[error("not a valid file URL: {0}")]
     InvalidFileUrl(String),
     #[error("could not open {path}: {source}")]
-    OpenFile {
-        path: PathBuf,
-        source: std::io::Error,
-    },
+    OpenFile { path: PathBuf, source: CopcError },
     #[error(transparent)]
-    Copc(#[from] copc_core::Error),
-    #[error("point data has no {0:?} column of 64-bit floats")]
-    MissingColumn(LasDimension),
+    Copc(#[from] CopcError),
 }
 
 /// Loads the header and the root octree node (level 0) of a COPC file.
@@ -94,9 +87,9 @@ pub enum LoadError {
 pub fn load_root_node(input: &str) -> Result<PointCloud, LoadError> {
     let started = Instant::now();
     let mut cloud = match Location::parse(input)? {
-        Location::Http(url) => read_root_node(HttpRangeReader::new(url))?,
+        Location::Http(url) => read_root_node(HttpSource::new(url))?,
         Location::File(path) => {
-            let file = File::open(&path).map_err(|source| LoadError::OpenFile {
+            let file = FileSource::open(&path).map_err(|source| LoadError::OpenFile {
                 path: path.clone(),
                 source,
             })?;
@@ -109,44 +102,47 @@ pub fn load_root_node(input: &str) -> Result<PointCloud, LoadError> {
 }
 
 /// Generic over the byte source so local files and HTTP share one code path.
-fn read_root_node<S: RangeRead>(source: S) -> Result<PointCloud, LoadError> {
-    let mut reader = CopcRangeReader::open(source)?;
+///
+/// `copc-streaming` is async, but both sources block internally, so driving
+/// it with `pollster` on the caller's thread needs no async runtime.
+fn read_root_node<S: ByteSource>(source: S) -> Result<PointCloud, LoadError> {
+    pollster::block_on(async {
+        let mut reader = CopcStreamingReader::open(source).await?;
 
-    let header = reader.header();
-    let total_points = header.number_of_points;
-    let bounds_min = [header.min_x, header.min_y, header.min_z];
-    let bounds_max = [header.max_x, header.max_y, header.max_z];
-    let (cx, cy, cz) = reader.copc_info().center;
+        let las_header = reader.header().las_header();
+        let total_points = las_header.number_of_points();
+        let bounds = las_header.bounds();
+        let bounds_min = [bounds.min.x, bounds.min.y, bounds.min.z];
+        let bounds_max = [bounds.max.x, bounds.max.y, bounds.max.z];
+        let copc_info = reader.copc_info();
+        let [cx, cy, cz] = copc_info.center;
+        let root_bounds = copc_info.root_bounds();
 
-    let root_only = PointQuery::new(LodSelection::Level(0), BoundsSelection::All);
-    let batch = reader.read_columns(root_only, ColumnSelection::xyz())?;
+        // A query rather than fetching `VoxelKey::ROOT` directly, so a file
+        // whose root node holds no points loads as empty instead of failing.
+        let chunks = reader
+            .query_chunks_to_level(&root_bounds, 0, Fields::Z)
+            .await?;
+        let positions = chunks
+            .iter()
+            .flat_map(|chunk| {
+                chunk
+                    .positions()
+                    .expect("chunks were fetched with Fields::Z")
+            })
+            .map(|[x, y, z]| [(x - cx) as f32, (y - cy) as f32, (z - cz) as f32])
+            .collect();
 
-    let xs = f64_column(&batch, LasDimension::X)?;
-    let ys = f64_column(&batch, LasDimension::Y)?;
-    let zs = f64_column(&batch, LasDimension::Z)?;
-    let positions = xs
-        .iter()
-        .zip(ys)
-        .zip(zs)
-        .map(|((x, y), z)| [(x - cx) as f32, (y - cy) as f32, (z - cz) as f32])
-        .collect();
-
-    Ok(PointCloud {
-        source: String::new(),
-        total_points,
-        bounds_min,
-        bounds_max,
-        origin: [cx, cy, cz],
-        positions,
-        load_time: Duration::ZERO,
+        Ok(PointCloud {
+            source: String::new(),
+            total_points,
+            bounds_min,
+            bounds_max,
+            origin: [cx, cy, cz],
+            positions,
+            load_time: Duration::ZERO,
+        })
     })
-}
-
-fn f64_column(batch: &LasColumnBatch, dimension: LasDimension) -> Result<&[f64], LoadError> {
-    match batch.column(dimension) {
-        Some(ColumnData::F64(values)) => Ok(values),
-        _ => Err(LoadError::MissingColumn(dimension)),
-    }
 }
 
 #[cfg(test)]
@@ -156,20 +152,29 @@ mod tests {
     #[test]
     fn parse_should_keep_https_urls_as_http() {
         let location = Location::parse("https://example.com/a.copc.laz").unwrap();
-        assert_eq!(location, Location::Http("https://example.com/a.copc.laz".into()));
+        assert_eq!(
+            location,
+            Location::Http("https://example.com/a.copc.laz".into())
+        );
     }
 
     #[test]
     fn parse_should_strip_quotes_from_windows_copy_as_path() {
         let location = Location::parse(r#""C:\data\site 1.copc.laz""#).unwrap();
-        assert_eq!(location, Location::File(PathBuf::from(r"C:\data\site 1.copc.laz")));
+        assert_eq!(
+            location,
+            Location::File(PathBuf::from(r"C:\data\site 1.copc.laz"))
+        );
     }
 
     #[cfg(windows)]
     #[test]
     fn parse_should_decode_percent_escapes_in_file_urls() {
         let location = Location::parse("file:///C:/data/site%201.copc.laz").unwrap();
-        assert_eq!(location, Location::File(PathBuf::from(r"C:\data\site 1.copc.laz")));
+        assert_eq!(
+            location,
+            Location::File(PathBuf::from(r"C:\data\site 1.copc.laz"))
+        );
     }
 
     #[test]
@@ -186,5 +191,17 @@ mod tests {
             load_root_node("https://s3.amazonaws.com/hobu-lidar/autzen-classified.copc.laz")
                 .unwrap();
         assert_eq!(cloud.positions.len(), 61_201);
+    }
+
+    /// Metashape writes 0xAABB in the laszip VLR's reserved field, which
+    /// copc-reader 0.9 rejected. Hits the network, like the test above.
+    #[test]
+    #[ignore]
+    fn load_root_node_should_read_metashape_file_with_aabb_vlr_reserved() {
+        let cloud = load_root_node(
+            "https://object-store.rc.nectar.org.au/v1/AUTH_4df2f67c2eed48a2aaeeed008a4bf0de/naturescan-drone/NSNSMDD001_20260425_m3m01/level2_ard/NSNSMDD001_20260425_m3m01_pc.copc.laz",
+        )
+        .unwrap();
+        assert!(!cloud.positions.is_empty());
     }
 }

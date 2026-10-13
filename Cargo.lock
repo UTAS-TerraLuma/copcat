@@ -670,26 +670,16 @@ dependencies = [
 ]
 
 [[package]]
-name = "copc-core"
-version = "0.9.0"
+name = "copc-streaming"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "202b8bbfe2e572eb4db38b5ba78b0c5ae7ecfdf89e3d694c3ddf15cb77ffa8c9"
+checksum = "3a8abb0cfd31a03ccee05b754573da7ea8f59bc9348bbb7cadb7750694043bbd"
 dependencies = [
- "las",
- "thiserror 2.0.21",
-]
-
-[[package]]
-name = "copc-reader"
-version = "0.9.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e99790fb79c73248d91e3b12932ad8e5af34e4893042fa7a2ec1fb7001b5ac0f"
-dependencies = [
+ "bitflags 2.13.2",
  "byteorder",
- "copc-core",
  "las",
  "laz",
- "ureq",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
@@ -849,7 +839,7 @@ dependencies = [
  "objc2-foundation 0.3.2",
  "parking_lot",
  "percent-encoding",
- "pollster",
+ "pollster 1.0.1",
  "profiling",
  "raw-window-handle",
  "static_assertions",
@@ -2526,6 +2516,12 @@ dependencies = [
 
 [[package]]
 name = "pollster"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2f3a9f18d041e6d0e102a0a46750538147e5e8992d3b4873aaafee2520b00ce3"
+
+[[package]]
+name = "pollster"
 version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bc6355899e1c9462875b6757c79f3caa011a1fdae12bbb1a2e72dd1f234f8336"
@@ -2722,11 +2718,12 @@ name = "rust-copc-viewer"
 version = "0.1.0"
 dependencies = [
  "bytemuck",
- "copc-core",
- "copc-reader",
+ "copc-streaming",
  "eframe",
  "glam",
+ "pollster 0.4.0",
  "thiserror 2.0.21",
+ "ureq",
  "url",
 ]
 
