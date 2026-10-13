@@ -4,9 +4,11 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+bytemuck = { version = "1.25.2", features = ["derive"] }
 copc-core = "0.9.0"
 copc-reader = { version = "0.9.0", features = ["http-tls"] }
 eframe = "0.36.2"
+glam = { version = "0.34.1", features = ["bytemuck"] }
 thiserror = "2.0.21"
 url = "2.5.8"
 

@@ -1,9 +1,13 @@
 mod app;
+mod camera;
 mod cloud;
+mod renderer;
 
 use eframe::egui;
 
 fn main() -> eframe::Result {
+    // `cargo run -- <url-or-path>` loads a cloud on startup.
+    let initial_source = std::env::args().nth(1);
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("COPC Viewer")
@@ -14,6 +18,6 @@ fn main() -> eframe::Result {
     eframe::run_native(
         "COPC Viewer",
         options,
-        Box::new(|_cc| Ok(Box::new(app::ViewerApp::default()))),
+        Box::new(|cc| Ok(Box::new(app::ViewerApp::new(cc, initial_source)?))),
     )
 }

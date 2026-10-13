@@ -8,6 +8,7 @@ use copc_reader::{
     BoundsSelection, ColumnData, ColumnSelection, CopcRangeReader, HttpRangeReader,
     LasColumnBatch, LasDimension, LodSelection, PointQuery, RangeRead,
 };
+use glam::Vec3;
 
 /// Where a COPC file lives, parsed from the text the user pasted.
 #[derive(Debug, PartialEq)]
@@ -54,6 +55,20 @@ pub struct PointCloud {
     /// origin in `f64` first keeps sub-millimetre precision near the site.
     pub positions: Vec<[f32; 3]>,
     pub load_time: Duration,
+}
+
+impl PointCloud {
+    /// The file's bounding box relative to `origin`, in the same space as `positions`.
+    pub fn local_bounds(&self) -> (Vec3, Vec3) {
+        let to_local = |p: [f64; 3]| {
+            Vec3::new(
+                (p[0] - self.origin[0]) as f32,
+                (p[1] - self.origin[1]) as f32,
+                (p[2] - self.origin[2]) as f32,
+            )
+        };
+        (to_local(self.bounds_min), to_local(self.bounds_max))
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
