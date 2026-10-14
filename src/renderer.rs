@@ -10,10 +10,10 @@ use std::collections::{HashMap, HashSet};
 use copc_streaming::VoxelKey;
 use eframe::egui;
 use eframe::egui_wgpu::{self, wgpu};
-use glam::Vec3;
+use glam::{Vec3, Vec4};
 use wgpu::util::DeviceExt;
 
-use crate::camera::OrbitCamera;
+use crate::camera::{OrbitCamera, Projection};
 
 const COLOR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
@@ -35,9 +35,15 @@ struct Uniforms {
     z_min: f32,
     z_max: f32,
     color_scale: f32,
-    /// WGSL rounds uniform structs up to a multiple of 16 bytes.
+    /// WGSL aligns the `vec4` array below to 16 bytes.
     _padding: [f32; 2],
+    /// Points are only drawn inside all four, as `(normal, d)` with inside
+    /// where `normal·p + d >= 0`. `(0, 0, 0, 1)` keeps everything.
+    clip_planes: [[f32; 4]; 4],
 }
+
+/// A clip plane every point is inside.
+const NO_CLIP: Vec4 = Vec4::W;
 
 /// Must match `EdlUniforms` in `edl.wgsl`.
 #[repr(C)]
@@ -47,6 +53,10 @@ struct EdlUniforms {
     far: f32,
     strength: f32,
     radius_px: f32,
+    /// A WGSL `u32` used as a bool, since `bool` can't go in a uniform.
+    orthographic: u32,
+    target_distance: f32,
+    _padding: [f32; 2],
 }
 
 /// One end of a debug line segment. Must match `lines.wgsl`.
@@ -103,6 +113,8 @@ pub struct PointStyle {
     pub color: PointColor,
     /// `None` turns eye-dome lighting off.
     pub edl: Option<EdlSettings>,
+    /// Only draw points inside these planes, such as a transect's sides.
+    pub clip: Option<[Vec4; 4]>,
 }
 
 pub struct PointRenderer {
@@ -111,11 +123,10 @@ pub struct PointRenderer {
     rgb_pipeline: wgpu::RenderPipeline,
     line_pipeline: wgpu::RenderPipeline,
     edl_pipeline: wgpu::RenderPipeline,
-    uniform_buffer: wgpu::Buffer,
-    bind_group: wgpu::BindGroup,
-    edl_uniform_buffer: wgpu::Buffer,
+    /// Kept to build each viewport's bind group.
+    bind_group_layout: wgpu::BindGroupLayout,
     /// The EDL bind group includes the depth texture, so it's rebuilt with
-    /// the render target; this layout is kept to do that.
+    /// the render target.
     edl_bind_group_layout: wgpu::BindGroupLayout,
     /// GPU copies of loaded octree nodes, drawn or cached for later.
     nodes: HashMap<VoxelKey, NodeBuffer>,
@@ -126,6 +137,20 @@ pub struct PointRenderer {
     z_range: [f32; 2],
     /// Counts `render` calls, to find the least recently drawn nodes.
     frame: u64,
+}
+
+/// One image to draw into, with its own uniforms and textures. Each view on
+/// screen (the 3D view, the transect map) owns one, and they share the
+/// renderer's pipelines and loaded nodes.
+///
+/// Separate uniform buffers matter: `queue.write_buffer` only lands at the
+/// next submit, so two views sharing one buffer would rely on each `render`
+/// submitting before the next one writes.
+pub struct Viewport {
+    uniform_buffer: wgpu::Buffer,
+    bind_group: wgpu::BindGroup,
+    edl_uniform_buffer: wgpu::Buffer,
+    /// Created on the first `render`, and again when the size changes.
     target: Option<RenderTarget>,
 }
 
@@ -156,18 +181,9 @@ impl PointRenderer {
     pub fn new(render_state: &egui_wgpu::RenderState) -> Self {
         let device = &render_state.device;
 
-        let uniform_buffer = create_uniform_buffer(device, "uniforms", size_of::<Uniforms>());
         let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("bind_group_layout"),
             entries: &[uniform_layout_entry(0, wgpu::ShaderStages::VERTEX)],
-        });
-        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("bind_group"),
-            layout: &bind_group_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: uniform_buffer.as_entire_binding(),
-            }],
         });
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("pipeline_layout"),
@@ -245,8 +261,6 @@ impl PointRenderer {
             },
         );
 
-        let edl_uniform_buffer =
-            create_uniform_buffer(device, "edl_uniforms", size_of::<EdlUniforms>());
         let edl_bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("edl_bind_group_layout"),
@@ -288,15 +302,35 @@ impl PointRenderer {
             rgb_pipeline,
             line_pipeline,
             edl_pipeline,
-            uniform_buffer,
-            bind_group,
-            edl_uniform_buffer,
+            bind_group_layout,
             edl_bind_group_layout,
             nodes: HashMap::new(),
             resident_points: 0,
             lines: None,
             z_range: [0.0, 1.0],
             frame: 0,
+        }
+    }
+
+    pub fn create_viewport(&self) -> Viewport {
+        let device = &self.render_state.device;
+        let uniform_buffer = create_uniform_buffer(device, "uniforms", size_of::<Uniforms>());
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("bind_group"),
+            layout: &self.bind_group_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: uniform_buffer.as_entire_binding(),
+            }],
+        });
+        Viewport {
+            uniform_buffer,
+            bind_group,
+            edl_uniform_buffer: create_uniform_buffer(
+                device,
+                "edl_uniforms",
+                size_of::<EdlUniforms>(),
+            ),
             target: None,
         }
     }
@@ -378,10 +412,11 @@ impl PointRenderer {
         evicted
     }
 
-    /// Draws the `visible` nodes that are loaded, then `lines` on top, at `size`
-    /// physical pixels. Returns the texture to show.
+    /// Draws the `visible` nodes that are loaded, then `lines` on top, into
+    /// `viewport` at `size` physical pixels. Returns the texture to show.
     pub fn render(
         &mut self,
+        viewport: &mut Viewport,
         size: [u32; 2],
         camera: &OrbitCamera,
         style: &PointStyle,
@@ -390,9 +425,13 @@ impl PointRenderer {
     ) -> egui::TextureId {
         let size = [size[0].max(1), size[1].max(1)];
         // Take the target out, reuse or rebuild it, then put it back below.
-        let target = match self.target.take() {
+        let target = match viewport.target.take() {
             Some(target) if target.size == size => target,
-            previous => self.create_target(size, previous.map(|t| t.texture_id)),
+            previous => self.create_target(
+                size,
+                &viewport.edl_uniform_buffer,
+                previous.map(|t| t.texture_id),
+            ),
         };
 
         self.frame += 1;
@@ -402,7 +441,7 @@ impl PointRenderer {
             }
         }
         self.upload_lines(lines);
-        self.write_uniforms(size, camera, style);
+        self.write_uniforms(viewport, size, camera, style);
 
         let mut encoder =
             self.render_state
@@ -431,7 +470,7 @@ impl PointRenderer {
                 timestamp_writes: None,
                 multiview_mask: None,
             });
-            pass.set_bind_group(0, &self.bind_group, &[]);
+            pass.set_bind_group(0, &viewport.bind_group, &[]);
             let pipeline = match style.color {
                 PointColor::Height => &self.height_pipeline,
                 PointColor::Rgb { .. } => &self.rgb_pipeline,
@@ -485,7 +524,7 @@ impl PointRenderer {
                 timestamp_writes: None,
                 multiview_mask: None,
             });
-            pass.set_bind_group(0, &self.bind_group, &[]);
+            pass.set_bind_group(0, &viewport.bind_group, &[]);
             pass.set_pipeline(&self.line_pipeline);
             pass.set_vertex_buffer(0, line_buffer.buffer.slice(..));
             pass.draw(0..lines.len() as u32, 0..1);
@@ -496,11 +535,17 @@ impl PointRenderer {
         self.render_state.queue.submit([encoder.finish()]);
 
         let texture_id = target.texture_id;
-        self.target = Some(target);
+        viewport.target = Some(target);
         texture_id
     }
 
-    fn write_uniforms(&self, size: [u32; 2], camera: &OrbitCamera, style: &PointStyle) {
+    fn write_uniforms(
+        &self,
+        viewport: &Viewport,
+        size: [u32; 2],
+        camera: &OrbitCamera,
+        style: &PointStyle,
+    ) {
         let aspect = size[0] as f32 / size[1] as f32;
         let uniforms = Uniforms {
             view_proj: camera.view_projection(aspect).to_cols_array_2d(),
@@ -513,9 +558,10 @@ impl PointRenderer {
                 PointColor::Rgb { scale } => scale,
             },
             _padding: [0.0; 2],
+            clip_planes: style.clip.unwrap_or([NO_CLIP; 4]).map(|plane| plane.to_array()),
         };
         let queue = &self.render_state.queue;
-        queue.write_buffer(&self.uniform_buffer, 0, bytemuck::bytes_of(&uniforms));
+        queue.write_buffer(&viewport.uniform_buffer, 0, bytemuck::bytes_of(&uniforms));
 
         if let Some(edl) = style.edl {
             let (near, far) = camera.clip_planes();
@@ -524,8 +570,15 @@ impl PointRenderer {
                 far,
                 strength: edl.strength,
                 radius_px: edl.radius_px,
+                orthographic: u32::from(camera.projection() == Projection::Orthographic),
+                target_distance: camera.distance,
+                _padding: [0.0; 2],
             };
-            queue.write_buffer(&self.edl_uniform_buffer, 0, bytemuck::bytes_of(&edl_uniforms));
+            queue.write_buffer(
+                &viewport.edl_uniform_buffer,
+                0,
+                bytemuck::bytes_of(&edl_uniforms),
+            );
         }
     }
 
@@ -551,7 +604,12 @@ impl PointRenderer {
         }
     }
 
-    fn create_target(&self, size: [u32; 2], reuse_id: Option<egui::TextureId>) -> RenderTarget {
+    fn create_target(
+        &self,
+        size: [u32; 2],
+        edl_uniforms: &wgpu::Buffer,
+        reuse_id: Option<egui::TextureId>,
+    ) -> RenderTarget {
         let device = &self.render_state.device;
         let extent = wgpu::Extent3d {
             width: size[0],
@@ -589,7 +647,7 @@ impl PointRenderer {
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
-                    resource: self.edl_uniform_buffer.as_entire_binding(),
+                    resource: edl_uniforms.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,

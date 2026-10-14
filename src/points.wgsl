@@ -11,6 +11,9 @@ struct Uniforms {
     // Multiplies RGB after unpacking: 1 for 16-bit colour, 257 for files that
     // store 8-bit values in the 16-bit fields.
     color_scale: f32,
+    // Points are drawn only inside all four planes: dot(plane, (p, 1)) >= 0.
+    // (0, 0, 0, 1) keeps everything.
+    clip_planes: array<vec4<f32>, 4>,
 };
 
 @group(0) @binding(0) var<uniform> u: Uniforms;
@@ -47,12 +50,21 @@ fn point_vertex(vertex_index: u32, position: vec3<f32>, color: vec3<f32>) -> Ver
     );
     let corner = corners[vertex_index];
 
+    var out: VertexOutput;
+    for (var i = 0; i < 4; i++) {
+        if dot(u.clip_planes[i], vec4(position, 1.0)) < 0.0 {
+            // Clipped: put all 6 vertices at one spot outside clip space, so
+            // the quad has no area and the GPU drops it.
+            out.clip_position = vec4(2.0, 2.0, 2.0, 1.0);
+            return out;
+        }
+    }
+
     let center = u.view_proj * vec4(position, 1.0);
     // Offset in NDC so the quad is `point_size` pixels wide whatever the depth.
     // Multiplying by w undoes the perspective divide the GPU applies afterwards.
     let offset = corner * u.point_size / u.viewport_size * center.w;
 
-    var out: VertexOutput;
     out.clip_position = vec4(center.xy + offset, center.zw);
     out.corner = corner;
     out.color = color;

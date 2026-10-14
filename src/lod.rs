@@ -9,7 +9,7 @@ use std::collections::{BinaryHeap, HashMap};
 use copc_streaming::VoxelKey;
 use glam::{Mat4, Vec3, Vec4};
 
-use crate::camera::OrbitCamera;
+use crate::camera::{OrbitCamera, Projection};
 
 /// The shape of a COPC octree: which nodes exist and how many points each holds.
 pub struct Octree {
@@ -71,24 +71,63 @@ impl Octree {
 /// What node selection needs to know about the camera.
 pub struct View {
     frustum: Frustum,
+    /// Extra planes nodes must touch, such as a transect's sides. Same
+    /// convention as the frustum's planes.
+    clip: Option<[Vec4; 4]>,
     eye: Vec3,
-    /// Converts a size at a distance into pixels: `px = size / distance * scale`.
-    projection_scale: f32,
+    pixel_scale: PixelScale,
+}
+
+/// How a length in metres becomes pixels on screen.
+#[derive(Clone, Copy, Debug)]
+enum PixelScale {
+    /// `px = length / distance * scale`: further away looks smaller.
+    Perspective(f32),
+    /// `px = length * scale` at any distance.
+    Orthographic(f32),
 }
 
 impl View {
     pub fn new(camera: &OrbitCamera, viewport_px: [u32; 2]) -> Self {
         let [width, height] = viewport_px.map(|v| v.max(1) as f32);
+        let pixel_scale = match camera.projection() {
+            Projection::Perspective => {
+                PixelScale::Perspective(height / (2.0 * (camera.fov_y * 0.5).tan()))
+            }
+            Projection::Orthographic => {
+                PixelScale::Orthographic(height / (2.0 * camera.half_height()))
+            }
+        };
         Self {
             frustum: Frustum::from_view_projection(camera.view_projection(width / height)),
+            clip: None,
             eye: camera.eye(),
-            projection_scale: height / (2.0 * (camera.fov_y * 0.5).tan()),
+            pixel_scale,
         }
+    }
+
+    /// Also skips nodes entirely outside `planes`, so detail is only spent on
+    /// what will be drawn.
+    pub fn clipped_to(self, planes: [Vec4; 4]) -> Self {
+        Self {
+            clip: Some(planes),
+            ..self
+        }
+    }
+
+    fn sees_box(&self, min: Vec3, max: Vec3) -> bool {
+        box_touches_planes(&self.frustum.planes, min, max)
+            && self
+                .clip
+                .is_none_or(|planes| box_touches_planes(&planes, min, max))
     }
 
     /// Approximate on-screen size in pixels of `length` metres at `distance`.
     fn projected_px(&self, length: f32, distance: f32) -> f32 {
-        length * self.projection_scale / distance.max(1e-6)
+        match self.pixel_scale {
+            PixelScale::Perspective(scale) => length * scale / distance.max(1e-6),
+            PixelScale::Orthographic(scale) => length * scale,
+        }
     }
 }
 
@@ -166,7 +205,7 @@ impl Candidate {
     fn new(octree: &Octree, view: &View, key: VoxelKey) -> Option<Self> {
         octree.point_count(&key)?;
         let (min, max) = octree.node_bounds(&key);
-        if !view.frustum.intersects_box(min, max) {
+        if !view.sees_box(min, max) {
             return None;
         }
         // Distance to the node's bounding sphere: zero or less when the eye is
@@ -217,18 +256,19 @@ impl Frustum {
             planes: [r3 + r0, r3 - r0, r3 + r1, r3 - r1, r2, r3 - r2],
         }
     }
+}
 
-    /// Conservative: may say yes for a box just outside a frustum corner,
-    /// which only costs drawing an extra node.
-    fn intersects_box(&self, min: Vec3, max: Vec3) -> bool {
-        self.planes.iter().all(|plane| {
-            let normal = plane.truncate();
-            // The corner furthest along the normal; if even that is outside,
-            // the whole box is.
-            let corner = Vec3::select(normal.cmpge(Vec3::ZERO), max, min);
-            normal.dot(corner) + plane.w >= 0.0
-        })
-    }
+/// Whether a box is at least partly on the inside of every plane.
+/// Conservative: may say yes for a box just outside where two planes meet,
+/// which only costs drawing an extra node.
+fn box_touches_planes(planes: &[Vec4], min: Vec3, max: Vec3) -> bool {
+    planes.iter().all(|plane| {
+        let normal = plane.truncate();
+        // The corner furthest along the normal; if even that is outside,
+        // the whole box is.
+        let corner = Vec3::select(normal.cmpge(Vec3::ZERO), max, min);
+        normal.dot(corner) + plane.w >= 0.0
+    })
 }
 
 #[cfg(test)]
@@ -338,6 +378,43 @@ mod tests {
         // Far enough to see the whole cube, close enough to want every level.
         let selection = select(&octree, &camera(Vec3::ZERO, 500.0), &LodSettings::default());
         assert_eq!(selection.keys.len(), 8 + 64);
+    }
+
+    #[test]
+    fn select_nodes_should_refine_evenly_in_orthographic() {
+        let octree = full_octree(5, 1);
+        let mut camera = OrbitCamera::default();
+        camera.set_projection(Projection::Orthographic);
+        camera.frame_bounds(Vec3::splat(-HALFSIZE), Vec3::splat(HALFSIZE));
+        // Framed, the root's 10 m spacing is about 27 px, so levels 0..=3 are
+        // still sparser than 2 px and get refined. Distance doesn't matter, so
+        // that holds for every node: all of levels 0..=4 and none of level 5.
+        let selection = select(&octree, &camera, &LodSettings::default());
+        assert_eq!(selection.keys.len(), 1 + 8 + 64 + 512 + 4096);
+    }
+
+    #[test]
+    fn select_nodes_should_skip_nodes_outside_the_clip_planes() {
+        let octree = full_octree(3, 1000);
+        // A 2 m slab running east–west at y = 60, across the whole cube.
+        let transect = crate::transect::Transect {
+            start: glam::Vec2::new(-100.0, 60.0),
+            end: glam::Vec2::new(100.0, 60.0),
+            width: 2.0,
+        };
+        let view = View::new(&camera(Vec3::ZERO, 500.0), VIEWPORT)
+            .clipped_to(transect.clip_planes());
+        let selection = select_nodes(&octree, &view, &LodSettings::default());
+
+        let outside: Vec<_> = selection
+            .keys
+            .iter()
+            .filter(|key| {
+                let (min, max) = octree.node_bounds(key);
+                min.y > 61.0 || max.y < 59.0
+            })
+            .collect();
+        assert!(!selection.keys.is_empty() && outside.is_empty(), "{outside:?}");
     }
 
     #[test]

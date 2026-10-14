@@ -5,15 +5,31 @@ use std::sync::mpsc::TryRecvError;
 use copc_streaming::VoxelKey;
 use eframe::egui;
 
-use crate::camera::OrbitCamera;
+use crate::camera::{OrbitCamera, Projection, ViewPreset};
 use crate::cloud::CloudInfo;
+use crate::gizmo;
 use crate::loader::{Event, Loader, OpenedCloud};
 use crate::lod::{self, LodSettings, Octree, Selection};
-use crate::renderer::{self, EdlSettings, LineVertex, PointColor, PointRenderer, PointStyle};
+use crate::renderer::{
+    self, EdlSettings, LineVertex, PointColor, PointRenderer, PointStyle, Viewport,
+};
+use crate::transect::{self, Transect};
+use crate::transect_map::{self, MapFrame, TransectMap};
 
 /// The GPU cache may hold this many times the point budget. The headroom keeps
 /// recently seen nodes around, so looking back at them doesn't refetch.
 const GPU_CACHE_FACTOR: u64 = 3;
+
+/// Gap between the 3D view's edges and the gizmo, in logical pixels.
+const OVERLAY_MARGIN: f32 = 10.0;
+
+/// Numpad-style view keys, as in Blender: `(key, view, view with Ctrl)`.
+const VIEW_SHORTCUTS: [(egui::Key, ViewPreset, ViewPreset); 3] = [
+    (egui::Key::Num7, ViewPreset::Top, ViewPreset::Bottom),
+    (egui::Key::Num1, ViewPreset::Front, ViewPreset::Back),
+    (egui::Key::Num3, ViewPreset::Right, ViewPreset::Left),
+];
+const PROJECTION_SHORTCUT: egui::Key = egui::Key::Num5;
 
 // Debug bounds colours, as straight RGBA.
 const FETCHING_COLOR: [f32; 4] = [1.0, 0.55, 0.1, 1.0];
@@ -25,8 +41,48 @@ pub struct ViewerApp {
     url_input: String,
     state: LoadState,
     renderer: PointRenderer,
+    viewports: Viewports,
+    /// The Explore mode camera.
     camera: OrbitCamera,
     settings: ViewSettings,
+    mode: Mode,
+    /// Kept while in Explore mode, so switching back returns to the same
+    /// transect. Created the first time Transect mode is shown for a cloud.
+    transect: Option<TransectMode>,
+}
+
+/// What the main area shows. Switched from the top bar.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum Mode {
+    /// The whole cloud in one 3D view.
+    Explore,
+    /// A map to draw a transect on, and a 3D view of just that slab.
+    Transect,
+}
+
+/// Where each image is rendered.
+struct Viewports {
+    /// The 3D view, in either mode.
+    main: Viewport,
+    /// The transect map.
+    map: Viewport,
+}
+
+/// Transect mode's state, which lasts while the cloud is open.
+struct TransectMode {
+    transect: Transect,
+    /// The 3D view of the slab. Separate from the Explore camera, so
+    /// switching modes returns each view to where it was.
+    camera: OrbitCamera,
+    map: TransectMap,
+    /// The cloud's local bounds.
+    bounds: (glam::Vec3, glam::Vec3),
+    /// Point `camera` side-on at the transect next frame, once the 3D
+    /// view's aspect ratio is known.
+    needs_aim: bool,
+    /// How far one Ctrl+scroll notch slides the transect, as a percentage
+    /// of its width.
+    sweep_step_percent: f32,
 }
 
 /// Everything the user can tweak in the floating window.
@@ -66,6 +122,9 @@ struct Session {
     octree: Octree,
     /// Nodes chosen for the current camera, most important first.
     selection: Selection,
+    /// Nodes for the transect map, when it's shown. Mostly the same coarse
+    /// nodes as `selection`, plus those for parts of the cloud out of view.
+    map_selection: Selection,
     /// The last list sent to the loader: selected nodes that aren't loaded yet.
     requested: Vec<VoxelKey>,
     /// Nodes the loader is downloading right now.
@@ -89,10 +148,18 @@ impl ViewerApp {
             .ok_or("the wgpu renderer is not available")?;
         #[cfg(windows)]
         crate::windows_dpi::defer_dpi_changes_while_dragging(cc);
+        let renderer = PointRenderer::new(render_state);
+        let viewports = Viewports {
+            main: renderer.create_viewport(),
+            map: renderer.create_viewport(),
+        };
         let mut app = Self {
             url_input: initial_source.unwrap_or_default(),
             state: LoadState::Idle,
-            renderer: PointRenderer::new(render_state),
+            renderer,
+            viewports,
+            mode: Mode::Explore,
+            transect: None,
             camera: OrbitCamera::default(),
             settings: ViewSettings {
                 point_size: 2.0,
@@ -119,6 +186,8 @@ impl ViewerApp {
         // Replacing the state drops any previous loader, which stops its thread.
         self.state = LoadState::Opening { source, loader };
         self.renderer.clear_nodes();
+        // A transect is in the old cloud's coordinates.
+        self.transect = None;
     }
 
     /// Applies whatever the loader thread has sent since the last frame.
@@ -163,6 +232,14 @@ impl ViewerApp {
 
     fn url_bar(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
+            let is_open = matches!(self.state, LoadState::Open(_));
+            ui.add_enabled_ui(is_open, |ui| {
+                ui.selectable_value(&mut self.mode, Mode::Explore, "Explore")
+                    .on_hover_text("Look around the whole cloud");
+                ui.selectable_value(&mut self.mode, Mode::Transect, "Transect")
+                    .on_hover_text("Draw a transect on a map and view just that slice");
+            });
+            ui.separator();
             ui.label("COPC URL:");
             let is_loading = matches!(self.state, LoadState::Opening { .. });
             let load_button_width = 60.0;
@@ -190,6 +267,7 @@ impl Session {
             info: opened.info,
             octree: opened.octree,
             selection: Selection::default(),
+            map_selection: Selection::default(),
             requested: Vec::new(),
             fetching: HashSet::new(),
             failed: HashMap::new(),
@@ -226,16 +304,27 @@ impl Session {
         }
     }
 
-    /// Picks the nodes for this view, asks the loader for missing ones and
-    /// frees GPU memory if the cache is over budget.
-    fn update(&mut self, renderer: &mut PointRenderer, view: &lod::View, settings: &LodSettings) {
+    /// Picks the nodes for this view (and the map's, if given), asks the
+    /// loader for missing ones and frees GPU memory if the cache is over budget.
+    fn update(
+        &mut self,
+        renderer: &mut PointRenderer,
+        view: &lod::View,
+        map_view: Option<&lod::View>,
+        settings: &LodSettings,
+    ) {
         self.selection = lod::select_nodes(&self.octree, view, settings);
+        self.map_selection = map_view
+            .map(|view| lod::select_nodes(&self.octree, view, &transect_map::LOD))
+            .unwrap_or_default();
 
-        let wanted: Vec<VoxelKey> = self
-            .selection
-            .keys
-            .iter()
+        // The 3D view's nodes go first, so the map never delays them.
+        let all_selected = || self.selection.keys.iter().chain(&self.map_selection.keys);
+        // `insert` returns false for a key already seen, which drops duplicates.
+        let mut seen = HashSet::new();
+        let wanted: Vec<VoxelKey> = all_selected()
             .filter(|key| !renderer.has_node(key) && !self.failed.contains_key(key))
+            .filter(|key| seen.insert(**key))
             .copied()
             .collect();
         // Only message the loader when something changed, not every frame.
@@ -244,7 +333,7 @@ impl Session {
             self.requested = wanted;
         }
 
-        let keep: HashSet<VoxelKey> = self.selection.keys.iter().copied().collect();
+        let keep: HashSet<VoxelKey> = all_selected().copied().collect();
         let cache_budget = settings.point_budget * GPU_CACHE_FACTOR;
         for key in renderer.evict_to_budget(cache_budget, &keep) {
             self.loader.evicted(key);
@@ -312,6 +401,25 @@ impl eframe::App for ViewerApp {
 
         egui::Panel::top("url_bar").show(ui, |ui| self.url_bar(ui));
 
+        // Transect mode's map. Side panels have to be laid out before the
+        // central panel, but the map is only drawn after it, once the nodes
+        // for both views have been chosen.
+        let map_frame = match (&self.state, self.mode) {
+            (LoadState::Open(session), Mode::Transect) => {
+                let bounds = session.info.local_bounds();
+                let transect_mode = self
+                    .transect
+                    .get_or_insert_with(|| TransectMode::new(bounds));
+                let panel = egui::Panel::left("transect_map")
+                    .resizable(true)
+                    .default_size(380.0)
+                    .min_size(200.0)
+                    .show(ui, |ui| transect_mode.map_panel(ui));
+                Some(panel.inner)
+            }
+            _ => None,
+        };
+
         // The 3D view fills its panel edge to edge; the text states keep margins.
         let frame = match self.state {
             LoadState::Open(_) => egui::Frame::NONE,
@@ -329,13 +437,20 @@ impl eframe::App for ViewerApp {
                         ui.label(format!("Loading {source}"));
                     });
                 }
-                LoadState::Open(session) => point_view(
-                    ui,
-                    &mut self.renderer,
-                    &mut self.camera,
-                    session,
-                    &self.settings,
-                ),
+                LoadState::Open(session) => {
+                    let mut scene = Scene {
+                        renderer: &mut self.renderer,
+                        viewports: &mut self.viewports,
+                        session,
+                        settings: &self.settings,
+                    };
+                    match (self.mode, &mut self.transect) {
+                        (Mode::Transect, Some(transect_mode)) => {
+                            transect_mode.view(ui, &mut scene, map_frame);
+                        }
+                        _ => explore_view(ui, &mut scene, &mut self.camera),
+                    }
+                }
                 LoadState::Failed { source, error } => {
                     ui.colored_label(
                         ui.visuals().error_fg_color,
@@ -349,7 +464,17 @@ impl eframe::App for ViewerApp {
         // sources can't squeeze the viewport. Shown after the central panel so
         // its default position can sit just inside the viewport's corner.
         if let LoadState::Open(session) = &self.state {
+            let in_transect = self.mode == Mode::Transect;
+            // The view controls act on whichever 3D view is showing.
+            let camera = match (self.mode, &mut self.transect) {
+                (Mode::Transect, Some(transect_mode)) => &mut transect_mode.camera,
+                _ => &mut self.camera,
+            };
             egui::Window::new("Point cloud")
+                // egui remembers a window's position by its id. One per mode
+                // keeps it over the 3D view, rather than over the map after
+                // switching to Transect mode.
+                .id(egui::Id::new(("point_cloud_window", self.mode)))
                 .default_pos(central.response.rect.min + egui::vec2(8.0, 8.0))
                 .collapsible(true)
                 .resizable(false)
@@ -359,28 +484,298 @@ impl eframe::App for ViewerApp {
                     ui.separator();
                     streaming_stats(ui, session, &self.renderer);
                     ui.separator();
+                    view_ui(ui, camera);
+                    ui.separator();
                     settings_ui(ui, &mut self.settings, session.info.has_rgb);
                     ui.separator();
                     ui.label(
-                        "Drag: orbit\nRight-drag: pan\nScroll: zoom\nDouble-click: reset view",
+                        "Drag: orbit\nRight-drag: pan\nScroll: zoom\nDouble-click: reset view\n\
+                         Gizmo: click an axis to look along it\n\
+                         7 / 1 / 3: top / front / right (Ctrl: opposite)\n\
+                         5: perspective / orthographic",
                     );
+                    if in_transect {
+                        ui.label("Ctrl+scroll: slide the transect sideways");
+                    }
                 });
         }
     }
 }
 
-/// The interactive 3D viewport. Takes fields separately, rather than `&mut self`,
-/// so the caller can keep borrowing `self.state` for `session` at the same time.
-fn point_view(
-    ui: &mut egui::Ui,
-    renderer: &mut PointRenderer,
-    camera: &mut OrbitCamera,
-    session: &mut Session,
-    settings: &ViewSettings,
-) {
-    let (rect, response) =
-        ui.allocate_exact_size(ui.available_size(), egui::Sense::click_and_drag());
+impl TransectMode {
+    fn new(bounds: (glam::Vec3, glam::Vec3)) -> Self {
+        let (min, max) = bounds;
+        Self {
+            transect: Transect::across(min, max),
+            camera: OrbitCamera::default(),
+            map: TransectMap::new(bounds),
+            bounds,
+            needs_aim: true,
+            sweep_step_percent: transect::DEFAULT_SWEEP_STEP_PERCENT,
+        }
+    }
 
+    /// The left panel: transect settings above the map.
+    fn map_panel(&mut self, ui: &mut egui::Ui) -> MapFrame {
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            ui.label("Width");
+            ui.add(
+                egui::DragValue::new(&mut self.transect.width)
+                    .range(transect::MIN_WIDTH..=1000.0)
+                    .speed(0.05)
+                    .max_decimals(2)
+                    .suffix(" m"),
+            );
+            ui.label(format!("Length {:.1} m", self.transect.length()));
+        });
+        ui.horizontal(|ui| {
+            ui.label("Step");
+            ui.add(
+                egui::DragValue::new(&mut self.sweep_step_percent)
+                    .range(1.0..=500.0)
+                    .speed(1.0)
+                    .max_decimals(0)
+                    .suffix(" %"),
+            )
+            .on_hover_text(
+                "How far one Ctrl+scroll notch slides the transect, as a percentage \
+                 of its width. 100% steps to the next slice with no gap or overlap.",
+            );
+            let step = self.transect.width * self.sweep_step_percent / 100.0;
+            ui.weak(format!("of width ({step:.2} m)"));
+        });
+        ui.horizontal(|ui| {
+            if ui
+                .button("Swap ends")
+                .on_hover_text("View the slice from the other side")
+                .clicked()
+            {
+                let transect = &mut self.transect;
+                (transect.start, transect.end) = (transect.end, transect.start);
+                self.needs_aim = true;
+            }
+            if ui
+                .button("Reset view")
+                .on_hover_text("Look at the slice side-on again (or double-click it)")
+                .clicked()
+            {
+                self.needs_aim = true;
+            }
+        });
+        ui.weak("Drag: draw · Drag A, B, ■ or the strip: edit\nRight-drag: pan · Scroll: zoom");
+        ui.add_space(4.0);
+
+        let (frame, change) = self.map.show(ui, &mut self.transect);
+        match change {
+            transect_map::Change::Line => self.needs_aim = true,
+            // Follow the transect without losing the user's angle and zoom.
+            transect_map::Change::Moved(offset) => self.camera.target += offset.extend(0.0),
+            transect_map::Change::Width | transect_map::Change::None => {}
+        }
+        frame
+    }
+
+    /// The 3D view of just the slab, then the map, which needs this frame's
+    /// node selection.
+    fn view(&mut self, ui: &mut egui::Ui, scene: &mut Scene<'_>, map_frame: Option<MapFrame>) {
+        let area = ViewArea::allocate(ui);
+        let input = camera_controls(ui, &area.response, &mut self.camera);
+        if input.reset {
+            self.needs_aim = true;
+        }
+        if input.pinch_px != 0.0 {
+            self.sweep(ui, input.pinch_px);
+        }
+        if self.needs_aim {
+            let (min, max) = self.bounds;
+            self.transect
+                .aim(&mut self.camera, (min.z, max.z), area.rect.aspect_ratio());
+            self.needs_aim = false;
+        }
+        show_gizmo(ui, area.rect, &mut self.camera);
+
+        let clip = self.transect.clip_planes();
+        let view = lod::View::new(&self.camera, area.size_px).clipped_to(clip);
+        let map_view = map_frame
+            .as_ref()
+            .map(|frame| lod::View::new(self.map.camera(), frame.size_px));
+        scene.session.update(
+            scene.renderer,
+            &view,
+            map_view.as_ref(),
+            &scene.settings.lod,
+        );
+        let texture_id = scene.render_main(&area, &self.camera, Some(clip));
+        area.paint(ui, texture_id);
+
+        if let Some(frame) = map_frame {
+            let style = scene.style(area.pixels_per_point, None);
+            let texture_id = scene.renderer.render(
+                &mut scene.viewports.map,
+                frame.size_px,
+                self.map.camera(),
+                &style,
+                &scene.session.map_selection.keys,
+                &[],
+            );
+            self.map.paint(&frame, texture_id, &self.transect);
+        }
+    }
+
+    /// Slides the transect sideways for a Ctrl+scroll of `pinch_px`.
+    fn sweep(&mut self, ui: &egui::Ui, pinch_px: f32) {
+        let px_per_notch = ui.ctx().options(|o| o.input_options.line_scroll_speed);
+        // Scrolling up moves the slab away from the viewer, whichever side
+        // of it they're looking from.
+        let normal = self.transect.normal();
+        let away = if self.camera.forward().truncate().dot(normal) >= 0.0 {
+            1.0
+        } else {
+            -1.0
+        };
+        let step = self.transect.width * self.sweep_step_percent / 100.0;
+        let metres = pinch_px / px_per_notch * step * away;
+        self.transect.sweep(metres);
+        // The camera moves with it, so the slab stays in the same place on screen.
+        self.camera.target += (normal * metres).extend(0.0);
+    }
+}
+
+/// What every 3D view needs from the app, borrowed for one frame.
+struct Scene<'a> {
+    renderer: &'a mut PointRenderer,
+    viewports: &'a mut Viewports,
+    session: &'a mut Session,
+    settings: &'a ViewSettings,
+}
+
+impl Scene<'_> {
+    /// Point style from the settings. Sizes are set in logical pixels, so
+    /// they're scaled to physical pixels like the render target.
+    fn style(&self, pixels_per_point: f32, clip: Option<[glam::Vec4; 4]>) -> PointStyle {
+        let settings = self.settings;
+        PointStyle {
+            size_px: settings.point_size * pixels_per_point,
+            color: self.session.point_color(settings.color_mode),
+            edl: settings.edl_enabled.then_some(EdlSettings {
+                radius_px: settings.edl.radius_px * pixels_per_point,
+                ..settings.edl
+            }),
+            clip,
+        }
+    }
+
+    /// Draws the selected nodes (and debug bounds) into the main viewport.
+    fn render_main(
+        &mut self,
+        area: &ViewArea,
+        camera: &OrbitCamera,
+        clip: Option<[glam::Vec4; 4]>,
+    ) -> egui::TextureId {
+        let lines = if self.settings.show_bounds {
+            self.session
+                .bounds_lines(self.renderer, self.settings.show_loaded_bounds)
+        } else {
+            Vec::new()
+        };
+        let style = self.style(area.pixels_per_point, clip);
+        self.renderer.render(
+            &mut self.viewports.main,
+            area.size_px,
+            camera,
+            &style,
+            &self.session.selection.keys,
+            &lines,
+        )
+    }
+}
+
+/// The space a 3D view takes up this frame.
+struct ViewArea {
+    rect: egui::Rect,
+    response: egui::Response,
+    /// Render at physical pixel resolution so points stay crisp on high-DPI screens.
+    size_px: [u32; 2],
+    pixels_per_point: f32,
+    /// The bottom layer, reserved for the 3D image. It can only be rendered
+    /// once the gizmo has had its say about the camera, but has to be
+    /// painted under the gizmo.
+    image_slot: egui::layers::ShapeIdx,
+}
+
+impl ViewArea {
+    fn allocate(ui: &mut egui::Ui) -> Self {
+        let (rect, response) =
+            ui.allocate_exact_size(ui.available_size(), egui::Sense::click_and_drag());
+        let pixels_per_point = ui.ctx().pixels_per_point();
+        Self {
+            rect,
+            response,
+            size_px: [rect.width(), rect.height()]
+                .map(|side| (side * pixels_per_point).round() as u32),
+            pixels_per_point,
+            image_slot: ui.painter().add(egui::Shape::Noop),
+        }
+    }
+
+    fn paint(&self, ui: &egui::Ui, texture_id: egui::TextureId) {
+        let full_uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
+        ui.painter().set(
+            self.image_slot,
+            egui::Shape::image(texture_id, self.rect, full_uv, egui::Color32::WHITE),
+        );
+    }
+}
+
+/// Explore mode: the whole cloud in one 3D view.
+fn explore_view(ui: &mut egui::Ui, scene: &mut Scene<'_>, camera: &mut OrbitCamera) {
+    let area = ViewArea::allocate(ui);
+    let input = camera_controls(ui, &area.response, camera);
+    if input.reset {
+        let (min, max) = scene.session.info.local_bounds();
+        camera.frame_bounds(min, max);
+    }
+    // A touchpad pinch zooms like scrolling. (So does Ctrl+scroll, which
+    // egui reports the same way.)
+    camera.zoom(input.pinch_px);
+    show_gizmo(ui, area.rect, camera);
+
+    let view = lod::View::new(camera, area.size_px);
+    scene
+        .session
+        .update(scene.renderer, &view, None, &scene.settings.lod);
+    let texture_id = scene.render_main(&area, camera, None);
+    area.paint(ui, texture_id);
+}
+
+fn show_gizmo(ui: &mut egui::Ui, view_rect: egui::Rect, camera: &mut OrbitCamera) {
+    let rect = egui::Rect::from_min_size(
+        egui::pos2(
+            view_rect.right() - OVERLAY_MARGIN - gizmo::SIZE,
+            view_rect.top() + OVERLAY_MARGIN,
+        ),
+        egui::Vec2::splat(gizmo::SIZE),
+    );
+    gizmo::show(ui, rect, camera);
+}
+
+/// Input over a 3D view that the caller acts on, beyond moving the camera.
+struct ViewInput {
+    /// Double-clicked: go back to the default view.
+    reset: bool,
+    /// A Ctrl+scroll or touchpad pinch, as the scroll distance in logical
+    /// pixels that would make the same zoom. egui reports Ctrl+scroll as a
+    /// zoom gesture rather than a scroll. Positive is scrolling up.
+    pinch_px: f32,
+}
+
+/// Mouse and keyboard control of a 3D view's camera.
+fn camera_controls(
+    ui: &egui::Ui,
+    response: &egui::Response,
+    camera: &mut OrbitCamera,
+) -> ViewInput {
     let drag = glam::vec2(response.drag_delta().x, response.drag_delta().y);
     if response.dragged_by(egui::PointerButton::Primary) {
         camera.orbit(drag);
@@ -388,46 +783,72 @@ fn point_view(
     if response.dragged_by(egui::PointerButton::Secondary)
         || response.dragged_by(egui::PointerButton::Middle)
     {
-        camera.pan(drag, rect.height());
+        camera.pan(drag, response.rect.height());
     }
+    let mut input = ViewInput {
+        reset: response.double_clicked(),
+        pinch_px: 0.0,
+    };
     if response.hovered() {
-        let scroll = ui.input(|i| i.smooth_scroll_delta.y);
+        let (scroll, zoom_delta) = ui.input(|i| (i.smooth_scroll_delta.y, i.zoom_delta()));
         if scroll != 0.0 {
             camera.zoom(scroll);
         }
+        // egui turned these pixels into a zoom factor of exp(px × speed).
+        let zoom_speed = ui.ctx().options(|o| o.input_options.scroll_zoom_speed);
+        input.pinch_px = zoom_delta.ln() / zoom_speed;
     }
-    if response.double_clicked() {
-        let (min, max) = session.info.local_bounds();
-        camera.frame_bounds(min, max);
+
+    // Digits typed into text fields aren't shortcuts.
+    if !ui.ctx().text_edit_focused() {
+        ui.input_mut(|input| {
+            for (key, preset, opposite) in VIEW_SHORTCUTS {
+                // Ctrl first: a plain-key check would also match Ctrl+key.
+                if input.consume_key(egui::Modifiers::COMMAND, key) {
+                    camera.set_view(opposite);
+                } else if input.consume_key(egui::Modifiers::NONE, key) {
+                    camera.set_view(preset);
+                }
+            }
+            if input.consume_key(egui::Modifiers::NONE, PROJECTION_SHORTCUT) {
+                camera.set_projection(camera.projection().toggled());
+            }
+        });
     }
+    input
+}
 
-    // Render at physical pixel resolution so points stay crisp on high-DPI screens.
-    let pixels_per_point = ui.ctx().pixels_per_point();
-    let size_px = [
-        (rect.width() * pixels_per_point).round() as u32,
-        (rect.height() * pixels_per_point).round() as u32,
-    ];
-
-    session.update(renderer, &lod::View::new(camera, size_px), &settings.lod);
-    let lines = if settings.show_bounds {
-        session.bounds_lines(renderer, settings.show_loaded_bounds)
-    } else {
-        Vec::new()
-    };
-
-    // Sizes are set in logical pixels, so scale them like the point size.
-    let style = PointStyle {
-        size_px: settings.point_size * pixels_per_point,
-        color: session.point_color(settings.color_mode),
-        edl: settings.edl_enabled.then_some(EdlSettings {
-            radius_px: settings.edl.radius_px * pixels_per_point,
-            ..settings.edl
-        }),
-    };
-    let texture_id = renderer.render(size_px, camera, &style, &session.selection.keys, &lines);
-    let full_uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
-    ui.painter()
-        .image(texture_id, rect, full_uv, egui::Color32::WHITE);
+fn view_ui(ui: &mut egui::Ui, camera: &mut OrbitCamera) {
+    ui.horizontal(|ui| {
+        ui.label("Projection:");
+        // Not `radio_value`: the camera needs to hear about the click, even on
+        // the option already selected, to know the user chose it.
+        for (projection, label) in [
+            (Projection::Perspective, "Perspective"),
+            (Projection::Orthographic, "Orthographic"),
+        ] {
+            if ui.radio(camera.projection() == projection, label).clicked() {
+                camera.set_projection(projection);
+            }
+        }
+    });
+    ui.checkbox(&mut camera.auto_orthographic, "Orthographic for axis views")
+        .on_hover_text(
+            "Snapping to top, front, etc. switches to orthographic; \
+             orbiting away switches back to perspective.",
+        );
+    ui.horizontal_wrapped(|ui| {
+        ui.label("View:");
+        for preset in ViewPreset::ALL {
+            if ui
+                .button(preset.label())
+                .on_hover_text(preset.description(camera.axes))
+                .clicked()
+            {
+                camera.set_view(preset);
+            }
+        }
+    });
 }
 
 fn cloud_summary(ui: &mut egui::Ui, info: &CloudInfo) {

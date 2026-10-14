@@ -1,10 +1,13 @@
 mod app;
 mod camera;
 mod cloud;
+mod gizmo;
 mod http_source;
 mod loader;
 mod lod;
 mod renderer;
+mod transect;
+mod transect_map;
 #[cfg(windows)]
 mod windows_dpi;
 
