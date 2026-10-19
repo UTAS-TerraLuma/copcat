@@ -19,13 +19,13 @@ fn main() -> eframe::Result {
     let initial_source = std::env::args().nth(1);
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_title("COPC Viewer")
+            .with_title("LiDAR Viewer")
             .with_inner_size([1280.0, 800.0]),
         ..Default::default()
     };
 
     eframe::run_native(
-        "COPC Viewer",
+        "LiDAR Viewer",
         options,
         Box::new(|cc| Ok(Box::new(app::ViewerApp::new(cc, initial_source)?))),
     )
