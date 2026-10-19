@@ -4,12 +4,13 @@
 //! and easy to unit test.
 
 use std::cmp::Ordering;
-use std::collections::{BinaryHeap, HashMap};
+use std::collections::{BinaryHeap, HashMap, VecDeque};
 
 use copc_streaming::VoxelKey;
 use glam::{Mat4, Vec3, Vec4};
 
 use crate::camera::{OrbitCamera, Projection};
+use crate::subcloud::Footprint;
 
 /// The shape of a COPC octree: which nodes exist and how many points each holds.
 pub struct Octree {
@@ -71,9 +72,8 @@ impl Octree {
 /// What node selection needs to know about the camera.
 pub struct View {
     frustum: Frustum,
-    /// Extra planes nodes must touch, such as a transect's sides. Same
-    /// convention as the frustum's planes.
-    clip: Option<[Vec4; 4]>,
+    /// A subcloud's outline that nodes must be above.
+    clip: Option<Footprint>,
     eye: Vec3,
     pixel_scale: PixelScale,
 }
@@ -106,11 +106,11 @@ impl View {
         }
     }
 
-    /// Also skips nodes entirely outside `planes`, so detail is only spent on
-    /// what will be drawn.
-    pub fn clipped_to(self, planes: [Vec4; 4]) -> Self {
+    /// Also skips nodes entirely outside `footprint`, so detail is only spent
+    /// on what will be drawn.
+    pub fn clipped_to(self, footprint: Footprint) -> Self {
         Self {
-            clip: Some(planes),
+            clip: Some(footprint),
             ..self
         }
     }
@@ -119,7 +119,7 @@ impl View {
         box_touches_planes(&self.frustum.planes, min, max)
             && self
                 .clip
-                .is_none_or(|planes| box_touches_planes(&planes, min, max))
+                .is_none_or(|footprint| footprint.touches_box(min, max))
     }
 
     /// Approximate on-screen size in pixels of `length` metres at `distance`.
@@ -193,6 +193,81 @@ pub fn select_nodes(octree: &Octree, view: &View, settings: &LodSettings) -> Sel
     selection
 }
 
+/// Every node with points above `footprint`, at every level: all the
+/// full-resolution points that could be inside it, coarsest first. `None` if
+/// they add up to more than `point_limit`.
+pub fn nodes_in_footprint(
+    octree: &Octree,
+    footprint: &Footprint,
+    point_limit: u64,
+) -> Option<Selection> {
+    let mut selection = Selection::default();
+    // Breadth first, so coarse nodes (and a rough result) come first.
+    let mut queue = VecDeque::from([VoxelKey::ROOT]);
+    while let Some(key) = queue.pop_front() {
+        let Some(count) = octree.point_count(&key) else {
+            continue;
+        };
+        let (min, max) = octree.node_bounds(&key);
+        if !footprint.touches_box(min, max) {
+            continue;
+        }
+        selection.points += u64::from(count);
+        if selection.points > point_limit {
+            return None;
+        }
+        if count > 0 {
+            selection.keys.push(key);
+        }
+        queue.extend(key.children());
+    }
+    Some(selection)
+}
+
+/// Roughly how high the points above `footprint` reach: the height ranges in
+/// `known` (the actual points' ranges of nodes loaded so far) of the finest
+/// nodes there. Finer nodes cover less ground, so fit the points under the
+/// footprint more tightly. `None` if no node there has a known range.
+pub fn z_range_under(
+    octree: &Octree,
+    footprint: &Footprint,
+    known: &HashMap<VoxelKey, (f32, f32)>,
+) -> Option<(f32, f32)> {
+    let touches = |key: &VoxelKey| {
+        octree.point_count(key).is_some() && {
+            let (min, max) = octree.node_bounds(key);
+            footprint.touches_box(min, max)
+        }
+    };
+    if !touches(&VoxelKey::ROOT) {
+        return None;
+    }
+    // Depth first, finishing each node's children before the node itself,
+    // so a node's range is only used where none of its children has one.
+    let mut finest: HashMap<VoxelKey, (f32, f32)> = HashMap::new();
+    let mut stack = vec![(VoxelKey::ROOT, false)];
+    while let Some((key, children_done)) = stack.pop() {
+        if !children_done {
+            stack.push((key, true));
+            stack.extend(key.children().into_iter().filter(&touches).map(|c| (c, false)));
+            continue;
+        }
+        let from_children = key
+            .children()
+            .iter()
+            .filter_map(|child| finest.remove(child))
+            .reduce(union);
+        if let Some(range) = from_children.or_else(|| known.get(&key).copied()) {
+            finest.insert(key, range);
+        }
+    }
+    finest.remove(&VoxelKey::ROOT)
+}
+
+fn union((low_a, high_a): (f32, f32), (low_b, high_b): (f32, f32)) -> (f32, f32) {
+    (low_a.min(low_b), high_a.max(high_b))
+}
+
 /// A node waiting in the traversal queue.
 struct Candidate {
     key: VoxelKey,
@@ -261,7 +336,7 @@ impl Frustum {
 /// Whether a box is at least partly on the inside of every plane.
 /// Conservative: may say yes for a box just outside where two planes meet,
 /// which only costs drawing an extra node.
-fn box_touches_planes(planes: &[Vec4], min: Vec3, max: Vec3) -> bool {
+pub fn box_touches_planes(planes: &[Vec4], min: Vec3, max: Vec3) -> bool {
     planes.iter().all(|plane| {
         let normal = plane.truncate();
         // The corner furthest along the normal; if even that is outside,
@@ -273,7 +348,10 @@ fn box_touches_planes(planes: &[Vec4], min: Vec3, max: Vec3) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use glam::Vec2;
+
     use super::*;
+    use crate::subcloud::{Line, Subcloud};
 
     const HALFSIZE: f32 = 100.0;
     const VIEWPORT: [u32; 2] = [1000, 1000];
@@ -393,17 +471,21 @@ mod tests {
         assert_eq!(selection.keys.len(), 1 + 8 + 64 + 512 + 4096);
     }
 
-    #[test]
-    fn select_nodes_should_skip_nodes_outside_the_clip_planes() {
-        let octree = full_octree(3, 1000);
-        // A 2 m slab running east–west at y = 60, across the whole cube.
-        let transect = crate::transect::Transect {
-            start: glam::Vec2::new(-100.0, 60.0),
-            end: glam::Vec2::new(100.0, 60.0),
+    /// A 2 m slab running east–west at y = 60, across the whole cube.
+    fn slab() -> Footprint {
+        let mut subcloud = Subcloud::new(Vec3::splat(-HALFSIZE), Vec3::splat(HALFSIZE));
+        subcloud.line = Line {
+            start: Vec2::new(-100.0, 60.0),
+            end: Vec2::new(100.0, 60.0),
             width: 2.0,
         };
-        let view = View::new(&camera(Vec3::ZERO, 500.0), VIEWPORT)
-            .clipped_to(transect.clip_planes());
+        subcloud.footprint()
+    }
+
+    #[test]
+    fn select_nodes_should_skip_nodes_outside_the_footprint() {
+        let octree = full_octree(3, 1000);
+        let view = View::new(&camera(Vec3::ZERO, 500.0), VIEWPORT).clipped_to(slab());
         let selection = select_nodes(&octree, &view, &LodSettings::default());
 
         let outside: Vec<_> = selection
@@ -415,6 +497,67 @@ mod tests {
             })
             .collect();
         assert!(!selection.keys.is_empty() && outside.is_empty(), "{outside:?}");
+    }
+
+    #[test]
+    fn nodes_in_footprint_should_take_every_level_under_a_circle() {
+        let octree = full_octree(3, 1000);
+        // Inside one level 3 node (25 m wide), away from its edges, so one
+        // node per level, and every z layer of each: 4 levels × (1, 2, 4, 8).
+        let circle = Footprint::Circle {
+            centre: Vec2::new(12.5, 12.5),
+            radius: 1.0,
+        };
+        let selection = nodes_in_footprint(&octree, &circle, u64::MAX);
+        assert_eq!(selection.map(|s| s.keys.len()), Some(1 + 2 + 4 + 8));
+    }
+
+    #[test]
+    fn nodes_in_footprint_should_give_up_past_the_point_limit() {
+        let octree = full_octree(3, 1000);
+        assert!(nodes_in_footprint(&octree, &slab(), 10_000).is_none());
+    }
+
+    fn small_circle() -> Footprint {
+        Footprint::Circle {
+            centre: Vec2::new(12.5, 12.5),
+            radius: 1.0,
+        }
+    }
+
+    fn level_3_under_small_circle(z: i32) -> VoxelKey {
+        VoxelKey {
+            level: 3,
+            x: 4,
+            y: 4,
+            z,
+        }
+    }
+
+    #[test]
+    fn z_range_under_should_prefer_the_finest_known_nodes() {
+        let octree = full_octree(3, 1000);
+        let known = HashMap::from([
+            // The whole site, including a tall building far away.
+            (VoxelKey::ROOT, (-90.0, 80.0)),
+            (level_3_under_small_circle(1), (-70.0, -60.0)),
+            (level_3_under_small_circle(2), (-55.0, -40.0)),
+        ]);
+        let range = z_range_under(&octree, &small_circle(), &known);
+        assert_eq!(range, Some((-70.0, -40.0)));
+    }
+
+    #[test]
+    fn z_range_under_should_ignore_known_nodes_away_from_the_footprint() {
+        let octree = full_octree(3, 1000);
+        let elsewhere = VoxelKey {
+            level: 3,
+            x: 0,
+            y: 0,
+            z: 0,
+        };
+        let known = HashMap::from([(elsewhere, (-100.0, -90.0))]);
+        assert_eq!(z_range_under(&octree, &small_circle(), &known), None);
     }
 
     #[test]

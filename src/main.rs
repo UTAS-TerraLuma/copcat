@@ -5,9 +5,10 @@ mod gizmo;
 mod http_source;
 mod loader;
 mod lod;
+mod profile;
 mod renderer;
-mod transect;
-mod transect_map;
+mod subcloud;
+mod subcloud_map;
 #[cfg(windows)]
 mod windows_dpi;
 

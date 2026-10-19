@@ -14,6 +14,7 @@ use glam::{Vec3, Vec4};
 use wgpu::util::DeviceExt;
 
 use crate::camera::{OrbitCamera, Projection};
+use crate::subcloud::Footprint;
 
 const COLOR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
@@ -40,10 +41,26 @@ struct Uniforms {
     /// Points are only drawn inside all four, as `(normal, d)` with inside
     /// where `normal·p + d >= 0`. `(0, 0, 0, 1)` keeps everything.
     clip_planes: [[f32; 4]; 4],
+    /// `(centre x, centre y, radius, on)`: when `on` is positive, points are
+    /// only drawn inside this circle on the ground too.
+    clip_circle: [f32; 4],
 }
 
 /// A clip plane every point is inside.
 const NO_CLIP: Vec4 = Vec4::W;
+
+/// The uniforms' clip planes and circle for `clip`.
+fn clip_uniforms(clip: Option<Footprint>) -> ([[f32; 4]; 4], [f32; 4]) {
+    let no_planes = [NO_CLIP.to_array(); 4];
+    let no_circle = [0.0; 4];
+    match clip {
+        None => (no_planes, no_circle),
+        Some(Footprint::Planes(planes)) => (planes.map(|plane| plane.to_array()), no_circle),
+        Some(Footprint::Circle { centre, radius }) => {
+            (no_planes, [centre.x, centre.y, radius, 1.0])
+        }
+    }
+}
 
 /// Must match `EdlUniforms` in `edl.wgsl`.
 #[repr(C)]
@@ -113,8 +130,8 @@ pub struct PointStyle {
     pub color: PointColor,
     /// `None` turns eye-dome lighting off.
     pub edl: Option<EdlSettings>,
-    /// Only draw points inside these planes, such as a transect's sides.
-    pub clip: Option<[Vec4; 4]>,
+    /// Only draw points above this outline, such as a subcloud's.
+    pub clip: Option<Footprint>,
 }
 
 pub struct PointRenderer {
@@ -140,7 +157,7 @@ pub struct PointRenderer {
 }
 
 /// One image to draw into, with its own uniforms and textures. Each view on
-/// screen (the 3D view, the transect map) owns one, and they share the
+/// screen (the 3D view, the subcloud map) owns one, and they share the
 /// renderer's pipelines and loaded nodes.
 ///
 /// Separate uniform buffers matter: `queue.write_buffer` only lands at the
@@ -547,6 +564,7 @@ impl PointRenderer {
         style: &PointStyle,
     ) {
         let aspect = size[0] as f32 / size[1] as f32;
+        let (clip_planes, clip_circle) = clip_uniforms(style.clip);
         let uniforms = Uniforms {
             view_proj: camera.view_projection(aspect).to_cols_array_2d(),
             viewport_size: [size[0] as f32, size[1] as f32],
@@ -558,7 +576,8 @@ impl PointRenderer {
                 PointColor::Rgb { scale } => scale,
             },
             _padding: [0.0; 2],
-            clip_planes: style.clip.unwrap_or([NO_CLIP; 4]).map(|plane| plane.to_array()),
+            clip_planes,
+            clip_circle,
         };
         let queue = &self.render_state.queue;
         queue.write_buffer(&viewport.uniform_buffer, 0, bytemuck::bytes_of(&uniforms));

@@ -14,6 +14,9 @@ struct Uniforms {
     // Points are drawn only inside all four planes: dot(plane, (p, 1)) >= 0.
     // (0, 0, 0, 1) keeps everything.
     clip_planes: array<vec4<f32>, 4>,
+    // Points must also be inside this circle on the ground when w > 0:
+    // (centre x, centre y, radius, on).
+    clip_circle: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> u: Uniforms;
@@ -51,13 +54,11 @@ fn point_vertex(vertex_index: u32, position: vec3<f32>, color: vec3<f32>) -> Ver
     let corner = corners[vertex_index];
 
     var out: VertexOutput;
-    for (var i = 0; i < 4; i++) {
-        if dot(u.clip_planes[i], vec4(position, 1.0)) < 0.0 {
-            // Clipped: put all 6 vertices at one spot outside clip space, so
-            // the quad has no area and the GPU drops it.
-            out.clip_position = vec4(2.0, 2.0, 2.0, 1.0);
-            return out;
-        }
+    if is_clipped(position) {
+        // Put all 6 vertices at one spot outside clip space, so the quad has
+        // no area and the GPU drops it.
+        out.clip_position = vec4(2.0, 2.0, 2.0, 1.0);
+        return out;
     }
 
     let center = u.view_proj * vec4(position, 1.0);
@@ -69,6 +70,17 @@ fn point_vertex(vertex_index: u32, position: vec3<f32>, color: vec3<f32>) -> Ver
     out.corner = corner;
     out.color = color;
     return out;
+}
+
+// Whether a point is outside the subcloud being shown.
+fn is_clipped(position: vec3<f32>) -> bool {
+    for (var i = 0; i < 4; i++) {
+        if dot(u.clip_planes[i], vec4(position, 1.0)) < 0.0 {
+            return true;
+        }
+    }
+    let circle = u.clip_circle;
+    return circle.w > 0.0 && distance(position.xy, circle.xy) > circle.z;
 }
 
 @fragment

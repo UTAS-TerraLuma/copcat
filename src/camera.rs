@@ -29,6 +29,8 @@ pub enum Axes {
     /// X along a transect from start to end, Y across it (to the left).
     /// `heading` is X's angle anticlockwise from east, in radians.
     Transect { heading: f32 },
+    /// Square to a turned square plot, X pointing `heading` from east.
+    Square { heading: f32 },
 }
 
 impl Axes {
@@ -36,7 +38,7 @@ impl Axes {
     fn heading(self) -> f32 {
         match self {
             Self::World => 0.0,
-            Self::Transect { heading } => heading,
+            Self::Transect { heading } | Self::Square { heading } => heading,
         }
     }
 
@@ -92,6 +94,12 @@ impl ViewPreset {
             (Axes::Transect { .. }, Self::Back) => "Side-on from the other side, A on the right",
             (Axes::Transect { .. }, Self::Left) => "Along the transect from A, looking towards B",
             (Axes::Transect { .. }, Self::Right) => "Along the transect from B, looking towards A",
+            (Axes::Square { .. }, Self::Top) => "From above, turned with the square",
+            (Axes::Square { .. }, Self::Bottom) => "From below",
+            (Axes::Square { .. }, Self::Front) => "Side-on to the square",
+            (Axes::Square { .. }, Self::Back) => "Side-on from the opposite side",
+            (Axes::Square { .. }, Self::Left) => "Side-on from the left",
+            (Axes::Square { .. }, Self::Right) => "Side-on from the right",
         }
     }
 
@@ -210,9 +218,12 @@ impl OrbitCamera {
         self.target + self.backward() * self.distance
     }
 
-    /// Unit vector the camera looks along.
-    pub fn forward(&self) -> Vec3 {
-        -self.backward()
+    /// The horizontal direction the camera looks, as a unit vector. Looking
+    /// straight down, that's up the screen.
+    pub fn facing(&self) -> Vec2 {
+        // `backward` without the pitch, which is never past vertical, so
+        // tilting doesn't flip it.
+        -Vec2::from_angle(self.yaw)
     }
 
     /// Unit vector from the target towards the eye.
@@ -433,6 +444,13 @@ mod tests {
         // ...so the transect runs left to right across the screen.
         let ahead = camera.view_projection(1.0).project_point3(along.extend(0.0));
         assert!(ahead.x > 0.0 && ahead.y.abs() < 1e-4, "{ahead}");
+    }
+
+    #[test]
+    fn facing_should_point_up_the_screen_in_top_view() {
+        let mut camera = OrbitCamera::default();
+        camera.set_view(ViewPreset::Top);
+        assert!(camera.facing().abs_diff_eq(Vec2::Y, 1e-6), "{}", camera.facing());
     }
 
     #[test]
