@@ -10,11 +10,12 @@ use crate::lod;
 
 pub const DEFAULT_WIDTH: f32 = 2.0;
 pub const DEFAULT_RADIUS: f32 = 10.0;
+pub const DEFAULT_SIDE: f32 = 20.0;
 /// Thinner or smaller than this and a subcloud holds too few points to be useful.
 pub const MIN_SIZE: f32 = 0.05;
-/// Ctrl+scroll slides the subcloud by this percentage of its thickness per
-/// mouse wheel notch, unless the user changes it. 100% steps to the next
-/// slice with no gap or overlap.
+/// Ctrl+scroll (and Ctrl+Shift+scroll) slides the subcloud by this
+/// percentage of its size that way per mouse wheel notch, unless the user
+/// changes it. 100% steps to the next slice with no gap or overlap.
 pub const DEFAULT_SWEEP_STEP_PERCENT: f32 = 100.0;
 /// Extra room around the subcloud when the camera frames it.
 const FRAMING_MARGIN: f32 = 1.1;
@@ -42,7 +43,7 @@ impl ShapeKind {
         match self {
             Self::Line => "A thin slab along a line: a transect",
             Self::Circle => "A round plot: a centre and a radius",
-            Self::Square => "A square plot: a centre, a radius and a rotation",
+            Self::Square => "A square plot: a centre, a side length and a rotation",
         }
     }
 }
@@ -61,13 +62,16 @@ pub struct Line {
 pub struct Circle {
     pub centre: Vec2,
     pub radius: f32,
+    /// Doesn't change which points are inside, only which way is forward
+    /// (see [`Subcloud::rotation`]).
+    pub rotation: f32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Square {
     pub centre: Vec2,
-    /// From the centre to the middle of each side: half the side length.
-    pub radius: f32,
+    /// Length of each side, in metres.
+    pub side: f32,
     /// Anticlockwise from east, in radians. The square's local X axis (see
     /// [`Square::along`]) points this way.
     pub rotation: f32,
@@ -169,8 +173,9 @@ impl Square {
     }
 
     fn clip_planes(&self) -> [Vec4; 4] {
-        let along = self.along() * self.radius;
-        let across = self.across() * self.radius;
+        let half_side = self.side * 0.5;
+        let along = self.along() * half_side;
+        let across = self.across() * half_side;
         [
             plane(self.along(), self.centre - along),
             plane(-self.along(), self.centre + along),
@@ -181,14 +186,22 @@ impl Square {
 
     /// The square's outline on the ground, going around it.
     pub fn corners(&self) -> [Vec2; 4] {
-        let along = self.along() * self.radius;
-        let across = self.across() * self.radius;
+        let half_side = self.side * 0.5;
+        let along = self.along() * half_side;
+        let across = self.across() * half_side;
         [
             self.centre + along + across,
             self.centre - along + across,
             self.centre - along - across,
             self.centre + along - across,
         ]
+    }
+
+    /// The side length that puts `point` on the square's edge, without
+    /// turning it: twice its furthest distance along either axis.
+    pub fn side_through(&self, point: Vec2) -> f32 {
+        let offset = point - self.centre;
+        2.0 * offset.dot(self.along()).abs().max(offset.dot(self.across()).abs())
     }
 }
 
@@ -204,7 +217,7 @@ pub struct Subcloud {
 
 impl Subcloud {
     /// Each shape in the middle of the data: the line west to east over 80%
-    /// of its width, the circle and square at the default radius.
+    /// of its width, the circle and square at their default sizes.
     pub fn new(min: Vec3, max: Vec3) -> Self {
         let centre = (min + max).truncate() * 0.5;
         let half_length = (max.x - min.x) * 0.4;
@@ -218,13 +231,51 @@ impl Subcloud {
             circle: Circle {
                 centre,
                 radius: DEFAULT_RADIUS,
+                rotation: 0.0,
             },
             square: Square {
                 centre,
-                radius: DEFAULT_RADIUS,
+                side: DEFAULT_SIDE,
                 rotation: 0.0,
             },
         }
+    }
+
+    /// Which way the current shape is turned: anticlockwise from east, in
+    /// radians, of its `along` axis. For a line that's from start to end.
+    pub fn rotation(&self) -> f32 {
+        match self.shape {
+            ShapeKind::Line => self.line.direction().to_angle(),
+            ShapeKind::Circle => self.circle.rotation,
+            ShapeKind::Square => self.square.rotation,
+        }
+    }
+
+    /// Turns the current shape about its centre. A line keeps its length.
+    pub fn set_rotation(&mut self, rotation: f32) {
+        match self.shape {
+            ShapeKind::Line => {
+                let line = &mut self.line;
+                let half = Vec2::from_angle(rotation) * line.length() * 0.5;
+                let middle = line.midpoint();
+                (line.start, line.end) = (middle - half, middle + half);
+            }
+            ShapeKind::Circle => self.circle.rotation = rotation,
+            ShapeKind::Square => self.square.rotation = rotation,
+        }
+    }
+
+    /// The current shape's X axis, as a unit vector: to the right when
+    /// facing forward. For a line, from start to end.
+    pub fn along(&self) -> Vec2 {
+        Vec2::from_angle(self.rotation())
+    }
+
+    /// The current shape's Y axis, 90° anticlockwise from `along`: forward,
+    /// where its rotate handle points. For a line, the side with A on the
+    /// left and B on the right.
+    pub fn across(&self) -> Vec2 {
+        self.along().perp()
     }
 
     pub fn footprint(&self) -> Footprint {
@@ -235,6 +286,15 @@ impl Subcloud {
                 radius: self.circle.radius,
             },
             ShapeKind::Square => Footprint::Planes(self.square.clip_planes()),
+        }
+    }
+
+    /// The middle of the current shape on the ground.
+    pub fn centre(&self) -> Vec2 {
+        match self.shape {
+            ShapeKind::Line => self.line.midpoint(),
+            ShapeKind::Circle => self.circle.centre,
+            ShapeKind::Square => self.square.centre,
         }
     }
 
@@ -250,64 +310,51 @@ impl Subcloud {
         }
     }
 
-    /// Which way Ctrl+scroll slides the subcloud, as a unit vector, and how
-    /// thick the subcloud is that way. `facing` is the horizontal direction
-    /// the camera looks (see [`OrbitCamera::facing`]); the slide goes away
-    /// from the viewer, along whichever of the shape's axes is closest.
-    pub fn sweep_axis(&self, facing: Vec2) -> (Vec2, f32) {
-        // Flip `axis` to point away from the viewer.
-        let away = |axis: Vec2| if facing.dot(axis) >= 0.0 { axis } else { -axis };
+    /// How deep the current shape is forward ([`Subcloud::across`]) and how
+    /// long it is sideways ([`Subcloud::along`]), in metres. Scrolling steps
+    /// by a percentage of these.
+    pub fn depth_and_length(&self) -> (f32, f32) {
         match self.shape {
-            ShapeKind::Line => (away(self.line.normal()), self.line.width),
-            ShapeKind::Circle => (facing, 2.0 * self.circle.radius),
-            ShapeKind::Square => {
-                let (along, across) = (self.square.along(), self.square.across());
-                let axis = if facing.dot(along).abs() > facing.dot(across).abs() {
-                    along
-                } else {
-                    across
-                };
-                (away(axis), 2.0 * self.square.radius)
-            }
+            ShapeKind::Line => (self.line.width, self.line.length()),
+            ShapeKind::Circle => (2.0 * self.circle.radius, 2.0 * self.circle.radius),
+            ShapeKind::Square => (self.square.side, self.square.side),
         }
     }
 
-    /// Camera axes that line up with the shape: for a line, X along it (start
-    /// to end) and Y across it.
+    /// Camera axes that line up with the shape: X along it and Y forward.
     pub fn axes(&self) -> Axes {
+        let heading = self.rotation();
         match self.shape {
-            ShapeKind::Line => {
-                let along = self.line.direction();
-                Axes::Transect {
-                    heading: along.y.atan2(along.x),
-                }
-            }
-            ShapeKind::Circle => Axes::World,
-            ShapeKind::Square => Axes::Square {
-                heading: self.square.rotation,
-            },
+            ShapeKind::Line => Axes::Transect { heading },
+            ShapeKind::Circle | ShapeKind::Square => Axes::Plot { heading },
         }
     }
 
-    /// Points `camera` at the subcloud from the side (for a line, start on
-    /// the left), so all of it fits a view of `aspect` (width / height).
-    /// `z_range` is the cloud's height range.
-    pub fn aim(&self, camera: &mut OrbitCamera, (z_min, z_max): (f32, f32), aspect: f32) {
-        // How far the shape reaches across the screen and into it, each way.
-        let (centre, half_across, half_depth) = match self.shape {
-            ShapeKind::Line => (self.line.midpoint(), self.line.length() * 0.5, self.line.width * 0.5),
-            ShapeKind::Circle => (self.circle.centre, self.circle.radius, self.circle.radius),
-            ShapeKind::Square => (self.square.centre, self.square.radius, self.square.radius),
+    /// Centres `camera` on the subcloud and zooms so all of it fits a view
+    /// of `aspect` (width / height) from the side, without turning the
+    /// camera. `z_range` is roughly how high the subcloud's points reach.
+    pub fn frame(&self, camera: &mut OrbitCamera, (z_min, z_max): (f32, f32), aspect: f32) {
+        // How far the shape reaches across the screen and into it, each way,
+        // when seen side-on.
+        let (half_across, half_depth) = match self.shape {
+            ShapeKind::Line => (self.line.length() * 0.5, self.line.width * 0.5),
+            ShapeKind::Circle => (self.circle.radius, self.circle.radius),
+            ShapeKind::Square => (self.square.side * 0.5, self.square.side * 0.5),
         };
         let half_height = (z_max - z_min) * 0.5;
         // A sphere around the whole subcloud keeps every point inside the clip planes.
         let radius = Vec3::new(half_across, half_depth, half_height).length();
-        camera.frame_sphere(centre.extend((z_min + z_max) * 0.5), radius);
-        // Front looks along +Y in the shape's axes: for a line, across it
-        // with A on the left.
+        camera.frame_sphere(self.centre().extend((z_min + z_max) * 0.5), radius);
+        camera.set_half_height(half_height.max(half_across / aspect) * FRAMING_MARGIN);
+    }
+
+    /// Frames the subcloud (see [`Subcloud::frame`]) looking at it side-on:
+    /// for a line, across it with the start on the left.
+    pub fn aim(&self, camera: &mut OrbitCamera, z_range: (f32, f32), aspect: f32) {
+        // Front looks along +Y in the shape's axes.
         camera.axes = self.axes();
         camera.set_view(ViewPreset::Front);
-        camera.set_half_height(half_height.max(half_across / aspect) * FRAMING_MARGIN);
+        self.frame(camera, z_range, aspect);
     }
 }
 
@@ -331,10 +378,11 @@ mod tests {
             circle: Circle {
                 centre: Vec2::new(5.0, 5.0),
                 radius: 2.0,
+                rotation: 0.0,
             },
             square: Square {
                 centre: Vec2::ZERO,
-                radius: 1.0,
+                side: 2.0,
                 rotation: std::f32::consts::FRAC_PI_4,
             },
         }
@@ -377,10 +425,18 @@ mod tests {
 
     #[test]
     fn turned_square_should_reach_further_to_its_corners() {
-        // Turned 45°, the unit square's corners are on the axes, √2 out.
+        // Turned 45°, the 2 m square's corners are on the axes, √2 out.
         let square = subcloud(ShapeKind::Square).footprint();
         assert!(square.contains(Vec2::new(1.4, 0.0)));
         assert!(!square.contains(Vec2::new(0.9, 0.9)));
+    }
+
+    #[test]
+    fn side_through_should_put_the_point_on_the_nearest_edge() {
+        let mut square = subcloud(ShapeKind::Square).square;
+        square.rotation = 0.0;
+        // 3 m east and 1 m north: the east edge is the one it's on.
+        assert_eq!(square.side_through(Vec2::new(3.0, 1.0)), 6.0);
     }
 
     #[test]
@@ -408,20 +464,38 @@ mod tests {
     }
 
     #[test]
-    fn sweep_axis_should_go_away_from_the_viewer_across_a_line() {
-        // Looking south, so away is -Y: the opposite of an eastward line's normal.
-        let (axis, thickness) = subcloud(ShapeKind::Line).sweep_axis(Vec2::NEG_Y);
-        assert_eq!((axis, thickness), (Vec2::NEG_Y, 2.0));
+    fn across_should_point_to_the_side_with_a_on_the_left() {
+        // Facing north, an eastward line has A on the left and B on the right.
+        assert_eq!(subcloud(ShapeKind::Line).across(), Vec2::Y);
     }
 
     #[test]
-    fn sweep_axis_should_pick_the_square_side_facing_the_viewer() {
-        // A square turned 30°, viewed looking north: its `across` axis
-        // (pointing at 120°) is closer to north than `along` (30°).
-        let mut square = subcloud(ShapeKind::Square);
-        square.square.rotation = 30_f32.to_radians();
-        let (axis, _) = square.sweep_axis(Vec2::Y);
-        assert!(axis.abs_diff_eq(square.square.across(), 1e-6), "{axis}");
+    fn across_should_turn_with_a_circle() {
+        let mut circle = subcloud(ShapeKind::Circle);
+        circle.circle.rotation = std::f32::consts::FRAC_PI_2;
+        assert!(circle.across().abs_diff_eq(Vec2::NEG_X, 1e-6), "{}", circle.across());
+    }
+
+    #[test]
+    fn set_rotation_should_turn_a_line_about_its_middle() {
+        let mut line = subcloud(ShapeKind::Line);
+        line.set_rotation(std::f32::consts::FRAC_PI_2);
+        let ends = (line.line.start, line.line.end);
+        let expected = (Vec2::new(5.0, -5.0), Vec2::new(5.0, 5.0));
+        assert!(ends.0.abs_diff_eq(expected.0, 1e-5) && ends.1.abs_diff_eq(expected.1, 1e-5));
+    }
+
+    #[test]
+    fn depth_and_length_should_be_a_lines_width_and_length() {
+        assert_eq!(subcloud(ShapeKind::Line).depth_and_length(), (2.0, 10.0));
+    }
+
+    #[test]
+    fn frame_should_keep_the_cameras_angle() {
+        let mut camera = OrbitCamera::default();
+        let angles = (camera.yaw, camera.pitch);
+        subcloud(ShapeKind::Circle).frame(&mut camera, (0.0, 1.0), 1.0);
+        assert_eq!((camera.yaw, camera.pitch), angles);
     }
 
     #[test]

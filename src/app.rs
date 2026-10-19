@@ -79,13 +79,26 @@ struct SubcloudMode {
     map: SubcloudMap,
     /// The cloud's local bounds.
     bounds: (glam::Vec3, glam::Vec3),
-    /// Point `camera` side-on at the subcloud next frame, once the 3D
-    /// view's aspect ratio is known.
-    needs_aim: bool,
-    /// How far one Ctrl+scroll notch slides the subcloud, as a percentage
-    /// of its thickness.
+    /// How to point `camera` at the subcloud next frame, once the 3D view's
+    /// aspect ratio is known.
+    reframe: Option<Reframe>,
+    /// The subcloud's centre when `camera` last followed it. Editing the
+    /// shape moves the camera by as much as its centre moved, keeping the
+    /// view's angle and zoom.
+    followed_centre: glam::Vec2,
+    /// How far one Ctrl+scroll (or Ctrl+Shift+scroll) notch slides the
+    /// subcloud, as a percentage of its size that way.
     sweep_step_percent: f32,
     profile: ProfileSettings,
+}
+
+/// Ways to point the subcloud camera at the subcloud.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Reframe {
+    /// Centre and zoom to fit, keeping the camera's angle.
+    Fit,
+    /// Look at it side-on, then fit.
+    Aim,
 }
 
 /// The density profile window's settings.
@@ -546,7 +559,11 @@ impl eframe::App for ViewerApp {
                          5: perspective / orthographic",
                     );
                     if in_subcloud {
-                        ui.label("Ctrl+scroll: slide the subcloud away or towards you");
+                        ui.label(
+                            "Ctrl+scroll: slide the subcloud forward (towards its round \
+                             handle) or back\n\
+                             Ctrl+Shift+scroll: slide it right or left",
+                        );
                     }
                 });
         }
@@ -654,12 +671,14 @@ fn profile_ui(ui: &mut egui::Ui, session: &mut Session, settings: &mut ProfileSe
 impl SubcloudMode {
     fn new(bounds: (glam::Vec3, glam::Vec3)) -> Self {
         let (min, max) = bounds;
+        let subcloud = Subcloud::new(min, max);
         Self {
-            subcloud: Subcloud::new(min, max),
+            subcloud,
             camera: OrbitCamera::default(),
             map: SubcloudMap::new(bounds),
             bounds,
-            needs_aim: true,
+            reframe: Some(Reframe::Aim),
+            followed_centre: subcloud.centre(),
             sweep_step_percent: subcloud::DEFAULT_SWEEP_STEP_PERCENT,
             profile: ProfileSettings {
                 show: false,
@@ -678,18 +697,24 @@ impl SubcloudMode {
                 let response = ui
                     .selectable_value(&mut self.subcloud.shape, shape, shape.label())
                     .on_hover_text(shape.description());
+                // A shape of a very different size may not fit the view.
                 if response.changed() {
-                    self.needs_aim = true;
+                    self.reframe = Some(Reframe::Fit);
                 }
             }
         });
         self.shape_controls(ui);
 
-        let (thickness_name, hint) = match self.subcloud.shape {
-            ShapeKind::Line => ("width", "Drag: draw · Drag A, B, ■ or the strip: edit"),
-            ShapeKind::Circle => ("diameter", "Drag: draw · Drag ■: resize · Drag inside: move"),
-            ShapeKind::Square => ("side", "Drag: draw · Drag ■: resize and turn · Drag inside: move"),
+        let edit_hint = match self.subcloud.shape {
+            ShapeKind::Line => "Drag: draw · Drag A, B, ■ or the strip: edit",
+            ShapeKind::Circle | ShapeKind::Square => {
+                "Drag: draw · Drag ■: resize · Drag inside: move"
+            }
         };
+        let hint = format!(
+            "{edit_hint}\nDrag the round handle: turn (Shift: snap to 15°). It points \
+             forward."
+        );
         ui.horizontal(|ui| {
             ui.label("Step");
             ui.add(
@@ -700,13 +725,18 @@ impl SubcloudMode {
                     .suffix(" %"),
             )
             .on_hover_text(
-                "How far one Ctrl+scroll notch slides the subcloud, as a percentage \
-                 of its thickness. 100% steps to the next slice with no gap or overlap.",
+                "How far one Ctrl+scroll notch slides the subcloud, as a percentage of \
+                 its size that way: its width (or diameter, or side) forward and back, \
+                 and with Shift, its length (or diameter, or side) to the right and \
+                 left. 100% steps to the next slice with no gap or overlap.",
             );
-            // The thickness doesn't depend on which way the slide goes.
-            let (_, thickness) = self.subcloud.sweep_axis(glam::Vec2::X);
-            let step = thickness * self.sweep_step_percent / 100.0;
-            ui.weak(format!("of {thickness_name} ({step:.2} m)"));
+            let (depth, length) = self.subcloud.depth_and_length();
+            let percent = self.sweep_step_percent / 100.0;
+            ui.weak(format!(
+                "{:.2} m forward · {:.2} m sideways",
+                depth * percent,
+                length * percent
+            ));
         });
         ui.horizontal(|ui| {
             if self.subcloud.shape == ShapeKind::Line
@@ -717,7 +747,7 @@ impl SubcloudMode {
             {
                 let line = &mut self.subcloud.line;
                 (line.start, line.end) = (line.end, line.start);
-                self.needs_aim = true;
+                self.reframe = Some(Reframe::Aim);
             }
             if ui
                 .button("Reset view")
@@ -727,7 +757,7 @@ impl SubcloudMode {
                 )
                 .clicked()
             {
-                self.needs_aim = true;
+                self.reframe = Some(Reframe::Aim);
             }
             ui.checkbox(&mut self.profile.show, "Density profile")
                 .on_hover_text("Count the subcloud's points in each height band");
@@ -735,14 +765,8 @@ impl SubcloudMode {
         ui.weak(format!("{hint}\nRight-drag: pan · Scroll: zoom"));
         ui.add_space(4.0);
 
-        let (frame, change) = self.map.show(ui, &mut self.subcloud);
-        match change {
-            subcloud_map::Change::Turned => self.needs_aim = true,
-            // Follow the subcloud without losing the user's angle and zoom.
-            subcloud_map::Change::Moved(offset) => self.camera.target += offset.extend(0.0),
-            subcloud_map::Change::Resized | subcloud_map::Change::None => {}
-        }
-        frame
+        // The 3D view follows whatever this does to the shape, in `view`.
+        self.map.show(ui, &mut self.subcloud)
     }
 
     /// Exact sizes (and a square's rotation) for the current shape.
@@ -756,28 +780,39 @@ impl SubcloudMode {
                 .max_decimals(2)
                 .suffix(" m")
         }
-        ui.horizontal(|ui| match self.subcloud.shape {
-            ShapeKind::Line => {
-                ui.label("Width");
-                ui.add(size(&mut self.subcloud.line.width));
-                ui.label(format!("Length {:.1} m", self.subcloud.line.length()));
-            }
-            ShapeKind::Circle => {
-                ui.label("Radius");
-                ui.add(size(&mut self.subcloud.circle.radius));
-            }
-            ShapeKind::Square => {
-                let square = &mut self.subcloud.square;
-                ui.label("Radius");
-                ui.add(size(&mut square.radius))
-                    .on_hover_text("From the centre to the middle of each side");
-                ui.label("Rotation");
-                // Shown in degrees, stored in radians.
-                if ui.drag_angle(&mut square.rotation).changed() {
-                    self.needs_aim = true;
+        ui.horizontal(|ui| {
+            match self.subcloud.shape {
+                ShapeKind::Line => {
+                    ui.label("Width");
+                    ui.add(size(&mut self.subcloud.line.width));
+                }
+                ShapeKind::Circle => {
+                    ui.label("Radius");
+                    ui.add(size(&mut self.subcloud.circle.radius));
+                }
+                ShapeKind::Square => {
+                    ui.label("Side");
+                    ui.add(size(&mut self.subcloud.square.side));
                 }
             }
+            ui.label("Rotation");
+            // A copy, because a line stores its rotation in its ends. Shown
+            // in degrees, stored in radians, and kept in 0..360°.
+            let mut rotation = self.subcloud.rotation().rem_euclid(std::f32::consts::TAU);
+            if ui
+                .drag_angle(&mut rotation)
+                .on_hover_text(
+                    "Anticlockwise turn. At 0° the round handle (forward) points north, \
+                     and a line runs from A in the west to B in the east.",
+                )
+                .changed()
+            {
+                self.subcloud.set_rotation(rotation);
+            }
         });
+        if self.subcloud.shape == ShapeKind::Line {
+            ui.label(format!("Length {:.1} m", self.subcloud.line.length()));
+        }
     }
 
     /// The 3D view of just the subcloud, then the map, which needs this
@@ -786,22 +821,33 @@ impl SubcloudMode {
         let area = ViewArea::allocate(ui);
         let input = camera_controls(ui, &area.response, &mut self.camera);
         if input.reset {
-            self.needs_aim = true;
+            self.reframe = Some(Reframe::Aim);
         }
         if input.pinch_px != 0.0 {
-            self.sweep(ui, input.pinch_px);
+            self.sweep(ui, input.pinch_px, input.sideways);
         }
+
+        // Follow the shape wherever the map, the panel or a sweep moved it,
+        // keeping the camera's angle and zoom. The view presets and gizmo
+        // turn with the shape.
+        let centre = self.subcloud.centre();
+        self.camera.target += (centre - self.followed_centre).extend(0.0);
+        self.followed_centre = centre;
+        self.camera.axes = self.subcloud.axes();
+
         let footprint = self.subcloud.footprint();
-        if self.needs_aim {
+        if let Some(reframe) = self.reframe.take() {
             // A small plot is lost in the height of the whole cloud, so
             // frame just the height of the points loaded around it.
             let (min, max) = self.bounds;
             let session = &scene.session;
             let z_range = lod::z_range_under(&session.octree, &footprint, &session.height_ranges)
                 .unwrap_or((min.z, max.z));
-            self.subcloud
-                .aim(&mut self.camera, z_range, area.rect.aspect_ratio());
-            self.needs_aim = false;
+            let aspect = area.rect.aspect_ratio();
+            match reframe {
+                Reframe::Fit => self.subcloud.frame(&mut self.camera, z_range, aspect),
+                Reframe::Aim => self.subcloud.aim(&mut self.camera, z_range, aspect),
+            }
         }
         show_gizmo(ui, area.rect, &mut self.camera);
 
@@ -837,16 +883,22 @@ impl SubcloudMode {
         }
     }
 
-    /// Slides the subcloud for a Ctrl+scroll of `pinch_px`. Scrolling up
-    /// moves it away from the viewer, whichever side they're looking from.
-    fn sweep(&mut self, ui: &egui::Ui, pinch_px: f32) {
+    /// Slides the subcloud for a Ctrl+scroll of `pinch_px`: scrolling up
+    /// moves it forward (where its round handle points), and down back.
+    /// `sideways` (Shift held) slides it right instead, 90° clockwise from
+    /// forward, or left scrolling down. The camera doesn't matter.
+    fn sweep(&mut self, ui: &egui::Ui, pinch_px: f32, sideways: bool) {
         let px_per_notch = ui.ctx().options(|o| o.input_options.line_scroll_speed);
-        let (away, thickness) = self.subcloud.sweep_axis(self.camera.facing());
-        let step = thickness * self.sweep_step_percent / 100.0;
-        let offset = away * (pinch_px / px_per_notch * step);
-        self.subcloud.translate(offset);
-        // The camera moves with it, so the subcloud stays in the same place on screen.
-        self.camera.target += offset.extend(0.0);
+        let (depth, length) = self.subcloud.depth_and_length();
+        let (direction, size) = if sideways {
+            (self.subcloud.along(), length)
+        } else {
+            (self.subcloud.across(), depth)
+        };
+        let step = size * self.sweep_step_percent / 100.0;
+        // The camera follows in `view`, so the subcloud stays put on screen.
+        self.subcloud
+            .translate(direction * (pinch_px / px_per_notch * step));
     }
 }
 
@@ -976,6 +1028,9 @@ struct ViewInput {
     /// pixels that would make the same zoom. egui reports Ctrl+scroll as a
     /// zoom gesture rather than a scroll. Positive is scrolling up.
     pinch_px: f32,
+    /// Shift was held, as in Ctrl+Shift+scroll. egui still reports that
+    /// as the same zoom, just with Shift down.
+    sideways: bool,
 }
 
 /// Mouse and keyboard control of a 3D view's camera.
@@ -996,6 +1051,7 @@ fn camera_controls(
     let mut input = ViewInput {
         reset: response.double_clicked(),
         pinch_px: 0.0,
+        sideways: ui.input(|i| i.modifiers.shift),
     };
     if response.hovered() {
         let (scroll, zoom_delta) = ui.input(|i| (i.smooth_scroll_delta.y, i.zoom_delta()));

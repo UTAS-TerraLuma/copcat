@@ -1,6 +1,8 @@
 //! The top-down map in Subcloud mode. It shows the whole cloud with the
 //! subcloud's shape drawn over it, and is where the shape is drawn and edited.
 
+use std::f32::consts::{FRAC_PI_2, TAU};
+
 use eframe::egui::{self, Color32, CursorIcon, Pos2, Rect, Sense, Stroke};
 use glam::{Mat4, Vec2, Vec3};
 
@@ -22,6 +24,10 @@ const HANDLE_RADIUS: f32 = 7.0;
 /// measure from, so they can be grabbed even when the shape is smaller than
 /// a pixel.
 const MIN_HANDLE_OFFSET: f32 = 14.0;
+/// How far the square's rotate handle sticks out past its side, in logical pixels.
+const ROTATE_STEM: f32 = 22.0;
+/// With Shift held, rotating snaps to multiples of this.
+const ROTATE_SNAP: f32 = 15.0 * TAU / 360.0;
 /// Empty space around the cloud when the map is fitted to it.
 const FIT_MARGIN: f32 = 1.05;
 
@@ -43,8 +49,10 @@ enum Grab {
     End,
     /// A line's width handle: +1 on the side `Line::normal` points to, -1 opposite.
     Width { side: f32 },
-    /// A circle's or square's size handle. A square's also turns it.
-    Radius,
+    /// A circle's radius handle or a square's side handle.
+    Size,
+    /// The round handle that turns the shape and points forward.
+    Rotate,
     Body,
 }
 
@@ -54,22 +62,12 @@ enum Drag {
     Start,
     /// Also used while drawing a new line, which ends at the pointer.
     End,
+    /// Drawing a new circle or square, sized so its edge is at the pointer.
+    Draw,
     Width { side: f32, last: Vec2 },
-    /// Also used while drawing a new circle or square, sized to the pointer.
-    Radius,
+    Size { last: Vec2 },
+    Rotate,
     Move { last: Vec2 },
-}
-
-/// What the map did to the subcloud this frame.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub enum Change {
-    None,
-    /// The shape was redrawn or turned, so the 3D view should re-aim at it.
-    Turned,
-    /// The whole shape slid by this much, without turning.
-    Moved(Vec2),
-    /// The shape changed size, without moving or turning.
-    Resized,
 }
 
 /// Where the map was laid out this frame, for painting it once it's rendered.
@@ -99,7 +97,7 @@ impl SubcloudMap {
     }
 
     /// Lays out the map in the rest of `ui` and handles its input.
-    pub fn show(&mut self, ui: &mut egui::Ui, subcloud: &mut Subcloud) -> (MapFrame, Change) {
+    pub fn show(&mut self, ui: &mut egui::Ui, subcloud: &mut Subcloud) -> MapFrame {
         let (rect, response) =
             ui.allocate_exact_size(ui.available_size(), Sense::click_and_drag());
         if self.needs_fit || response.double_clicked() {
@@ -108,38 +106,36 @@ impl SubcloudMap {
         self.pan_and_zoom(ui, &response, rect);
 
         let projection = MapProjection::new(&self.camera, rect);
-        let change = self.edit(ui, &response, &projection, subcloud);
+        self.edit(ui, &response, &projection, subcloud);
 
         let hovered = match self.drag {
             // While dragging, keep showing what's being dragged.
             Some(Drag::Start) => Some(Grab::Start),
             Some(Drag::End) => Some(Grab::End),
             Some(Drag::Width { side, .. }) => Some(Grab::Width { side }),
-            Some(Drag::Radius) => Some(Grab::Radius),
+            Some(Drag::Draw | Drag::Size { .. }) => Some(Grab::Size),
+            Some(Drag::Rotate) => Some(Grab::Rotate),
             Some(Drag::Move { .. }) => Some(Grab::Body),
             None => response
                 .hover_pos()
                 .and_then(|pos| grab_at(&projection, subcloud, pos)),
         };
         response.on_hover_cursor(match hovered {
-            Some(Grab::Start | Grab::End) => CursorIcon::Grab,
+            Some(Grab::Start | Grab::End | Grab::Rotate) => CursorIcon::Grab,
             Some(Grab::Width { .. }) => CursorIcon::ResizeColumn,
-            // A square's handle turns it as well as sizing it.
-            Some(Grab::Radius) if subcloud.shape == ShapeKind::Square => CursorIcon::Grab,
-            Some(Grab::Radius) => CursorIcon::ResizeHorizontal,
+            Some(Grab::Size) => CursorIcon::ResizeHorizontal,
             Some(Grab::Body) => CursorIcon::Move,
             None => CursorIcon::Crosshair,
         });
 
         let pixels_per_point = ui.ctx().pixels_per_point();
-        let frame = MapFrame {
+        MapFrame {
             painter: ui.painter().with_clip_rect(rect),
             size_px: [rect.width(), rect.height()]
                 .map(|side| (side * pixels_per_point).round() as u32),
             projection,
             hovered,
-        };
-        (frame, change)
+        }
     }
 
     /// Zooms out to show the whole cloud in a map of `aspect` (width / height).
@@ -178,8 +174,7 @@ impl SubcloudMap {
         response: &egui::Response,
         projection: &MapProjection,
         subcloud: &mut Subcloud,
-    ) -> Change {
-        let mut change = Change::None;
+    ) {
         if response.drag_started_by(egui::PointerButton::Primary)
             && let Some(origin) = ui.input(|i| i.pointer.press_origin())
         {
@@ -190,12 +185,10 @@ impl SubcloudMap {
                 Some(Grab::Start) => Drag::Start,
                 Some(Grab::End) => Drag::End,
                 Some(Grab::Width { side }) => Drag::Width { side, last: at },
-                Some(Grab::Radius) => Drag::Radius,
+                Some(Grab::Size) => Drag::Size { last: at },
+                Some(Grab::Rotate) => Drag::Rotate,
                 Some(Grab::Body) => Drag::Move { last: at },
-                None => {
-                    change = Change::Turned;
-                    start_drawing(subcloud, at)
-                }
+                None => start_drawing(subcloud, at),
             });
         }
 
@@ -203,38 +196,36 @@ impl SubcloudMap {
             && let (Some(pointer), Some(drag)) = (response.interact_pointer_pos(), &mut self.drag)
         {
             let at = projection.to_world(pointer);
-            change = match drag {
-                Drag::Start => {
-                    subcloud.line.start = at;
-                    Change::Turned
-                }
-                Drag::End => {
-                    subcloud.line.end = at;
-                    Change::Turned
-                }
+            match drag {
+                Drag::Start => subcloud.line.start = at,
+                Drag::End => subcloud.line.end = at,
+                Drag::Draw => draw_to(subcloud, at),
+                // The handle drags below are relative, so grabbing a handle
+                // drawn away from a tiny shape doesn't jump it to the pointer.
                 Drag::Width { side, last } => {
-                    // Relative, so grabbing a handle drawn away from a thin
-                    // line doesn't jump the width to the pointer.
                     let line = &mut subcloud.line;
                     let outward = line.normal() * *side;
                     line.width =
                         (line.width + 2.0 * outward.dot(at - *last)).max(subcloud::MIN_SIZE);
                     *last = at;
-                    Change::Resized
                 }
-                Drag::Radius => resize_to(subcloud, at),
-                Drag::Move { last } => {
-                    let offset = at - *last;
-                    subcloud.translate(offset);
+                Drag::Size { last } => {
+                    resize_by(subcloud, at - *last);
                     *last = at;
-                    Change::Moved(offset)
                 }
-            };
+                Drag::Rotate => {
+                    let snap = ui.input(|i| i.modifiers.shift);
+                    rotate_to(subcloud, at, snap);
+                }
+                Drag::Move { last } => {
+                    subcloud.translate(at - *last);
+                    *last = at;
+                }
+            }
         }
         if response.drag_stopped() {
             self.drag = None;
         }
-        change
     }
 
     /// Paints the rendered map, then the shape on top.
@@ -246,7 +237,14 @@ impl SubcloudMap {
 
         let fill = SUBCLOUD_COLOR.gamma_multiply(0.25);
         let outline = Stroke::new(1.5, SUBCLOUD_COLOR);
+        let thin = Stroke::new(1.0, SUBCLOUD_COLOR);
         let highlight = |grab: Grab| frame.hovered == Some(grab);
+        // Under the other handles: for a line, the stem starts at a width handle.
+        let paint_rotate_handle = || {
+            let (stem_base, rotate) = rotate_handle(projection, subcloud);
+            painter.line_segment([stem_base, rotate], thin);
+            paint_round_handle(painter, rotate, highlight(Grab::Rotate));
+        };
         match subcloud.shape {
             ShapeKind::Line => {
                 let line = &subcloud.line;
@@ -254,18 +252,14 @@ impl SubcloudMap {
                 painter.add(egui::Shape::convex_polygon(corners.to_vec(), fill, outline));
                 let start = projection.to_screen(line.start);
                 let end = projection.to_screen(line.end);
-                painter.line_segment([start, end], Stroke::new(1.0, SUBCLOUD_COLOR));
+                painter.line_segment([start, end], thin);
+                paint_rotate_handle();
                 for side in [1.0, -1.0] {
                     let pos = width_handle(projection, subcloud, side);
                     paint_size_handle(painter, pos, highlight(Grab::Width { side }));
                 }
                 for (pos, label, grab) in [(start, "A", Grab::Start), (end, "B", Grab::End)] {
-                    let fill = if highlight(grab) {
-                        Color32::WHITE
-                    } else {
-                        SUBCLOUD_COLOR
-                    };
-                    painter.circle(pos, HANDLE_RADIUS, fill, Stroke::new(1.0, Color32::BLACK));
+                    paint_round_handle(painter, pos, highlight(grab));
                     painter.text(
                         pos,
                         egui::Align2::CENTER_CENTER,
@@ -282,19 +276,18 @@ impl SubcloudMap {
                     - centre.x;
                 painter.circle(centre, radius_px, fill, outline);
                 painter.circle_filled(centre, 2.0, SUBCLOUD_COLOR);
-                let handle = radius_handle(projection, subcloud);
-                paint_size_handle(painter, handle, highlight(Grab::Radius));
+                paint_rotate_handle();
+                let handle = size_handle(projection, subcloud);
+                paint_size_handle(painter, handle, highlight(Grab::Size));
             }
             ShapeKind::Square => {
                 let square = &subcloud.square;
                 let corners = square.corners().map(|corner| projection.to_screen(corner));
                 painter.add(egui::Shape::convex_polygon(corners.to_vec(), fill, outline));
-                // A spoke to the handle shows it turns the square too.
-                let centre = projection.to_screen(square.centre);
-                let handle = radius_handle(projection, subcloud);
-                painter.line_segment([centre, handle], Stroke::new(1.0, SUBCLOUD_COLOR));
-                painter.circle_filled(centre, 2.0, SUBCLOUD_COLOR);
-                paint_size_handle(painter, handle, highlight(Grab::Radius));
+                painter.circle_filled(projection.to_screen(square.centre), 2.0, SUBCLOUD_COLOR);
+                paint_rotate_handle();
+                let handle = size_handle(projection, subcloud);
+                paint_size_handle(painter, handle, highlight(Grab::Size));
             }
         }
     }
@@ -312,55 +305,92 @@ fn start_drawing(subcloud: &mut Subcloud, at: Vec2) -> Drag {
         ShapeKind::Circle => {
             subcloud.circle.centre = at;
             subcloud.circle.radius = subcloud::MIN_SIZE;
-            Drag::Radius
+            Drag::Draw
         }
         ShapeKind::Square => {
             subcloud.square.centre = at;
-            subcloud.square.radius = subcloud::MIN_SIZE;
-            Drag::Radius
+            subcloud.square.side = subcloud::MIN_SIZE;
+            Drag::Draw
         }
     }
 }
 
-/// Sizes a circle or square so its edge is at `at`. A square also turns to
-/// face it, so its handle stays under the pointer.
-fn resize_to(subcloud: &mut Subcloud, at: Vec2) -> Change {
+/// Sizes a new circle or square so its edge is at `at`. A square keeps its
+/// rotation.
+fn draw_to(subcloud: &mut Subcloud, at: Vec2) {
     match subcloud.shape {
-        // Lines have no radius handle.
-        ShapeKind::Line => Change::None,
+        // Drawing a line moves its end instead.
+        ShapeKind::Line => {}
         ShapeKind::Circle => {
             let circle = &mut subcloud.circle;
             circle.radius = circle.centre.distance(at).max(subcloud::MIN_SIZE);
-            Change::Resized
         }
         ShapeKind::Square => {
             let square = &mut subcloud.square;
-            let outward = at - square.centre;
-            square.radius = outward.length().max(subcloud::MIN_SIZE);
-            // Right on the centre the direction means nothing, so keep the last one.
-            if outward.length() > subcloud::MIN_SIZE {
-                // 0..360° reads better in the rotation field than -180..180°.
-                square.rotation = outward.to_angle().rem_euclid(std::f32::consts::TAU);
-            }
-            Change::Turned
+            square.side = square.side_through(at).max(subcloud::MIN_SIZE);
         }
     }
 }
 
-fn paint_size_handle(painter: &egui::Painter, pos: Pos2, highlighted: bool) {
-    let color = if highlighted {
-        Color32::WHITE
+/// Grows a circle or square as its size handle moves by `delta`.
+fn resize_by(subcloud: &mut Subcloud, delta: Vec2) {
+    match subcloud.shape {
+        // Lines have width handles instead.
+        ShapeKind::Line => {}
+        // The handle is on the right, 90° clockwise from the rotate handle.
+        ShapeKind::Circle => {
+            let outward = delta.dot(subcloud.along());
+            let circle = &mut subcloud.circle;
+            circle.radius = (circle.radius + outward).max(subcloud::MIN_SIZE);
+        }
+        // The handle is on the first side, and the opposite side moves too.
+        ShapeKind::Square => {
+            let square = &mut subcloud.square;
+            square.side = (square.side + 2.0 * delta.dot(square.along())).max(subcloud::MIN_SIZE);
+        }
+    }
+}
+
+/// Turns the shape so its rotate handle (on its `across` side) points at
+/// `at`, to the nearest [`ROTATE_SNAP`] if `snap`.
+fn rotate_to(subcloud: &mut Subcloud, at: Vec2, snap: bool) {
+    let outward = at - subcloud.centre();
+    // Right on the centre the direction means nothing, so keep the last one.
+    if outward.length() <= subcloud::MIN_SIZE {
+        return;
+    }
+    let rotation = outward.to_angle() - FRAC_PI_2;
+    let rotation = if snap {
+        (rotation / ROTATE_SNAP).round() * ROTATE_SNAP
     } else {
-        SUBCLOUD_COLOR
+        rotation
     };
+    // 0..360° reads better in the rotation field than -180..180°.
+    subcloud.set_rotation(rotation.rem_euclid(TAU));
+}
+
+fn paint_size_handle(painter: &egui::Painter, pos: Pos2, highlighted: bool) {
     let rect = Rect::from_center_size(pos, egui::vec2(8.0, 8.0));
-    painter.rect_filled(rect, 1.0, color);
+    painter.rect_filled(rect, 1.0, handle_color(highlighted));
     painter.rect_stroke(
         rect,
         1.0,
         Stroke::new(1.0, Color32::BLACK),
         egui::StrokeKind::Outside,
     );
+}
+
+fn paint_round_handle(painter: &egui::Painter, pos: Pos2, highlighted: bool) {
+    let stroke = Stroke::new(1.0, Color32::BLACK);
+    painter.circle(pos, HANDLE_RADIUS, handle_color(highlighted), stroke);
+}
+
+fn handle_color(highlighted: bool) -> Color32 {
+    if highlighted {
+        Color32::WHITE
+    } else {
+        SUBCLOUD_COLOR
+    }
 }
 
 /// Converts between map pixels and ground coordinates for one frame.
@@ -410,19 +440,26 @@ fn width_handle(projection: &MapProjection, subcloud: &Subcloud, side: f32) -> P
     projection.handle(line.midpoint(), line.normal() * side, line.width * 0.5)
 }
 
-/// Where a circle's or square's size handle is drawn: on the circle's east
-/// edge, or the middle of the square's first side.
-fn radius_handle(projection: &MapProjection, subcloud: &Subcloud) -> Pos2 {
-    match subcloud.shape {
-        ShapeKind::Square => {
-            let square = &subcloud.square;
-            projection.handle(square.centre, square.along(), square.radius)
-        }
-        _ => {
-            let circle = &subcloud.circle;
-            projection.handle(circle.centre, Vec2::X, circle.radius)
-        }
-    }
+/// Where a circle's or square's size handle is drawn: on its right-hand
+/// edge, 90° clockwise from the rotate handle.
+fn size_handle(projection: &MapProjection, subcloud: &Subcloud) -> Pos2 {
+    projection.handle(subcloud.centre(), subcloud.along(), reach(subcloud))
+}
+
+/// The rotate handle: a stem out from the shape's edge on its `across`
+/// (forward) side, as `(stem base, handle)`.
+fn rotate_handle(projection: &MapProjection, subcloud: &Subcloud) -> (Pos2, Pos2) {
+    let centre = subcloud.centre();
+    let base = projection.handle(centre, subcloud.across(), reach(subcloud));
+    let outward = (base - projection.to_screen(centre)).normalized();
+    (base, base + outward * ROTATE_STEM)
+}
+
+/// How far the shape reaches from its centre to its edge, both forward and
+/// to the side for circles and squares, and forward for lines.
+fn reach(subcloud: &Subcloud) -> f32 {
+    let (depth, _) = subcloud.depth_and_length();
+    depth * 0.5
 }
 
 /// What's under the pointer at `pos`, with handles winning over the body.
@@ -441,6 +478,9 @@ fn grab_at(projection: &MapProjection, subcloud: &Subcloud, pos: Pos2) -> Option
                     Grab::End
                 });
             }
+            if near(rotate_handle(projection, subcloud).1) {
+                return Some(Grab::Rotate);
+            }
             for side in [1.0, -1.0] {
                 if near(width_handle(projection, subcloud, side)) {
                     return Some(Grab::Width { side });
@@ -450,15 +490,15 @@ fn grab_at(projection: &MapProjection, subcloud: &Subcloud, pos: Pos2) -> Option
             (on_line || inside).then_some(Grab::Body)
         }
         ShapeKind::Circle | ShapeKind::Square => {
-            if near(radius_handle(projection, subcloud)) {
-                return Some(Grab::Radius);
+            if near(size_handle(projection, subcloud)) {
+                return Some(Grab::Size);
             }
-            let centre = match subcloud.shape {
-                ShapeKind::Square => subcloud.square.centre,
-                _ => subcloud.circle.centre,
-            };
+            if near(rotate_handle(projection, subcloud).1) {
+                return Some(Grab::Rotate);
+            }
             // The centre stays grabbable when the shape is tiny on screen.
-            (inside || near(projection.to_screen(centre))).then_some(Grab::Body)
+            let centre = projection.to_screen(subcloud.centre());
+            (inside || near(centre)).then_some(Grab::Body)
         }
     }
 }
@@ -493,6 +533,7 @@ mod tests {
             width: 2.0,
         };
         subcloud.circle.radius = 20.0;
+        subcloud.square.side = 80.0;
         subcloud
     }
 
@@ -542,12 +583,12 @@ mod tests {
     }
 
     #[test]
-    fn grab_at_should_find_the_circle_radius_handle_on_its_east_edge() {
+    fn grab_at_should_find_the_circle_size_handle_on_its_east_edge() {
         let projection = projection();
         let east_edge = projection.to_screen(Vec2::new(20.0, 0.0));
         assert_eq!(
             grab_at(&projection, &subcloud(ShapeKind::Circle), east_edge),
-            Some(Grab::Radius)
+            Some(Grab::Size)
         );
     }
 
@@ -562,10 +603,48 @@ mod tests {
     }
 
     #[test]
-    fn resize_to_should_turn_a_square_to_face_the_pointer() {
+    fn grab_at_should_find_the_square_rotate_handle_beyond_its_north_side() {
+        let projection = projection();
+        let square = subcloud(ShapeKind::Square);
+        // Unturned, `across` is north: the side is 40 m (20 px) up, and the
+        // handle a stem further.
+        let handle = projection.to_screen(Vec2::ZERO) - egui::vec2(0.0, 20.0 + ROTATE_STEM);
+        assert_eq!(grab_at(&projection, &square, handle), Some(Grab::Rotate));
+    }
+
+    #[test]
+    fn resize_by_should_grow_a_square_without_turning_it() {
         let mut square = subcloud(ShapeKind::Square);
-        resize_to(&mut square, Vec2::new(0.0, 5.0));
-        let turned = (square.square.radius, square.square.rotation);
-        assert_eq!(turned, (5.0, std::f32::consts::FRAC_PI_2));
+        resize_by(&mut square, Vec2::new(5.0, 3.0));
+        assert_eq!((square.square.side, square.square.rotation), (90.0, 0.0));
+    }
+
+    #[test]
+    fn grab_at_should_find_the_line_rotate_handle_on_the_a_left_side() {
+        let projection = projection();
+        let line = subcloud(ShapeKind::Line);
+        // A thin eastward line: the stem starts at the minimum offset north.
+        let handle =
+            projection.to_screen(Vec2::ZERO) - egui::vec2(0.0, MIN_HANDLE_OFFSET + ROTATE_STEM);
+        assert_eq!(grab_at(&projection, &line, handle), Some(Grab::Rotate));
+    }
+
+    #[test]
+    fn rotate_to_should_point_the_rotate_handle_at_the_pointer() {
+        let mut square = subcloud(ShapeKind::Square);
+        // The handle starts north; pointing it west is a quarter turn.
+        rotate_to(&mut square, Vec2::new(-10.0, 0.0), false);
+        let rotation = square.square.rotation;
+        assert!((rotation - FRAC_PI_2).abs() < 1e-6, "{rotation}");
+    }
+
+    #[test]
+    fn rotate_to_should_snap_with_shift() {
+        let mut circle = subcloud(ShapeKind::Circle);
+        // 50° from north-ish: snaps to the nearest 15°.
+        let at = Vec2::from_angle(FRAC_PI_2 + 50_f32.to_radians());
+        rotate_to(&mut circle, at, true);
+        let degrees = circle.circle.rotation.to_degrees();
+        assert!((degrees - 45.0).abs() < 1e-3, "{degrees}");
     }
 }
