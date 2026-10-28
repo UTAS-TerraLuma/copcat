@@ -48,7 +48,9 @@ enum Grab {
     Start,
     End,
     /// A line's width handle: +1 on the side `Line::normal` points to, -1 opposite.
-    Width { side: f32 },
+    Width {
+        side: f32,
+    },
     /// A circle's radius handle or a square's side handle.
     Size,
     /// The round handle that turns the shape and points forward.
@@ -64,10 +66,17 @@ enum Drag {
     End,
     /// Drawing a new circle or square, sized so its edge is at the pointer.
     Draw,
-    Width { side: f32, last: Vec2 },
-    Size { last: Vec2 },
+    Width {
+        side: f32,
+        last: Vec2,
+    },
+    Size {
+        last: Vec2,
+    },
     Rotate,
-    Move { last: Vec2 },
+    Move {
+        last: Vec2,
+    },
 }
 
 /// Where the map was laid out this frame, for painting it once it's rendered.
@@ -98,8 +107,7 @@ impl SubcloudMap {
 
     /// Lays out the map in the rest of `ui` and handles its input.
     pub fn show(&mut self, ui: &mut egui::Ui, subcloud: &mut Subcloud) -> MapFrame {
-        let (rect, response) =
-            ui.allocate_exact_size(ui.available_size(), Sense::click_and_drag());
+        let (rect, response) = ui.allocate_exact_size(ui.available_size(), Sense::click_and_drag());
         if self.needs_fit || response.double_clicked() {
             self.fit(rect.aspect_ratio());
         }
@@ -272,7 +280,9 @@ impl SubcloudMap {
             ShapeKind::Circle => {
                 let circle = &subcloud.circle;
                 let centre = projection.to_screen(circle.centre);
-                let radius_px = projection.to_screen(circle.centre + Vec2::X * circle.radius).x
+                let radius_px = projection
+                    .to_screen(circle.centre + Vec2::X * circle.radius)
+                    .x
                     - centre.x;
                 painter.circle(centre, radius_px, fill, outline);
                 painter.circle_filled(centre, 2.0, SUBCLOUD_COLOR);
@@ -516,8 +526,10 @@ mod tests {
 
     /// A 200 × 100 px map showing 400 × 200 m around the origin.
     fn projection() -> MapProjection {
-        let mut map =
-            SubcloudMap::new((Vec3::new(-200.0, -100.0, 0.0), Vec3::new(200.0, 100.0, 10.0)));
+        let mut map = SubcloudMap::new((
+            Vec3::new(-200.0, -100.0, 0.0),
+            Vec3::new(200.0, 100.0, 10.0),
+        ));
         map.fit(2.0);
         map.camera.set_half_height(100.0);
         let rect = Rect::from_min_size(Pos2::ZERO, egui::vec2(200.0, 100.0));

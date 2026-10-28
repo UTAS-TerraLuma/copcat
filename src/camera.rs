@@ -219,7 +219,6 @@ impl OrbitCamera {
         self.target + self.backward() * self.distance
     }
 
-
     /// Unit vector from the target towards the eye.
     fn backward(&self) -> Vec3 {
         let (sin_yaw, cos_yaw) = self.yaw.sin_cos();
@@ -436,7 +435,9 @@ mod tests {
         // The eye is on the right of the line (-Y in transect axes)...
         assert_close(camera.eye(), -along.perp().extend(0.0) * camera.distance);
         // ...so the transect runs left to right across the screen.
-        let ahead = camera.view_projection(1.0).project_point3(along.extend(0.0));
+        let ahead = camera
+            .view_projection(1.0)
+            .project_point3(along.extend(0.0));
         assert!(ahead.x > 0.0 && ahead.y.abs() < 1e-4, "{ahead}");
     }
 

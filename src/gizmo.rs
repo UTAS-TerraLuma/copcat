@@ -183,7 +183,11 @@ mod tests {
         let handles = place_handles(gizmo_rect(), &camera);
         let x = handles.iter().find(|p| p.handle.axis == Vec3::X).unwrap();
         let centre = gizmo_rect().center();
-        assert!(x.pos.x > centre.x + 1.0 && (x.pos.y - centre.y).abs() < 1e-3, "{:?}", x.pos);
+        assert!(
+            x.pos.x > centre.x + 1.0 && (x.pos.y - centre.y).abs() < 1e-3,
+            "{:?}",
+            x.pos
+        );
     }
 
     #[test]

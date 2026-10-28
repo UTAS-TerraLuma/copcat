@@ -166,8 +166,9 @@ pub struct Selection {
 /// a depth-first walk happens to reach first.
 pub fn select_nodes(octree: &Octree, view: &View, settings: &LodSettings) -> Selection {
     let mut selection = Selection::default();
-    let mut queue: BinaryHeap<Candidate> =
-        Candidate::new(octree, view, VoxelKey::ROOT).into_iter().collect();
+    let mut queue: BinaryHeap<Candidate> = Candidate::new(octree, view, VoxelKey::ROOT)
+        .into_iter()
+        .collect();
 
     while let Some(candidate) = queue.pop() {
         let count = octree.point_count(&candidate.key).map_or(0, u64::from);
@@ -249,7 +250,12 @@ pub fn z_range_under(
     while let Some((key, children_done)) = stack.pop() {
         if !children_done {
             stack.push((key, true));
-            stack.extend(key.children().into_iter().filter(&touches).map(|c| (c, false)));
+            stack.extend(
+                key.children()
+                    .into_iter()
+                    .filter(&touches)
+                    .map(|c| (c, false)),
+            );
             continue;
         }
         let from_children = key
@@ -383,7 +389,11 @@ mod tests {
     #[test]
     fn select_nodes_should_pick_only_root_when_far_away() {
         let octree = full_octree(3, 1000);
-        let selection = select(&octree, &camera(Vec3::ZERO, 100_000.0), &LodSettings::default());
+        let selection = select(
+            &octree,
+            &camera(Vec3::ZERO, 100_000.0),
+            &LodSettings::default(),
+        );
         assert_eq!(selection.keys, vec![VoxelKey::ROOT]);
     }
 
@@ -436,7 +446,11 @@ mod tests {
     #[test]
     fn select_nodes_should_list_parents_before_children() {
         let octree = full_octree(3, 1000);
-        let selection = select(&octree, &camera(Vec3::splat(50.0), 20.0), &LodSettings::default());
+        let selection = select(
+            &octree,
+            &camera(Vec3::splat(50.0), 20.0),
+            &LodSettings::default(),
+        );
         let position = |key: &VoxelKey| selection.keys.iter().position(|k| k == key);
         let out_of_order: Vec<_> = selection
             .keys
@@ -496,7 +510,10 @@ mod tests {
                 min.y > 61.0 || max.y < 59.0
             })
             .collect();
-        assert!(!selection.keys.is_empty() && outside.is_empty(), "{outside:?}");
+        assert!(
+            !selection.keys.is_empty() && outside.is_empty(),
+            "{outside:?}"
+        );
     }
 
     #[test]
@@ -563,7 +580,10 @@ mod tests {
     #[test]
     fn node_bounds_should_clip_cube_to_data_bounds() {
         // A flat site: 2 m of data inside a 200 m cube.
-        let flat = (Vec3::new(-100.0, -100.0, -1.0), Vec3::new(100.0, 100.0, 1.0));
+        let flat = (
+            Vec3::new(-100.0, -100.0, -1.0),
+            Vec3::new(100.0, 100.0, 1.0),
+        );
         let octree = Octree::new(HALFSIZE, 10.0, flat, HashMap::new());
         let (min, max) = octree.node_bounds(&VoxelKey::ROOT);
         assert_eq!((min.z, max.z), (-1.0, 1.0));

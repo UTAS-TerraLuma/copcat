@@ -135,10 +135,16 @@ enum ColorMode {
 enum LoadState {
     Idle,
     /// The loader thread is reading the header and hierarchy.
-    Opening { source: String, loader: Loader },
+    Opening {
+        source: String,
+        loader: Loader,
+    },
     /// Boxed because a session is much bigger than the other variants.
     Open(Box<Session>),
-    Failed { source: String, error: String },
+    Failed {
+        source: String,
+        error: String,
+    },
 }
 
 /// An open cloud: the loader thread plus what the UI knows about each node.
@@ -372,7 +378,8 @@ impl Session {
         }
 
         // The 3D view's nodes go first, so the profile and map never delay them.
-        let not_loaded = |key: &&VoxelKey| !renderer.has_node(key) && !self.failed.contains_key(key);
+        let not_loaded =
+            |key: &&VoxelKey| !renderer.has_node(key) && !self.failed.contains_key(key);
         // `insert` returns false for a key already seen, which drops duplicates.
         let mut seen = HashSet::new();
         let wanted: Vec<VoxelKey> = self
@@ -380,7 +387,11 @@ impl Session {
             .keys
             .iter()
             .filter(&not_loaded)
-            .chain(self.profile.missing().filter(|key| !self.failed.contains_key(key)))
+            .chain(
+                self.profile
+                    .missing()
+                    .filter(|key| !self.failed.contains_key(key)),
+            )
             .chain(self.map_selection.keys.iter().filter(&not_loaded))
             .filter(|key| seen.insert(**key))
             .copied()
@@ -489,40 +500,41 @@ impl eframe::App for ViewerApp {
             LoadState::Open(_) => egui::Frame::NONE,
             _ => egui::Frame::central_panel(ui.style()),
         };
-        let central = egui::CentralPanel::default()
-            .frame(frame)
-            .show(ui, |ui| match &mut self.state {
-                LoadState::Idle => {
-                    ui.label("Paste a COPC URL or file path above and press Load.");
-                }
-                LoadState::Opening { source, .. } => {
-                    ui.horizontal(|ui| {
-                        ui.spinner();
-                        ui.label(format!("Loading {source}"));
-                    });
-                }
-                LoadState::Open(session) => {
-                    let mut scene = Scene {
-                        renderer: &mut self.renderer,
-                        viewports: &mut self.viewports,
-                        session,
-                        settings: &self.settings,
-                    };
-                    match (self.mode, &mut self.subcloud) {
-                        (Mode::Subcloud, Some(subcloud_mode)) => {
-                            subcloud_mode.view(ui, &mut scene, map_frame);
-                        }
-                        _ => explore_view(ui, &mut scene, &mut self.camera),
+        let central =
+            egui::CentralPanel::default()
+                .frame(frame)
+                .show(ui, |ui| match &mut self.state {
+                    LoadState::Idle => {
+                        ui.label("Paste a COPC URL or file path above and press Load.");
                     }
-                }
-                LoadState::Failed { source, error } => {
-                    ui.colored_label(
-                        ui.visuals().error_fg_color,
-                        format!("Failed to load {source}"),
-                    );
-                    ui.label(error.as_str());
-                }
-            });
+                    LoadState::Opening { source, .. } => {
+                        ui.horizontal(|ui| {
+                            ui.spinner();
+                            ui.label(format!("Loading {source}"));
+                        });
+                    }
+                    LoadState::Open(session) => {
+                        let mut scene = Scene {
+                            renderer: &mut self.renderer,
+                            viewports: &mut self.viewports,
+                            session,
+                            settings: &self.settings,
+                        };
+                        match (self.mode, &mut self.subcloud) {
+                            (Mode::Subcloud, Some(subcloud_mode)) => {
+                                subcloud_mode.view(ui, &mut scene, map_frame);
+                            }
+                            _ => explore_view(ui, &mut scene, &mut self.camera),
+                        }
+                    }
+                    LoadState::Failed { source, error } => {
+                        ui.colored_label(
+                            ui.visuals().error_fg_color,
+                            format!("Failed to load {source}"),
+                        );
+                        ui.label(error.as_str());
+                    }
+                });
 
         // Floats over the 3D view rather than taking a side panel, so long
         // sources can't squeeze the viewport. Shown after the central panel so
@@ -580,7 +592,9 @@ impl eframe::App for ViewerApp {
                 .default_pos(central.response.rect.right_bottom() - egui::vec2(8.0, 8.0))
                 .default_size([320.0, 420.0])
                 .resizable(true)
-                .show(ui.ctx(), |ui| profile_ui(ui, session, &mut subcloud_mode.profile));
+                .show(ui.ctx(), |ui| {
+                    profile_ui(ui, session, &mut subcloud_mode.profile)
+                });
             subcloud_mode.profile.show = open;
         }
     }
@@ -1325,7 +1339,10 @@ mod tests {
 
     #[test]
     fn uses_16_bit_color_should_be_true_above_255() {
-        assert!(uses_16_bit_color(&[[0, 0, 0, u16::MAX], [256, 0, 0, u16::MAX]]));
+        assert!(uses_16_bit_color(&[
+            [0, 0, 0, u16::MAX],
+            [256, 0, 0, u16::MAX]
+        ]));
     }
 
     #[test]
