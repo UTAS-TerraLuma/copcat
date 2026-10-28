@@ -1,3 +1,6 @@
+//! Copcat, a COPC point cloud viewer, as a library shared by the `copcat-viewer`
+//! window and the `copcat` command line.
+
 mod app;
 mod camera;
 mod cloud;
@@ -14,18 +17,18 @@ mod windows_dpi;
 
 use eframe::egui;
 
-fn main() -> eframe::Result {
-    // `cargo run -- <url-or-path>` loads a cloud on startup.
-    let initial_source = std::env::args().nth(1);
+/// Opens the viewer window and blocks until it's closed. `initial_source` is a
+/// COPC URL or file path to load on startup.
+pub fn run_viewer(initial_source: Option<String>) -> eframe::Result {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_title("LiDAR Viewer")
+            .with_title("Copcat")
             .with_inner_size([1280.0, 800.0]),
         ..Default::default()
     };
 
     eframe::run_native(
-        "LiDAR Viewer",
+        "Copcat",
         options,
         Box::new(|cc| Ok(Box::new(app::ViewerApp::new(cc, initial_source)?))),
     )
