@@ -17,7 +17,10 @@ struct EdlUniforms {
 };
 
 @group(0) @binding(0) var<uniform> e: EdlUniforms;
-@group(0) @binding(1) var depth_texture: texture_depth_2d;
+// Bound as a plain float texture rather than `texture_depth_2d`: naga can't
+// translate `textureLoad` from a depth texture to GLSL, so the GL backend
+// (e.g. under WSL) failed to build this pipeline.
+@group(0) @binding(1) var depth_texture: texture_2d<f32>;
 
 const NEIGHBOURS: i32 = 8;
 // A background pixel counts each neighbouring point as this much nearer (in
@@ -50,7 +53,7 @@ fn log_depth(ndc_depth: f32) -> f32 {
 fn fs_main(@builtin(position) frag_coord: vec4<f32>) -> @location(0) vec4<f32> {
     let size = vec2<i32>(textureDimensions(depth_texture));
     let pixel = vec2<i32>(frag_coord.xy);
-    let depth = textureLoad(depth_texture, pixel, 0);
+    let depth = textureLoad(depth_texture, pixel, 0).r;
     let is_background = depth >= 1.0;
     let centre = log_depth(depth);
 
@@ -59,7 +62,7 @@ fn fs_main(@builtin(position) frag_coord: vec4<f32>) -> @location(0) vec4<f32> {
         let angle = f32(i) * 6.2831853 / f32(NEIGHBOURS);
         let offset = vec2<i32>(round(vec2(cos(angle), sin(angle)) * e.radius_px));
         let neighbour = clamp(pixel + offset, vec2(0), size - 1);
-        let neighbour_depth = textureLoad(depth_texture, neighbour, 0);
+        let neighbour_depth = textureLoad(depth_texture, neighbour, 0).r;
         // Background neighbours add nothing. Where points are sparse (a coarse
         // node, or close to the camera) most neighbours are gaps between
         // points, and counting those as edges turned whole regions black.
