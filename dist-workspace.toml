@@ -20,8 +20,8 @@ install-updater = false
 # Link the C runtime statically on Windows, so users don't need VCRUNTIME140.dll
 # (this is dist's default; it's set here to make it explicit)
 msvc-crt-static = true
-# Which actions to run on pull requests
-pr-run-mode = "plan"
+# Don't run anything on pull requests; releases only build on version tags
+pr-run-mode = "skip"
 
 [dist.github-custom-runners]
 # Build Linux on the older Ubuntu: an older glibc runs on more distros

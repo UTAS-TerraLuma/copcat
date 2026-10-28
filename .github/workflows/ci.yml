@@ -1,9 +1,12 @@
 name: CI
 
+# Only on version tags (alongside the release build) or when run by hand from
+# the Actions tab, to keep Actions usage down.
 on:
   push:
-    branches: [main]
-  pull_request:
+    tags:
+      - '**[0-9]+.[0-9]+.[0-9]+*'
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
