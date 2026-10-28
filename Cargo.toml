@@ -2,6 +2,8 @@
 name = "copcat"
 version = "0.1.0"
 edition = "2024"
+description = "A viewer for COPC LiDAR point clouds, local or streamed over HTTP"
+repository = "https://github.com/UTAS-TerraLuma/copcat"
 default-run = "copcat-viewer"
 
 [dependencies]
@@ -26,3 +28,8 @@ windows-sys = { version = "0.61", features = [
 
 [profile.dev.package."*"]
 opt-level = 2
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"
