@@ -84,7 +84,10 @@ pub enum Footprint {
     /// Inside all four vertical planes, each `(normal, d)` with points inside
     /// where `normal·p + d >= 0`.
     Planes([Vec4; 4]),
-    Circle { centre: Vec2, radius: f32 },
+    Circle {
+        centre: Vec2,
+        radius: f32,
+    },
 }
 
 impl Footprint {
@@ -201,7 +204,10 @@ impl Square {
     /// turning it: twice its furthest distance along either axis.
     pub fn side_through(&self, point: Vec2) -> f32 {
         let offset = point - self.centre;
-        2.0 * offset.dot(self.along()).abs().max(offset.dot(self.across()).abs())
+        2.0 * offset
+            .dot(self.along())
+            .abs()
+            .max(offset.dot(self.across()).abs())
     }
 }
 
@@ -473,7 +479,11 @@ mod tests {
     fn across_should_turn_with_a_circle() {
         let mut circle = subcloud(ShapeKind::Circle);
         circle.circle.rotation = std::f32::consts::FRAC_PI_2;
-        assert!(circle.across().abs_diff_eq(Vec2::NEG_X, 1e-6), "{}", circle.across());
+        assert!(
+            circle.across().abs_diff_eq(Vec2::NEG_X, 1e-6),
+            "{}",
+            circle.across()
+        );
     }
 
     #[test]

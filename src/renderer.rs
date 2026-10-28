@@ -610,18 +610,23 @@ impl PointRenderer {
         if self.lines.as_ref().is_none_or(|l| l.capacity < lines.len()) {
             // Doubling avoids reallocating every frame while the count creeps up.
             let capacity = lines.len().next_power_of_two();
-            let buffer = self.render_state.device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("debug_lines"),
-                size: (capacity * size_of::<LineVertex>()) as u64,
-                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            });
+            let buffer = self
+                .render_state
+                .device
+                .create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("debug_lines"),
+                    size: (capacity * size_of::<LineVertex>()) as u64,
+                    usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                });
             self.lines = Some(LineBuffer { buffer, capacity });
         }
         if let Some(line_buffer) = &self.lines {
-            self.render_state
-                .queue
-                .write_buffer(&line_buffer.buffer, 0, bytemuck::cast_slice(lines));
+            self.render_state.queue.write_buffer(
+                &line_buffer.buffer,
+                0,
+                bytemuck::cast_slice(lines),
+            );
         }
     }
 
@@ -689,7 +694,9 @@ impl PointRenderer {
                 );
                 id
             }
-            None => egui_renderer.register_native_texture(device, &color, wgpu::FilterMode::Nearest),
+            None => {
+                egui_renderer.register_native_texture(device, &color, wgpu::FilterMode::Nearest)
+            }
         };
 
         RenderTarget {
@@ -726,7 +733,10 @@ fn create_uniform_buffer(device: &wgpu::Device, label: &str, size: usize) -> wgp
     })
 }
 
-fn uniform_layout_entry(binding: u32, visibility: wgpu::ShaderStages) -> wgpu::BindGroupLayoutEntry {
+fn uniform_layout_entry(
+    binding: u32,
+    visibility: wgpu::ShaderStages,
+) -> wgpu::BindGroupLayoutEntry {
     wgpu::BindGroupLayoutEntry {
         binding,
         visibility,

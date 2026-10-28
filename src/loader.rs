@@ -47,7 +47,10 @@ pub enum Event {
     Opened(Box<OpenedCloud>),
     /// These nodes are being downloaded now.
     Fetching(Vec<VoxelKey>),
-    Node { key: VoxelKey, result: NodeResult },
+    Node {
+        key: VoxelKey,
+        result: NodeResult,
+    },
     /// The file couldn't be opened. The worker has stopped.
     Failed(LoadError),
 }
@@ -277,7 +280,12 @@ fn download<S: ByteSource>(
 ) -> Result<(Vec<HierarchyEntry>, Vec<Vec<u8>>), CopcError> {
     let entries = keys
         .iter()
-        .map(|key| reader.get(key).cloned().ok_or(CopcError::NodeNotFound(*key)))
+        .map(|key| {
+            reader
+                .get(key)
+                .cloned()
+                .ok_or(CopcError::NodeNotFound(*key))
+        })
         .collect::<Result<Vec<_>, _>>()?;
     let ranges: Vec<_> = entries
         .iter()
@@ -389,7 +397,8 @@ mod tests {
     #[test]
     #[ignore]
     fn loader_should_read_autzen_root_over_https() {
-        let positions = fetch_root("https://s3.amazonaws.com/hobu-lidar/autzen-classified.copc.laz").positions;
+        let positions =
+            fetch_root("https://s3.amazonaws.com/hobu-lidar/autzen-classified.copc.laz").positions;
         assert_eq!(positions.len(), 61_201);
     }
 

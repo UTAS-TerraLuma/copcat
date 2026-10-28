@@ -386,7 +386,10 @@ mod tests {
     fn histogram_should_only_count_points_inside_the_footprint() {
         let mut profile = ProfilePoints::default();
         profile.set_request(&octree(), Some(circle()));
-        profile.receive(VoxelKey::ROOT, vec![[0.0, 0.0, 1.0], [0.5, 0.0, 2.0], [5.0, 0.0, 3.0]]);
+        profile.receive(
+            VoxelKey::ROOT,
+            vec![[0.0, 0.0, 1.0], [0.5, 0.0, 2.0], [5.0, 0.0, 3.0]],
+        );
         // The next frame, with the request holding still.
         profile.set_request(&octree(), Some(circle()));
         assert_eq!(profile.histogram(1.0).map(|h| h.total), Some(2));
