@@ -4,30 +4,7 @@ Releases are built by [dist](https://github.com/axodotdev/cargo-dist) on GitHub 
 Each release has prebuilt Windows x64 and Linux x64 binaries plus one-line installers,
 so users don't need Rust. The dist settings are in `dist-workspace.toml`.
 
-## Installing
-
-Linux:
-
-```sh
-curl --proto '=https' --tlsv1.2 -LsSf https://github.com/UTAS-TerraLuma/copcat/releases/latest/download/copcat-installer.sh | sh
-```
-
-Windows (PowerShell):
-
-```powershell
-powershell -ExecutionPolicy Bypass -c "irm https://github.com/UTAS-TerraLuma/copcat/releases/latest/download/copcat-installer.ps1 | iex"
-```
-
-Both install `copcat` and `copcat-viewer` into the same folder, `~/.local/bin`
-(`%USERPROFILE%\.local\bin` on Windows), or `$XDG_BIN_HOME` if it's set, and add that
-folder to `PATH`. Open a new terminal afterwards.
-
-To update, run `copcat-update` (`copcat-update.exe` on Windows), which the installer
-puts next to the other two. Running the installer again also installs the latest
-release over the old one.
-
-The Windows binaries aren't code signed, so the first time `copcat-viewer.exe` runs,
-SmartScreen may show "Windows protected your PC". Click "More info", then "Run anyway".
+Install and update instructions for users are in the [README](../README.md#install).
 
 ## Cutting a release
 
