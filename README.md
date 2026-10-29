@@ -28,7 +28,7 @@ SmartScreen may show "Windows protected your PC". Click "More info", then "Run a
 ## Update
 
 ```sh
-copcat-update
+copcat update
 ```
 
 Running the installer again also installs the latest release over the old one.
@@ -79,7 +79,7 @@ copcat() {
 Windows reads files in WSL more slowly than files on its own drives. If large clouds
 load slowly, move them under `/mnt/c/` (the Windows `C:` drive).
 
-To update from WSL, run `copcat-update.exe`.
+To update from WSL, run `copcat.exe update` (or `copcat update` with the function above).
 
 ## Building from source
 
