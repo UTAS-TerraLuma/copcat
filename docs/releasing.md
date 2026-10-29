@@ -20,8 +20,11 @@ powershell -ExecutionPolicy Bypass -c "irm https://github.com/UTAS-TerraLuma/cop
 
 Both install `copcat` and `copcat-viewer` into the same folder, `~/.local/bin`
 (`%USERPROFILE%\.local\bin` on Windows), or `$XDG_BIN_HOME` if it's set, and add that
-folder to `PATH`. Open a new terminal afterwards. Running the installer again installs
-the latest release over the old one.
+folder to `PATH`. Open a new terminal afterwards.
+
+To update, run `copcat-update` (`copcat-update.exe` on Windows), which the installer
+puts next to the other two. Running the installer again also installs the latest
+release over the old one.
 
 The Windows binaries aren't code signed, so the first time `copcat-viewer.exe` runs,
 SmartScreen may show "Windows protected your PC". Click "More info", then "Run anyway".

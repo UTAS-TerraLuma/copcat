@@ -16,7 +16,7 @@ targets = ["x86_64-unknown-linux-gnu", "x86_64-pc-windows-msvc"]
 # %USERPROFILE%\.local\bin). Both binaries go into the same folder.
 install-path = ["$XDG_BIN_HOME/", "~/.local/bin"]
 # Whether to install an updater program
-install-updater = false
+install-updater = true
 # Link the C runtime statically on Windows, so users don't need VCRUNTIME140.dll
 # (this is dist's default; it's set here to make it explicit)
 msvc-crt-static = true
