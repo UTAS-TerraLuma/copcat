@@ -1,4 +1,4 @@
-![Copcat: terminal & gui COPC viewer](docs/images/copcat-header.jpg)
+![Copcat: terminal & gui COPC viewer](docs/images/copcat-header.png)
 
 # Copcat
 
