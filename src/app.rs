@@ -1,12 +1,16 @@
 use std::collections::{HashMap, HashSet};
 use std::mem;
+use std::path::PathBuf;
 use std::sync::mpsc::TryRecvError;
+use std::thread::{self, JoinHandle};
+use std::time::Duration;
 
 use copc_streaming::VoxelKey;
 use eframe::egui;
 
 use crate::camera::{OrbitCamera, Projection, ViewPreset};
 use crate::cloud::CloudInfo;
+use crate::export::{self, CameraArgs, ColorArg, RenderArgs, StyleArgs};
 use crate::gizmo;
 use crate::loader::{Event, Loader, OpenedCloud};
 use crate::lod::{self, LodSettings, Octree, Selection};
@@ -50,6 +54,51 @@ pub struct ViewerApp {
     /// Kept while in Explore mode, so switching back returns to the same
     /// subcloud. Created the first time Subcloud mode is shown for a cloud.
     subcloud: Option<SubcloudMode>,
+    export: ImageExport,
+}
+
+/// The Save image section's settings, and the image being saved.
+struct ImageExport {
+    /// Keep `size` the same as the 3D view's. Otherwise the view shows a
+    /// frame around what will be in the image.
+    match_view: bool,
+    /// Width and height in pixels.
+    size: [u32; 2],
+    /// Waiting for the nodes it needs to load.
+    job: Option<ExportJob>,
+    /// Writing the PNG, which can take a few seconds for a big image, off the
+    /// UI thread. Gives the path written.
+    writing: Option<JoinHandle<Result<PathBuf, String>>>,
+    /// What the last click did, to show under the buttons.
+    status: Option<Result<String, String>>,
+}
+
+/// An image to render once the detail for it has loaded. The view is copied
+/// when Save is clicked, so moving the camera meanwhile doesn't change it.
+struct ExportJob {
+    path: PathBuf,
+    size: [u32; 2],
+    camera: OrbitCamera,
+    /// The subcloud's outline, in Subcloud mode.
+    clip: Option<Footprint>,
+    /// Scales point sizes as on screen, which sets them in logical pixels.
+    pixels_per_point: f32,
+}
+
+impl ExportJob {
+    fn view(&self) -> lod::View {
+        let view = lod::View::new(&self.camera, self.size);
+        match self.clip {
+            Some(footprint) => view.clipped_to(footprint),
+            None => view,
+        }
+    }
+}
+
+/// A button clicked in the Save image section.
+enum ExportAction {
+    Save,
+    CopyCommand,
 }
 
 /// What the main area shows. Switched from the top bar.
@@ -157,6 +206,9 @@ struct Session {
     /// Nodes for the subcloud map, when it's shown. Mostly the same coarse
     /// nodes as `selection`, plus those for parts of the cloud out of view.
     map_selection: Selection,
+    /// Nodes for the image being saved, if any. Chosen for its size, which
+    /// can need more detail than the screen.
+    export_selection: Option<Selection>,
     /// Full-resolution points for the density profile, when it's shown.
     profile: ProfilePoints,
     /// The lowest and highest point of every node loaded so far, kept after
@@ -210,6 +262,13 @@ impl ViewerApp {
                     radius_px: 1.4,
                 },
             },
+            export: ImageExport {
+                match_view: true,
+                size: [1920, 1080],
+                job: None,
+                writing: None,
+                status: None,
+            },
         };
         if !app.url_input.trim().is_empty() {
             app.start_loading(&cc.egui_ctx);
@@ -223,8 +282,9 @@ impl ViewerApp {
         // Replacing the state drops any previous loader, which stops its thread.
         self.state = LoadState::Opening { source, loader };
         self.renderer.clear_nodes();
-        // A subcloud is in the old cloud's coordinates.
+        // A subcloud, or an image's view, is in the old cloud's coordinates.
         self.subcloud = None;
+        self.export.job = None;
     }
 
     /// Applies whatever the loader thread has sent since the last frame.
@@ -308,6 +368,7 @@ impl Session {
             octree: opened.octree,
             selection: Selection::default(),
             map_selection: Selection::default(),
+            export_selection: None,
             profile: ProfilePoints::default(),
             height_ranges: HashMap::new(),
             requested: Vec::new(),
@@ -351,21 +412,25 @@ impl Session {
         }
     }
 
-    /// Picks the nodes for this view (and the map's and density profile's,
-    /// if given), asks the loader for missing ones and frees GPU memory if
-    /// the cache is over budget.
+    /// Picks the nodes for this view (and the map's, density profile's and
+    /// image being saved, if given), asks the loader for missing ones and
+    /// frees GPU memory if the cache is over budget.
     fn update(
         &mut self,
         renderer: &mut PointRenderer,
-        view: &lod::View,
-        map_view: Option<&lod::View>,
+        views: Views<'_>,
         profile: Option<ProfileRequest>,
         settings: &LodSettings,
     ) {
-        self.selection = lod::select_nodes(&self.octree, view, settings);
-        self.map_selection = map_view
+        self.selection = lod::select_nodes(&self.octree, views.main, settings);
+        self.map_selection = views
+            .map
             .map(|view| lod::select_nodes(&self.octree, view, &subcloud_map::LOD))
             .unwrap_or_default();
+        self.export_selection = views
+            .export
+            .map(|view| lod::select_nodes(&self.octree, view, settings));
+        let export_keys = self.export_selection.iter().flat_map(|s| &s.keys);
         self.profile.set_request(&self.octree, profile);
 
         // Profile nodes already on the GPU arrived before the profile wanted
@@ -377,15 +442,15 @@ impl Session {
             self.loader.evicted(key);
         }
 
-        // The 3D view's nodes go first, so the profile and map never delay them.
+        // The 3D view's nodes go first, so the profile and map never delay
+        // them, except for an image being saved, which the user is waiting for.
         let not_loaded =
             |key: &&VoxelKey| !renderer.has_node(key) && !self.failed.contains_key(key);
         // `insert` returns false for a key already seen, which drops duplicates.
         let mut seen = HashSet::new();
-        let wanted: Vec<VoxelKey> = self
-            .selection
-            .keys
-            .iter()
+        let wanted: Vec<VoxelKey> = export_keys
+            .clone()
+            .chain(&self.selection.keys)
             .filter(&not_loaded)
             .chain(
                 self.profile
@@ -407,6 +472,7 @@ impl Session {
             .keys
             .iter()
             .chain(&self.map_selection.keys)
+            .chain(export_keys)
             .copied()
             .collect();
         let cache_budget = settings.point_budget * GPU_CACHE_FACTOR;
@@ -418,12 +484,20 @@ impl Session {
     /// The colouring to draw with: RGB only if the file has it.
     fn point_color(&self, mode: ColorMode) -> PointColor {
         match mode {
-            ColorMode::Rgb if self.info.has_rgb => PointColor::Rgb {
-                // Stretch 0..255 stored in 16 bits to the full range.
-                scale: if self.rgb_is_16_bit { 1.0 } else { 257.0 },
-            },
+            ColorMode::Rgb if self.info.has_rgb => PointColor::rgb(self.rgb_is_16_bit),
             _ => PointColor::Height,
         }
+    }
+
+    /// How many of the image's nodes have loaded (or failed), of how many.
+    /// `None` until nodes have been chosen for it.
+    fn export_progress(&self, renderer: &PointRenderer) -> Option<(usize, usize)> {
+        let keys = &self.export_selection.as_ref()?.keys;
+        let done = keys
+            .iter()
+            .filter(|key| renderer.has_node(key) || self.failed.contains_key(key))
+            .count();
+        Some((done, keys.len()))
     }
 
     /// Points in selected nodes that are loaded, i.e. actually drawn.
@@ -495,6 +569,12 @@ impl eframe::App for ViewerApp {
             _ => None,
         };
 
+        let export_view = self.export.job.as_ref().map(ExportJob::view);
+        let image_aspect = (!self.export.match_view).then(|| {
+            let [width, height] = self.export.size;
+            width as f32 / height as f32
+        });
+
         // The 3D view fills its panel edge to edge; the text states keep margins.
         let frame = match self.state {
             LoadState::Open(_) => egui::Frame::NONE,
@@ -519,6 +599,8 @@ impl eframe::App for ViewerApp {
                             viewports: &mut self.viewports,
                             session,
                             settings: &self.settings,
+                            export_view: export_view.as_ref(),
+                            image_aspect,
                         };
                         match (self.mode, &mut self.subcloud) {
                             (Mode::Subcloud, Some(subcloud_mode)) => {
@@ -541,11 +623,24 @@ impl eframe::App for ViewerApp {
         // its default position can sit just inside the viewport's corner.
         if let LoadState::Open(session) = &self.state {
             let in_subcloud = self.mode == Mode::Subcloud;
+            let clip = match (self.mode, &self.subcloud) {
+                (Mode::Subcloud, Some(subcloud_mode)) => Some(subcloud_mode.subcloud.footprint()),
+                _ => None,
+            };
             // The view controls act on whichever 3D view is showing.
             let camera = match (self.mode, &mut self.subcloud) {
                 (Mode::Subcloud, Some(subcloud_mode)) => &mut subcloud_mode.camera,
                 _ => &mut self.camera,
             };
+            let pixels_per_point = ui.ctx().pixels_per_point();
+            let view_size = central.response.rect.size() * pixels_per_point;
+            let view_size_px = [view_size.x, view_size.y].map(|side| side.round() as u32);
+            let max_image_size = self.renderer.max_image_size();
+            if self.export.match_view {
+                self.export.size = view_size_px.map(|side| side.clamp(1, max_image_size));
+            }
+            let export_progress = session.export_progress(&self.renderer);
+            let mut export_action = None;
             egui::Window::new("Point cloud")
                 // egui remembers a window's position by its id. One per mode
                 // keeps it over the 3D view, rather than over the map after
@@ -564,6 +659,16 @@ impl eframe::App for ViewerApp {
                     ui.separator();
                     settings_ui(ui, &mut self.settings, session.info.has_rgb);
                     ui.separator();
+                    export_action = export_ui(
+                        ui,
+                        &mut self.export,
+                        ExportContext {
+                            max_size: max_image_size,
+                            progress: export_progress,
+                            in_subcloud,
+                        },
+                    );
+                    ui.separator();
                     ui.label(
                         "Drag: orbit\nRight-drag: pan\nScroll: zoom\nDouble-click: reset view\n\
                          Gizmo: click an axis to look along it\n\
@@ -578,7 +683,45 @@ impl eframe::App for ViewerApp {
                         );
                     }
                 });
+
+            match export_action {
+                Some(ExportAction::Save) => {
+                    // Blocks this frame until the dialog closes, which is fine:
+                    // nothing else can be clicked meanwhile anyway.
+                    let path = rfd::FileDialog::new()
+                        .add_filter("PNG image", &["png"])
+                        .set_file_name("copcat.png")
+                        .save_file();
+                    if let Some(mut path) = path {
+                        if path.extension().is_none() {
+                            path.set_extension("png");
+                        }
+                        self.export.job = Some(ExportJob {
+                            path,
+                            size: self.export.size,
+                            camera: framed_camera(camera, view_size_px, self.export.size),
+                            clip,
+                            pixels_per_point,
+                        });
+                        self.export.status = None;
+                    }
+                }
+                Some(ExportAction::CopyCommand) => {
+                    let args = render_args(
+                        session,
+                        &self.settings,
+                        &framed_camera(camera, view_size_px, self.export.size),
+                        self.export.size,
+                        pixels_per_point,
+                    );
+                    ui.ctx().copy_text(args.command_line());
+                    self.export.status = Some(Ok("Copied a copcat render command".to_owned()));
+                }
+                None => {}
+            }
         }
+
+        self.finish_export(ui.ctx());
 
         if let (LoadState::Open(session), Mode::Subcloud, Some(subcloud_mode)) =
             (&mut self.state, self.mode, &mut self.subcloud)
@@ -597,6 +740,192 @@ impl eframe::App for ViewerApp {
                 });
             subcloud_mode.profile.show = open;
         }
+    }
+}
+
+impl ViewerApp {
+    /// Renders the image being saved once its nodes have loaded, and
+    /// reports when the PNG has been written.
+    fn finish_export(&mut self, ctx: &egui::Context) {
+        let export = &mut self.export;
+        if let LoadState::Open(session) = &mut self.state
+            && let Some((done, total)) = session.export_progress(&self.renderer)
+            && done == total
+            && let Some(job) = export.job.take()
+        {
+            let style = point_style(&self.settings, session, job.pixels_per_point, job.clip);
+            let keys = session.export_selection.take().unwrap_or_default().keys;
+            // Its own viewport, dropped afterwards, so the big target doesn't
+            // stay in GPU memory.
+            let mut viewport = self.renderer.create_viewport();
+            match self
+                .renderer
+                .capture(&mut viewport, job.size, &job.camera, &style, &keys)
+            {
+                Ok(image) => {
+                    let path = job.path;
+                    export.writing = Some(thread::spawn(move || {
+                        export::write_png(&path, &image).map(|()| path)
+                    }));
+                }
+                Err(error) => export.status = Some(Err(error)),
+            }
+        }
+
+        match &export.writing {
+            Some(writing) if writing.is_finished() => {
+                let result = export
+                    .writing
+                    .take()
+                    .and_then(|writing| writing.join().ok())
+                    .unwrap_or_else(|| Err("the PNG writer crashed".to_owned()));
+                export.status = Some(result.map(|path| format!("Saved {}", path.display())));
+            }
+            // Nothing else wakes egui when the thread finishes.
+            Some(_) => ctx.request_repaint_after(Duration::from_millis(100)),
+            None => {}
+        }
+    }
+}
+
+/// What the Save image section shows, beyond its own settings.
+struct ExportContext {
+    /// The biggest side the GPU can draw.
+    max_size: u32,
+    /// Nodes loaded of those the image needs, while one is waiting.
+    progress: Option<(usize, usize)>,
+    in_subcloud: bool,
+}
+
+/// The Save image section. Returns the button clicked, if any.
+fn export_ui(
+    ui: &mut egui::Ui,
+    export: &mut ImageExport,
+    context: ExportContext,
+) -> Option<ExportAction> {
+    ui.strong("Save image");
+    ui.horizontal(|ui| {
+        ui.label("Size");
+        ui.add_enabled_ui(!export.match_view, |ui| {
+            for side in &mut export.size {
+                ui.add(
+                    egui::DragValue::new(side)
+                        .range(1..=context.max_size)
+                        .suffix(" px"),
+                );
+            }
+        });
+        ui.checkbox(&mut export.match_view, "Match view")
+            .on_hover_text(
+                "Save the 3D view as it is on screen, at its size in physical pixels. \
+                 Untick to choose a size: the view then darkens what will be outside \
+                 the image.",
+            );
+    });
+
+    let busy = export.job.is_some() || export.writing.is_some();
+    let mut action = None;
+    ui.horizontal(|ui| {
+        let save = ui
+            .add_enabled(!busy, egui::Button::new("Save PNG…"))
+            .on_hover_text(
+                "Render the 3D view at this size, once the detail for it has loaded. A \
+                 bigger image than the view gets more detail, not stretched pixels.",
+            );
+        if save.clicked() {
+            action = Some(ExportAction::Save);
+        }
+        let copy_hint = if context.in_subcloud {
+            "Copy a command that renders this view from the command line. It shows the \
+             whole cloud from this camera: it can't clip to the subcloud."
+        } else {
+            "Copy a command that renders this view from the command line"
+        };
+        if ui
+            .button("Copy as command")
+            .on_hover_text(copy_hint)
+            .clicked()
+        {
+            action = Some(ExportAction::CopyCommand);
+        }
+    });
+
+    if let Some((done, total)) = context.progress {
+        ui.horizontal(|ui| {
+            ui.spinner();
+            ui.label(format!("Loading detail: {done} of {total} nodes"));
+        });
+    } else if export.job.is_some() || export.writing.is_some() {
+        ui.horizontal(|ui| {
+            ui.spinner();
+            ui.label("Saving");
+        });
+    } else {
+        match &export.status {
+            Some(Ok(message)) => {
+                ui.weak(message.as_str());
+            }
+            Some(Err(error)) => {
+                ui.colored_label(ui.visuals().error_fg_color, error.as_str());
+            }
+            None => {}
+        }
+    }
+    action
+}
+
+/// `camera` narrowed to show just the frame the view draws for an image of
+/// `image_size`: the biggest rectangle of the image's shape that fits in a
+/// view of `view_size`. Cropping keeps the eye where it is, so only the
+/// field of view changes.
+fn framed_camera(camera: &OrbitCamera, view_size: [u32; 2], image_size: [u32; 2]) -> OrbitCamera {
+    let aspect = |[width, height]: [u32; 2]| width.max(1) as f32 / height.max(1) as f32;
+    // The frame is the view's full height unless the image is wider.
+    let height_fraction = (aspect(view_size) / aspect(image_size)).min(1.0);
+    let mut framed = camera.clone();
+    framed.fov_y = 2.0 * ((camera.fov_y * 0.5).tan() * height_fraction).atan();
+    framed
+}
+
+/// The part of a view of `rect` that an image of `aspect` (width / height)
+/// shows, centred: the biggest rectangle of that shape that fits.
+fn image_frame(rect: egui::Rect, aspect: f32) -> egui::Rect {
+    let size = if aspect > rect.aspect_ratio() {
+        egui::vec2(rect.width(), rect.width() / aspect)
+    } else {
+        egui::vec2(rect.height() * aspect, rect.height())
+    };
+    egui::Rect::from_center_size(rect.center(), size)
+}
+
+/// `copcat render` arguments for `camera`'s view with these settings.
+fn render_args(
+    session: &Session,
+    settings: &ViewSettings,
+    camera: &OrbitCamera,
+    size: [u32; 2],
+    pixels_per_point: f32,
+) -> RenderArgs {
+    let [width, height] = size;
+    RenderArgs {
+        source: session.info.source.clone(),
+        output: PathBuf::from("copcat.png"),
+        width,
+        height,
+        camera: CameraArgs::from_camera(camera, session.info.origin),
+        style: StyleArgs {
+            color: match settings.color_mode {
+                ColorMode::Rgb => ColorArg::Rgb,
+                ColorMode::Height => ColorArg::Height,
+            },
+            // The command takes physical pixels, like `point_style` makes.
+            point_size: settings.point_size * pixels_per_point,
+            no_edl: !settings.edl_enabled,
+            edl_strength: settings.edl.strength,
+            edl_radius: settings.edl.radius_px * pixels_per_point,
+            point_budget: settings.lod.point_budget,
+            target_spacing: settings.lod.target_spacing_px,
+        },
     }
 }
 
@@ -873,15 +1202,16 @@ impl SubcloudMode {
             footprint,
             point_limit: self.profile.point_limit,
         });
-        scene.session.update(
-            scene.renderer,
-            &view,
-            map_view.as_ref(),
-            profile,
-            &scene.settings.lod,
-        );
+        let views = Views {
+            main: &view,
+            map: map_view.as_ref(),
+            export: scene.export_view,
+        };
+        scene
+            .session
+            .update(scene.renderer, views, profile, &scene.settings.lod);
         let texture_id = scene.render_main(&area, &self.camera, Some(footprint));
-        area.paint(ui, texture_id);
+        area.paint(ui, texture_id, scene.image_aspect);
 
         if let Some(frame) = map_frame {
             let style = scene.style(area.pixels_per_point, None);
@@ -922,22 +1252,42 @@ struct Scene<'a> {
     viewports: &'a mut Viewports,
     session: &'a mut Session,
     settings: &'a ViewSettings,
+    /// The view of the image being saved, if any, whose nodes load too.
+    export_view: Option<&'a lod::View>,
+    /// Width / height of the image Save image will make, when it isn't the
+    /// view's own. The view frames it.
+    image_aspect: Option<f32>,
+}
+
+/// The views `Session::update` chooses nodes for.
+struct Views<'a> {
+    main: &'a lod::View,
+    map: Option<&'a lod::View>,
+    export: Option<&'a lod::View>,
+}
+
+/// Point style from the settings. Sizes are set in logical pixels, so
+/// they're scaled to physical pixels like the render target.
+fn point_style(
+    settings: &ViewSettings,
+    session: &Session,
+    pixels_per_point: f32,
+    clip: Option<Footprint>,
+) -> PointStyle {
+    PointStyle {
+        size_px: settings.point_size * pixels_per_point,
+        color: session.point_color(settings.color_mode),
+        edl: settings.edl_enabled.then_some(EdlSettings {
+            radius_px: settings.edl.radius_px * pixels_per_point,
+            ..settings.edl
+        }),
+        clip,
+    }
 }
 
 impl Scene<'_> {
-    /// Point style from the settings. Sizes are set in logical pixels, so
-    /// they're scaled to physical pixels like the render target.
     fn style(&self, pixels_per_point: f32, clip: Option<Footprint>) -> PointStyle {
-        let settings = self.settings;
-        PointStyle {
-            size_px: settings.point_size * pixels_per_point,
-            color: self.session.point_color(settings.color_mode),
-            edl: settings.edl_enabled.then_some(EdlSettings {
-                radius_px: settings.edl.radius_px * pixels_per_point,
-                ..settings.edl
-            }),
-            clip,
-        }
+        point_style(self.settings, self.session, pixels_per_point, clip)
     }
 
     /// Draws the selected nodes (and debug bounds) into the main viewport.
@@ -976,6 +1326,8 @@ struct ViewArea {
     /// once the gizmo has had its say about the camera, but has to be
     /// painted under the gizmo.
     image_slot: egui::layers::ShapeIdx,
+    /// Above the image and below the gizmo: the Save image frame.
+    frame_slot: egui::layers::ShapeIdx,
 }
 
 impl ViewArea {
@@ -990,15 +1342,42 @@ impl ViewArea {
                 .map(|side| (side * pixels_per_point).round() as u32),
             pixels_per_point,
             image_slot: ui.painter().add(egui::Shape::Noop),
+            frame_slot: ui.painter().add(egui::Shape::Noop),
         }
     }
 
-    fn paint(&self, ui: &egui::Ui, texture_id: egui::TextureId) {
+    /// Paints the 3D image, and if `image_aspect` is given, darkens what's
+    /// outside an image of that shape.
+    fn paint(&self, ui: &egui::Ui, texture_id: egui::TextureId, image_aspect: Option<f32>) {
         let full_uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
-        ui.painter().set(
+        let painter = ui.painter();
+        painter.set(
             self.image_slot,
             egui::Shape::image(texture_id, self.rect, full_uv, egui::Color32::WHITE),
         );
+        let Some(aspect) = image_aspect else { return };
+        let view = self.rect;
+        let frame = image_frame(view, aspect);
+        let shade = egui::Color32::from_black_alpha(179);
+        // Two of these are empty: the frame touches either the sides or the
+        // top and bottom.
+        let outside = [
+            egui::Rect::from_x_y_ranges(view.x_range(), view.top()..=frame.top()),
+            egui::Rect::from_x_y_ranges(view.x_range(), frame.bottom()..=view.bottom()),
+            egui::Rect::from_x_y_ranges(view.left()..=frame.left(), frame.y_range()),
+            egui::Rect::from_x_y_ranges(frame.right()..=view.right(), frame.y_range()),
+        ];
+        let mut shapes: Vec<egui::Shape> = outside
+            .into_iter()
+            .map(|rect| egui::Shape::rect_filled(rect, 0.0, shade))
+            .collect();
+        shapes.push(egui::Shape::rect_stroke(
+            frame,
+            0.0,
+            egui::Stroke::new(1.0, egui::Color32::from_white_alpha(96)),
+            egui::StrokeKind::Inside,
+        ));
+        painter.set(self.frame_slot, egui::Shape::Vec(shapes));
     }
 }
 
@@ -1016,11 +1395,16 @@ fn explore_view(ui: &mut egui::Ui, scene: &mut Scene<'_>, camera: &mut OrbitCame
     show_gizmo(ui, area.rect, camera);
 
     let view = lod::View::new(camera, area.size_px);
+    let views = Views {
+        main: &view,
+        map: None,
+        export: scene.export_view,
+    };
     scene
         .session
-        .update(scene.renderer, &view, None, None, &scene.settings.lod);
+        .update(scene.renderer, views, None, &scene.settings.lod);
     let texture_id = scene.render_main(&area, camera, None);
-    area.paint(ui, texture_id);
+    area.paint(ui, texture_id, scene.image_aspect);
 }
 
 fn show_gizmo(ui: &mut egui::Ui, view_rect: egui::Rect, camera: &mut OrbitCamera) {
@@ -1285,7 +1669,7 @@ fn height_range(positions: &[[f32; 3]]) -> Option<(f32, f32)> {
 }
 
 /// Whether colours use the 16-bit range LAS specifies, rather than 0..255.
-fn uses_16_bit_color(colors: &[[u16; 4]]) -> bool {
+pub(crate) fn uses_16_bit_color(colors: &[[u16; 4]]) -> bool {
     colors.iter().any(|[r, g, b, _]| (*r).max(*g).max(*b) > 255)
 }
 
@@ -1318,6 +1702,30 @@ fn file_name(source: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn framed_camera_should_show_half_the_height_for_an_image_twice_as_wide() {
+        let camera = OrbitCamera::default();
+        let framed = framed_camera(&camera, [1000, 500], [2000, 500]);
+        assert!((framed.half_height() - camera.half_height() * 0.5).abs() < 1e-4);
+    }
+
+    #[test]
+    fn framed_camera_should_keep_the_height_for_a_narrower_image() {
+        let camera = OrbitCamera::default();
+        let framed = framed_camera(&camera, [1600, 900], [500, 900]);
+        assert_eq!(framed.fov_y, camera.fov_y);
+    }
+
+    #[test]
+    fn image_frame_should_fill_the_width_for_a_wide_image() {
+        let view = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(800.0, 600.0));
+        let frame = image_frame(view, 2.0);
+        assert_eq!(
+            frame,
+            egui::Rect::from_min_max(egui::pos2(0.0, 100.0), egui::pos2(800.0, 500.0))
+        );
+    }
 
     #[test]
     fn file_name_should_take_last_url_segment_without_query() {

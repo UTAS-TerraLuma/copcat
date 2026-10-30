@@ -20,6 +20,11 @@ struct Cli {
 enum Commands {
     /// Open a COPC point cloud (a URL or a file path) in a new viewer window.
     Open { source: String },
+    /// Render a view of a COPC point cloud to a PNG, without opening a window.
+    ///
+    /// The viewer's Save image section has a Copy as command button that
+    /// writes this command for the view on screen.
+    Render(Box<copcat::RenderArgs>),
     /// Update Copcat to the latest release.
     Update,
 }
@@ -27,6 +32,7 @@ enum Commands {
 fn main() -> ExitCode {
     let result = match Cli::parse().command {
         Commands::Open { source } => open(&source),
+        Commands::Render(args) => copcat::render(&args),
         Commands::Update => update(),
     };
     match result {

@@ -4,11 +4,16 @@
 //! 1. points (colour + depth),
 //! 2. eye-dome lighting, which reads that depth and darkens the colour,
 //! 3. debug lines, depth-tested against the points but not shaded by EDL.
+//!
+//! The same passes can also run without a window (see [`PointRenderer::headless`])
+//! and be read back as an image with [`PointRenderer::capture`].
 
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use copc_streaming::VoxelKey;
 use eframe::egui;
+use eframe::egui::mutex::RwLock;
 use eframe::egui_wgpu::{self, wgpu};
 use glam::{Vec3, Vec4};
 use wgpu::util::DeviceExt;
@@ -115,6 +120,16 @@ pub enum PointColor {
     Rgb { scale: f32 },
 }
 
+impl PointColor {
+    /// The file's RGB, stretching 0..255 stored in 16 bits to the full range
+    /// unless some value so far has needed more than 8 bits.
+    pub fn rgb(is_16_bit: bool) -> Self {
+        Self::Rgb {
+            scale: if is_16_bit { 1.0 } else { 257.0 },
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct EdlSettings {
     /// How dark the shading gets. 1 matches Potree's default.
@@ -134,8 +149,19 @@ pub struct PointStyle {
     pub clip: Option<Footprint>,
 }
 
+/// An RGBA image read back from the GPU, rows top to bottom.
+pub struct Image {
+    pub width: u32,
+    pub height: u32,
+    /// 4 bytes per pixel, with no padding between rows.
+    pub rgba: Vec<u8>,
+}
+
 pub struct PointRenderer {
-    render_state: egui_wgpu::RenderState,
+    device: wgpu::Device,
+    queue: wgpu::Queue,
+    /// Shows render targets as egui textures. `None` without a window.
+    egui_renderer: Option<Arc<RwLock<egui_wgpu::Renderer>>>,
     height_pipeline: wgpu::RenderPipeline,
     rgb_pipeline: wgpu::RenderPipeline,
     line_pipeline: wgpu::RenderPipeline,
@@ -169,6 +195,9 @@ pub struct Viewport {
     edl_uniform_buffer: wgpu::Buffer,
     /// Created on the first `render`, and again when the size changes.
     target: Option<RenderTarget>,
+    /// The target's colour texture as egui knows it. Kept across rebuilt
+    /// targets, so the id egui is drawing stays valid.
+    texture_id: Option<egui::TextureId>,
 }
 
 struct NodeBuffer {
@@ -188,15 +217,36 @@ struct LineBuffer {
 /// The textures we draw into, recreated whenever the viewport size changes.
 struct RenderTarget {
     size: [u32; 2],
+    /// Kept, beside its view, to copy from in `capture`.
+    color_texture: wgpu::Texture,
     color: wgpu::TextureView,
     depth: wgpu::TextureView,
     edl_bind_group: wgpu::BindGroup,
-    texture_id: egui::TextureId,
+    /// Whether `Viewport::texture_id` points at this target's colour yet.
+    registered: bool,
 }
 
 impl PointRenderer {
+    /// A renderer for the viewer window, whose images egui can show.
     pub fn new(render_state: &egui_wgpu::RenderState) -> Self {
-        let device = &render_state.device;
+        Self::with_device(
+            render_state.device.clone(),
+            render_state.queue.clone(),
+            Some(render_state.renderer.clone()),
+        )
+    }
+
+    /// A renderer without a window, which can only `capture`.
+    pub fn headless(device: wgpu::Device, queue: wgpu::Queue) -> Self {
+        Self::with_device(device, queue, None)
+    }
+
+    fn with_device(
+        device: wgpu::Device,
+        queue: wgpu::Queue,
+        egui_renderer: Option<Arc<RwLock<egui_wgpu::Renderer>>>,
+    ) -> Self {
+        let device = &device;
 
         let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("bind_group_layout"),
@@ -316,7 +366,9 @@ impl PointRenderer {
         );
 
         Self {
-            render_state: render_state.clone(),
+            device: device.clone(),
+            queue,
+            egui_renderer,
             height_pipeline,
             rgb_pipeline,
             line_pipeline,
@@ -332,7 +384,7 @@ impl PointRenderer {
     }
 
     pub fn create_viewport(&self) -> Viewport {
-        let device = &self.render_state.device;
+        let device = &self.device;
         let uniform_buffer = create_uniform_buffer(device, "uniforms", size_of::<Uniforms>());
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("bind_group"),
@@ -351,7 +403,13 @@ impl PointRenderer {
                 size_of::<EdlUniforms>(),
             ),
             target: None,
+            texture_id: None,
         }
+    }
+
+    /// The largest image `capture` can draw, each way.
+    pub fn max_image_size(&self) -> u32 {
+        self.device.limits().max_texture_dimension_2d
     }
 
     pub fn set_z_range(&mut self, z_range: [f32; 2]) {
@@ -378,7 +436,7 @@ impl PointRenderer {
         positions: &[[f32; 3]],
         colors: Option<&[[u16; 4]]>,
     ) {
-        let device = &self.render_state.device;
+        let device = &self.device;
         let upload = |label, contents| {
             device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some(label),
@@ -433,6 +491,8 @@ impl PointRenderer {
 
     /// Draws the `visible` nodes that are loaded, then `lines` on top, into
     /// `viewport` at `size` physical pixels. Returns the texture to show.
+    ///
+    /// Panics if the renderer was made with `headless`.
     pub fn render(
         &mut self,
         viewport: &mut Viewport,
@@ -442,15 +502,142 @@ impl PointRenderer {
         visible: &[VoxelKey],
         lines: &[LineVertex],
     ) -> egui::TextureId {
+        self.draw(viewport, size, camera, style, visible, lines);
+        self.register_texture(viewport)
+    }
+
+    /// Draws like `render`, without lines, then reads the image back, waiting
+    /// for the GPU. Errors if `size` is bigger than `max_image_size`.
+    pub fn capture(
+        &mut self,
+        viewport: &mut Viewport,
+        size: [u32; 2],
+        camera: &OrbitCamera,
+        style: &PointStyle,
+        visible: &[VoxelKey],
+    ) -> Result<Image, String> {
+        let max = self.max_image_size();
+        if size.iter().any(|&side| side == 0 || side > max) {
+            return Err(format!(
+                "can't render {} × {} pixels: each side must be 1 to {max}",
+                size[0], size[1]
+            ));
+        }
+        self.draw(viewport, size, camera, style, visible, &[]);
+        let target = viewport.target.as_ref().expect("draw creates the target");
+        self.read_back(&target.color_texture, size)
+    }
+
+    /// Copies a colour texture into memory, dropping the row padding the copy needs.
+    fn read_back(
+        &self,
+        texture: &wgpu::Texture,
+        [width, height]: [u32; 2],
+    ) -> Result<Image, String> {
+        let row_bytes = width * 4;
+        let padded_row_bytes = row_bytes.next_multiple_of(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT);
+        let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("capture"),
+            size: u64::from(padded_row_bytes) * u64::from(height),
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("capture_encoder"),
+            });
+        encoder.copy_texture_to_buffer(
+            texture.as_image_copy(),
+            wgpu::TexelCopyBufferInfo {
+                buffer: &buffer,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(padded_row_bytes),
+                    rows_per_image: None,
+                },
+            },
+            wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+        );
+        self.queue.submit([encoder.finish()]);
+
+        let slice = buffer.slice(..);
+        // The callback runs inside `poll`, which blocks until the copy is done.
+        slice.map_async(wgpu::MapMode::Read, |_| {});
+        self.device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .map_err(|e| format!("the GPU failed while reading back the image: {e}"))?;
+        let mapped = slice
+            .get_mapped_range()
+            .map_err(|e| format!("couldn't read back the image: {e}"))?;
+        let rgba = mapped
+            .chunks_exact(padded_row_bytes as usize)
+            .flat_map(|row| &row[..row_bytes as usize])
+            .copied()
+            .collect();
+        Ok(Image {
+            width,
+            height,
+            rgba,
+        })
+    }
+
+    /// Points `viewport.texture_id` at its target's colour texture, which
+    /// changes whenever the target is rebuilt.
+    fn register_texture(&self, viewport: &mut Viewport) -> egui::TextureId {
+        let egui_renderer = self
+            .egui_renderer
+            .as_ref()
+            .expect("a headless renderer can't show images in egui");
+        let target = viewport.target.as_mut().expect("draw creates the target");
+        if let Some(id) = viewport.texture_id
+            && target.registered
+        {
+            return id;
+        }
+        // The texture maps 1:1 to screen pixels, so no filtering is needed.
+        let mut egui_renderer = egui_renderer.write();
+        let id = match viewport.texture_id {
+            Some(id) => {
+                egui_renderer.update_egui_texture_from_wgpu_texture(
+                    &self.device,
+                    &target.color,
+                    wgpu::FilterMode::Nearest,
+                    id,
+                );
+                id
+            }
+            None => egui_renderer.register_native_texture(
+                &self.device,
+                &target.color,
+                wgpu::FilterMode::Nearest,
+            ),
+        };
+        target.registered = true;
+        viewport.texture_id = Some(id);
+        id
+    }
+
+    /// Draws the `visible` nodes that are loaded, then `lines` on top, into
+    /// `viewport`'s target, rebuilt at `size` if needed.
+    fn draw(
+        &mut self,
+        viewport: &mut Viewport,
+        size: [u32; 2],
+        camera: &OrbitCamera,
+        style: &PointStyle,
+        visible: &[VoxelKey],
+        lines: &[LineVertex],
+    ) {
         let size = [size[0].max(1), size[1].max(1)];
         // Take the target out, reuse or rebuild it, then put it back below.
         let target = match viewport.target.take() {
             Some(target) if target.size == size => target,
-            previous => self.create_target(
-                size,
-                &viewport.edl_uniform_buffer,
-                previous.map(|t| t.texture_id),
-            ),
+            _ => self.create_target(size, &viewport.edl_uniform_buffer),
         };
 
         self.frame += 1;
@@ -462,12 +649,11 @@ impl PointRenderer {
         self.upload_lines(lines);
         self.write_uniforms(viewport, size, camera, style);
 
-        let mut encoder =
-            self.render_state
-                .device
-                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                    label: Some("point_encoder"),
-                });
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("point_encoder"),
+            });
 
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -551,11 +737,8 @@ impl PointRenderer {
 
         // egui submits its own work later on the same queue, so this draw is
         // guaranteed to finish before egui samples the texture.
-        self.render_state.queue.submit([encoder.finish()]);
-
-        let texture_id = target.texture_id;
+        self.queue.submit([encoder.finish()]);
         viewport.target = Some(target);
-        texture_id
     }
 
     fn write_uniforms(
@@ -581,7 +764,7 @@ impl PointRenderer {
             clip_planes,
             clip_circle,
         };
-        let queue = &self.render_state.queue;
+        let queue = &self.queue;
         queue.write_buffer(&viewport.uniform_buffer, 0, bytemuck::bytes_of(&uniforms));
 
         if let Some(edl) = style.edl {
@@ -610,63 +793,55 @@ impl PointRenderer {
         if self.lines.as_ref().is_none_or(|l| l.capacity < lines.len()) {
             // Doubling avoids reallocating every frame while the count creeps up.
             let capacity = lines.len().next_power_of_two();
-            let buffer = self
-                .render_state
-                .device
-                .create_buffer(&wgpu::BufferDescriptor {
-                    label: Some("debug_lines"),
-                    size: (capacity * size_of::<LineVertex>()) as u64,
-                    usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-                    mapped_at_creation: false,
-                });
+            let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("debug_lines"),
+                size: (capacity * size_of::<LineVertex>()) as u64,
+                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
             self.lines = Some(LineBuffer { buffer, capacity });
         }
         if let Some(line_buffer) = &self.lines {
-            self.render_state.queue.write_buffer(
-                &line_buffer.buffer,
-                0,
-                bytemuck::cast_slice(lines),
-            );
+            self.queue
+                .write_buffer(&line_buffer.buffer, 0, bytemuck::cast_slice(lines));
         }
     }
 
-    fn create_target(
-        &self,
-        size: [u32; 2],
-        edl_uniforms: &wgpu::Buffer,
-        reuse_id: Option<egui::TextureId>,
-    ) -> RenderTarget {
-        let device = &self.render_state.device;
+    fn create_target(&self, size: [u32; 2], edl_uniforms: &wgpu::Buffer) -> RenderTarget {
+        let device = &self.device;
         let extent = wgpu::Extent3d {
             width: size[0],
             height: size[1],
             depth_or_array_layers: 1,
         };
         let make_texture = |label, format, usage| {
-            device
-                .create_texture(&wgpu::TextureDescriptor {
-                    label: Some(label),
-                    size: extent,
-                    mip_level_count: 1,
-                    sample_count: 1,
-                    dimension: wgpu::TextureDimension::D2,
-                    format,
-                    usage,
-                    view_formats: &[],
-                })
-                .create_view(&wgpu::TextureViewDescriptor::default())
+            device.create_texture(&wgpu::TextureDescriptor {
+                label: Some(label),
+                size: extent,
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format,
+                usage,
+                view_formats: &[],
+            })
         };
-        let color = make_texture(
+        // TEXTURE_BINDING so egui can show it, COPY_SRC so `capture` can read it.
+        let color_texture = make_texture(
             "point_color",
             COLOR_FORMAT,
-            wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            wgpu::TextureUsages::RENDER_ATTACHMENT
+                | wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::COPY_SRC,
         );
+        let color = color_texture.create_view(&wgpu::TextureViewDescriptor::default());
         // TEXTURE_BINDING so the EDL pass can read it.
         let depth = make_texture(
             "point_depth",
             DEPTH_FORMAT,
             wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
-        );
+        )
+        .create_view(&wgpu::TextureViewDescriptor::default());
         let edl_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("edl_bind_group"),
             layout: &self.edl_bind_group_layout,
@@ -682,29 +857,13 @@ impl PointRenderer {
             ],
         });
 
-        // The texture maps 1:1 to screen pixels, so no filtering is needed.
-        let mut egui_renderer = self.render_state.renderer.write();
-        let texture_id = match reuse_id {
-            Some(id) => {
-                egui_renderer.update_egui_texture_from_wgpu_texture(
-                    device,
-                    &color,
-                    wgpu::FilterMode::Nearest,
-                    id,
-                );
-                id
-            }
-            None => {
-                egui_renderer.register_native_texture(device, &color, wgpu::FilterMode::Nearest)
-            }
-        };
-
         RenderTarget {
             size,
+            color_texture,
             color,
             depth,
             edl_bind_group,
-            texture_id,
+            registered: false,
         }
     }
 }

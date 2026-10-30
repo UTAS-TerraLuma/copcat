@@ -1,3 +1,5 @@
+![Copcat: terminal & gui COPC viewer](docs/images/copcat-header.jpg)
+
 # Copcat
 
 A viewer for [COPC](https://copc.io/) LiDAR point clouds, local or streamed over HTTP.
@@ -43,6 +45,24 @@ copcat open https://example.com/cloud.copc.laz
 ```
 
 You can also start `copcat-viewer` on its own and paste a path or URL into it.
+
+## Saving images
+
+In the viewer, click **Save PNG…** under **Save image** in the Point cloud window. By
+default the image is the size of the 3D view. Untick **Match view** to choose a size:
+the view then darkens whatever falls outside the image. The image is rendered once
+the detail for its size has loaded, so an image bigger than the window gets more
+detail, not a stretched screenshot.
+
+`copcat render` does the same without a window:
+
+```sh
+copcat render path/to/cloud.copc.laz -o view.png --width 3840 --height 2160 --view top
+```
+
+To render the view you're looking at, click **Copy as command** in the viewer and
+paste the command it copies. Run `copcat render --help` for the camera and style
+options.
 
 ## Using it from WSL
 

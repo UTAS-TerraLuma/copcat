@@ -121,6 +121,7 @@ impl ViewPreset {
 }
 
 /// A camera that orbits around a target point, with Z up (the LiDAR convention).
+#[derive(Clone)]
 pub struct OrbitCamera {
     pub target: Vec3,
     /// Distance from the eye to the target. In orthographic mode it only

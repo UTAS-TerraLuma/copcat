@@ -101,6 +101,11 @@ impl Loader {
     pub fn try_recv(&self) -> Result<Event, TryRecvError> {
         self.events.try_recv()
     }
+
+    /// Waits for the next event. `None` if the worker has exited.
+    pub fn recv(&self) -> Option<Event> {
+        self.events.recv().ok()
+    }
 }
 
 /// The worker's side of the event channel.

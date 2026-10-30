@@ -12,8 +12,10 @@ clap = { version = "4.6.7", features = ["derive"] }
 copc-streaming = "0.2.0"
 eframe = "0.36.2"
 glam = { version = "0.34.1", features = ["bytemuck"] }
+png = "0.18"
 pollster = "0.4"
 raw-window-handle = "0.6"
+rfd = "0.17"
 thiserror = "2.0.21"
 # No gzip: compressing an already-compressed LAZ range only adds work.
 ureq = { version = "3", default-features = false, features = ["rustls"] }
