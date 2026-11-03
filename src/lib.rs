@@ -3,6 +3,7 @@
 
 mod app;
 mod camera;
+mod classification;
 mod cloud;
 mod export;
 mod gizmo;

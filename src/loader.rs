@@ -39,6 +39,9 @@ pub struct NodeData {
     pub positions: Vec<[f32; 3]>,
     /// 16-bit RGB plus padding, one per position, if the file has colour.
     pub colors: Option<Vec<[u16; 4]>>,
+    /// LAS classification, one per position. Widened to `u32` because GPU
+    /// vertex strides must be a multiple of 4 bytes.
+    pub classes: Vec<u32>,
 }
 
 pub enum Event {
@@ -309,9 +312,9 @@ fn decode_node(
     // Only the layers we draw: skipping the others saves most of the decode time.
     let has_rgb = header.las_header().point_format().has_color;
     let fields = if has_rgb {
-        Fields::Z | Fields::RGB
+        Fields::Z | Fields::CLASSIFICATION | Fields::RGB
     } else {
-        Fields::Z
+        Fields::Z | Fields::CLASSIFICATION
     };
     let chunk = Chunk::decompress(
         compressed,
@@ -330,7 +333,16 @@ fn decode_node(
     let colors = chunk
         .rgb()
         .map(|rgb| rgb.map(|(r, g, b)| [r, g, b, u16::MAX]).collect());
-    Ok(NodeData { positions, colors })
+    let classes = chunk
+        .classification()
+        .ok_or(CopcError::PartialDecode(chunk.fields))?
+        .map(u32::from)
+        .collect();
+    Ok(NodeData {
+        positions,
+        colors,
+        classes,
+    })
 }
 
 #[cfg(test)]

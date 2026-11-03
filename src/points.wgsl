@@ -1,6 +1,7 @@
 // Draws each point as a screen-space quad (6 vertices, one instance per point),
-// trimmed to a circle in the fragment shader. Two vertex entry points pick the
-// colour: `vs_height` (viridis ramp on Z) or `vs_rgb` (the file's colours).
+// trimmed to a circle in the fragment shader. The vertex entry point picks the
+// colour: `vs_height` (viridis ramp on Z), `vs_rgb` (the file's colours) or
+// `vs_class` (a colour per LAS class).
 
 struct Uniforms {
     view_proj: mat4x4<f32>,
@@ -17,6 +18,8 @@ struct Uniforms {
     // Points must also be inside this circle on the ground when w > 0:
     // (centre x, centre y, radius, on).
     clip_circle: vec4<f32>,
+    // RGB for each LAS class; w is padding.
+    class_colors: array<vec4<f32>, 256>,
 };
 
 @group(0) @binding(0) var<uniform> u: Uniforms;
@@ -44,6 +47,15 @@ fn vs_rgb(
     @location(1) color: vec4<f32>,
 ) -> VertexOutput {
     return point_vertex(vertex_index, position, min(color.rgb * u.color_scale, vec3(1.0)));
+}
+
+@vertex
+fn vs_class(
+    @builtin(vertex_index) vertex_index: u32,
+    @location(0) position: vec3<f32>,
+    @location(1) classification: u32,
+) -> VertexOutput {
+    return point_vertex(vertex_index, position, u.class_colors[classification].rgb);
 }
 
 fn point_vertex(vertex_index: u32, position: vec3<f32>, color: vec3<f32>) -> VertexOutput {

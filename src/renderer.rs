@@ -19,6 +19,7 @@ use glam::{Vec3, Vec4};
 use wgpu::util::DeviceExt;
 
 use crate::camera::{OrbitCamera, Projection};
+use crate::classification;
 use crate::subcloud::Footprint;
 
 const COLOR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
@@ -49,6 +50,8 @@ struct Uniforms {
     /// `(centre x, centre y, radius, on)`: when `on` is positive, points are
     /// only drawn inside this circle on the ground too.
     clip_circle: [f32; 4],
+    /// RGB (plus padding) for each LAS class.
+    class_colors: [[f32; 4]; 256],
 }
 
 /// A clip plane every point is inside.
@@ -118,6 +121,8 @@ pub enum PointColor {
     /// The file's RGB. `scale` multiplies the unpacked 0..1 values: 1 for true
     /// 16-bit colour, 257 for files that store 0..255 in the 16-bit fields.
     Rgb { scale: f32 },
+    /// A fixed colour per LAS class.
+    Classification,
 }
 
 impl PointColor {
@@ -164,6 +169,7 @@ pub struct PointRenderer {
     egui_renderer: Option<Arc<RwLock<egui_wgpu::Renderer>>>,
     height_pipeline: wgpu::RenderPipeline,
     rgb_pipeline: wgpu::RenderPipeline,
+    class_pipeline: wgpu::RenderPipeline,
     line_pipeline: wgpu::RenderPipeline,
     edl_pipeline: wgpu::RenderPipeline,
     /// Kept to build each viewport's bind group.
@@ -178,6 +184,7 @@ pub struct PointRenderer {
     lines: Option<LineBuffer>,
     /// Heights mapped to the ends of the colour ramp.
     z_range: [f32; 2],
+    class_colors: [[f32; 4]; 256],
     /// Counts `render` calls, to find the least recently drawn nodes.
     frame: u64,
 }
@@ -204,6 +211,7 @@ struct NodeBuffer {
     positions: wgpu::Buffer,
     /// `None` when the file has no colour.
     colors: Option<wgpu::Buffer>,
+    classes: wgpu::Buffer,
     count: u32,
     last_drawn: u64,
 }
@@ -272,6 +280,12 @@ impl PointRenderer {
             step_mode: wgpu::VertexStepMode::Instance,
             attributes: &color_attributes,
         };
+        let class_attributes = wgpu::vertex_attr_array![1 => Uint32];
+        let class_buffer = wgpu::VertexBufferLayout {
+            array_stride: size_of::<u32>() as u64,
+            step_mode: wgpu::VertexStepMode::Instance,
+            attributes: &class_attributes,
+        };
         let point_depth = Some(DepthTest {
             write: true,
             compare: wgpu::CompareFunction::Less,
@@ -298,7 +312,20 @@ impl PointRenderer {
                 layout: &layout,
                 shader: &points_shader,
                 vertex_entry: "vs_rgb",
-                vertex_buffers: &[Some(position_buffer), Some(color_buffer)],
+                vertex_buffers: &[Some(position_buffer.clone()), Some(color_buffer)],
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                depth: point_depth,
+                blend: None,
+            },
+        );
+        let class_pipeline = create_pipeline(
+            device,
+            PipelineConfig {
+                label: "class_pipeline",
+                layout: &layout,
+                shader: &points_shader,
+                vertex_entry: "vs_class",
+                vertex_buffers: &[Some(position_buffer), Some(class_buffer)],
                 topology: wgpu::PrimitiveTopology::TriangleList,
                 depth: point_depth,
                 blend: None,
@@ -371,6 +398,7 @@ impl PointRenderer {
             egui_renderer,
             height_pipeline,
             rgb_pipeline,
+            class_pipeline,
             line_pipeline,
             edl_pipeline,
             bind_group_layout,
@@ -379,6 +407,7 @@ impl PointRenderer {
             resident_points: 0,
             lines: None,
             z_range: [0.0, 1.0],
+            class_colors: classification::palette(),
             frame: 0,
         }
     }
@@ -428,13 +457,14 @@ impl PointRenderer {
         self.resident_points
     }
 
-    /// Uploads a node, replacing any previous copy. `colors`, if given, has one
-    /// entry per position.
+    /// Uploads a node, replacing any previous copy. `colors`, if given, and
+    /// `classes` have one entry per position.
     pub fn insert_node(
         &mut self,
         key: VoxelKey,
         positions: &[[f32; 3]],
         colors: Option<&[[u16; 4]]>,
+        classes: &[u32],
     ) {
         let device = &self.device;
         let upload = |label, contents| {
@@ -447,6 +477,7 @@ impl PointRenderer {
         let node = NodeBuffer {
             positions: upload("node_positions", bytemuck::cast_slice(positions)),
             colors: colors.map(|colors| upload("node_colors", bytemuck::cast_slice(colors))),
+            classes: upload("node_classes", bytemuck::cast_slice(classes)),
             count: positions.len() as u32,
             // Count as just drawn, so a node isn't evicted before its first frame.
             last_drawn: self.frame,
@@ -679,6 +710,7 @@ impl PointRenderer {
             let pipeline = match style.color {
                 PointColor::Height => &self.height_pipeline,
                 PointColor::Rgb { .. } => &self.rgb_pipeline,
+                PointColor::Classification => &self.class_pipeline,
             };
             pass.set_pipeline(pipeline);
             // One draw per node keeps nodes independent, so loading or evicting
@@ -689,11 +721,17 @@ impl PointRenderer {
                 .filter(|node| node.count > 0);
             for node in drawable {
                 pass.set_vertex_buffer(0, node.positions.slice(..));
-                if let PointColor::Rgb { .. } = style.color {
-                    // The RGB pipeline needs both buffers; a node without
-                    // colour can't be drawn with it.
-                    let Some(colors) = &node.colors else { continue };
-                    pass.set_vertex_buffer(1, colors.slice(..));
+                match style.color {
+                    PointColor::Height => {}
+                    PointColor::Rgb { .. } => {
+                        // The RGB pipeline needs both buffers; a node without
+                        // colour can't be drawn with it.
+                        let Some(colors) = &node.colors else { continue };
+                        pass.set_vertex_buffer(1, colors.slice(..));
+                    }
+                    PointColor::Classification => {
+                        pass.set_vertex_buffer(1, node.classes.slice(..));
+                    }
                 }
                 pass.draw(0..VERTICES_PER_POINT, 0..node.count);
             }
@@ -757,12 +795,13 @@ impl PointRenderer {
             z_min: self.z_range[0],
             z_max: self.z_range[1],
             color_scale: match style.color {
-                PointColor::Height => 1.0,
+                PointColor::Height | PointColor::Classification => 1.0,
                 PointColor::Rgb { scale } => scale,
             },
             _padding: [0.0; 2],
             clip_planes,
             clip_circle,
+            class_colors: self.class_colors,
         };
         let queue = &self.queue;
         queue.write_buffer(&viewport.uniform_buffer, 0, bytemuck::bytes_of(&uniforms));
