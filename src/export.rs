@@ -79,7 +79,8 @@ pub struct CameraArgs {
 #[derive(Args, Debug)]
 #[command(next_help_heading = "Style")]
 pub struct StyleArgs {
-    /// Colour by the file's RGB (if it has any, else height) or by height.
+    /// Colour by the file's RGB (if it has any, else height), by height or by
+    /// LAS classification.
     #[arg(long, value_enum, default_value_t = ColorArg::Rgb)]
     pub color: ColorArg,
     /// Which height to draw points at. Defaults to the one in Z. --target's
@@ -125,6 +126,7 @@ pub enum ProjectionArg {
 pub enum ColorArg {
     Rgb,
     Height,
+    Classification,
 }
 
 impl From<ViewArg> for ViewPreset {
@@ -219,6 +221,7 @@ impl StyleArgs {
             size_px: self.point_size,
             color: match self.color {
                 ColorArg::Rgb if has_rgb => PointColor::rgb(rgb_is_16_bit),
+                ColorArg::Classification => PointColor::Classification,
                 _ => PointColor::Height,
             },
             height,
@@ -429,7 +432,8 @@ impl NodeLoader<'_> {
                         Ok(node) => {
                             let colors = node.colors.as_deref();
                             self.rgb_is_16_bit |= colors.is_some_and(uses_16_bit_color);
-                            self.renderer.insert_node(key, &node.points, colors);
+                            self.renderer
+                                .insert_node(key, &node.points, colors, &node.classes);
                             self.octree.record_node_heights(key, &node.points);
                         }
                         Err(error) => {

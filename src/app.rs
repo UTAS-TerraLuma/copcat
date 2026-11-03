@@ -9,6 +9,7 @@ use copc_streaming::VoxelKey;
 use eframe::egui;
 
 use crate::camera::{OrbitCamera, Projection, ViewPreset};
+use crate::classification;
 use crate::cloud::{CloudInfo, LoadError};
 use crate::export::{self, CameraArgs, ColorArg, RenderArgs, StyleArgs};
 use crate::gizmo;
@@ -182,6 +183,7 @@ struct ViewSettings {
 enum ColorMode {
     Height,
     Rgb,
+    Classification,
 }
 
 enum LoadState {
@@ -230,6 +232,8 @@ struct Session {
     /// Whether any colour value so far needed more than 8 bits. LAS says RGB
     /// is 16-bit, but some writers store 0..255, which would look black.
     rgb_is_16_bit: bool,
+    /// Which LAS classes any loaded point has had, for the legend.
+    classes_seen: [bool; 256],
 }
 
 impl ViewerApp {
@@ -405,6 +409,7 @@ impl Session {
             fetching: HashSet::new(),
             failed: HashMap::new(),
             rgb_is_16_bit: false,
+            classes_seen: [false; 256],
         };
         session.show_height(shown);
         session.frame_on_root = !session.shown_is_z();
@@ -435,7 +440,10 @@ impl Session {
                         Ok(node) => {
                             let colors = node.colors.as_deref();
                             self.rgb_is_16_bit |= colors.is_some_and(uses_16_bit_color);
-                            renderer.insert_node(key, &node.points, colors);
+                            renderer.insert_node(key, &node.points, colors, &node.classes);
+                            for &class in &node.classes {
+                                self.classes_seen[class as usize] = true;
+                            }
                             self.octree.record_node_heights(key, &node.points);
                             // Moved rather than copied: the GPU has its own copy now.
                             self.profile.receive(key, node.points);
@@ -529,6 +537,7 @@ impl Session {
     fn point_color(&self, mode: ColorMode) -> PointColor {
         match mode {
             ColorMode::Rgb if self.info.has_rgb => PointColor::rgb(self.rgb_is_16_bit),
+            ColorMode::Classification => PointColor::Classification,
             _ => PointColor::Height,
         }
     }
@@ -718,7 +727,7 @@ impl eframe::App for ViewerApp {
                     heights_action =
                         heights_ui(ui, session, &mut self.heights_draft, &self.heights);
                     ui.separator();
-                    settings_ui(ui, &mut self.settings, session.info.has_rgb);
+                    settings_ui(ui, &mut self.settings, session);
                     ui.separator();
                     export_action = export_ui(
                         ui,
@@ -1010,6 +1019,7 @@ fn render_args(
             color: match settings.color_mode {
                 ColorMode::Rgb => ColorArg::Rgb,
                 ColorMode::Height => ColorArg::Height,
+                ColorMode::Classification => ColorArg::Classification,
             },
             z: Some(session.shown),
             // The command takes physical pixels, like `point_style` makes.
@@ -1717,15 +1727,19 @@ fn streaming_stats(ui: &mut egui::Ui, session: &Session, renderer: &PointRendere
         });
 }
 
-fn settings_ui(ui: &mut egui::Ui, settings: &mut ViewSettings, has_rgb: bool) {
+fn settings_ui(ui: &mut egui::Ui, settings: &mut ViewSettings, session: &Session) {
     ui.horizontal(|ui| {
         ui.label("Colour:");
         ui.radio_value(&mut settings.color_mode, ColorMode::Height, "Height");
-        ui.add_enabled_ui(has_rgb, |ui| {
+        ui.add_enabled_ui(session.info.has_rgb, |ui| {
             ui.radio_value(&mut settings.color_mode, ColorMode::Rgb, "RGB")
                 .on_disabled_hover_text("This file has no colour");
         });
+        ui.radio_value(&mut settings.color_mode, ColorMode::Classification, "Class");
     });
+    if settings.color_mode == ColorMode::Classification {
+        class_legend_ui(ui, &session.classes_seen);
+    }
     ui.add(egui::Slider::new(&mut settings.point_size, 1.0..=10.0).text("Point size"));
 
     ui.checkbox(&mut settings.edl_enabled, "Eye-dome lighting")
@@ -1870,6 +1884,20 @@ fn follow_height(camera: &mut OrbitCamera, octree: &Octree, from: HeightKind, to
     if let (Some(from), Some(to)) = (lowest(from), lowest(to)) {
         camera.target.z += to - from;
     }
+}
+
+/// A swatch and name for each class seen so far.
+fn class_legend_ui(ui: &mut egui::Ui, classes_seen: &[bool; 256]) {
+    ui.indent("class_legend", |ui| {
+        for class in (0..=u8::MAX).filter(|&class| classes_seen[usize::from(class)]) {
+            let [r, g, b] = classification::color(class);
+            // Only the swatch is coloured: dark classes would be hard to read.
+            ui.horizontal(|ui| {
+                ui.colored_label(legend_color([r, g, b, 1.0]), "■");
+                ui.label(format!("{class} {}", classification::name(class)));
+            });
+        }
+    });
 }
 
 /// Whether colours use the 16-bit range LAS specifies, rather than 0..255.

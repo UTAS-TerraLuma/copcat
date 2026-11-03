@@ -39,6 +39,9 @@ pub struct NodeData {
     pub points: NodePoints,
     /// 16-bit RGB plus padding, one per position, if the file has colour.
     pub colors: Option<Vec<[u16; 4]>>,
+    /// LAS classification, one per position. Widened to `u32` because GPU
+    /// vertex strides must be a multiple of 4 bytes.
+    pub classes: Vec<u32>,
 }
 
 /// A node's positions, and the heights it stores outside Z.
@@ -354,7 +357,7 @@ fn decode_node(
 ) -> Result<NodeData, CopcError> {
     // Only the layers we draw: skipping the others saves most of the decode time.
     let format = header.las_header().point_format();
-    let mut fields = Fields::Z;
+    let mut fields = Fields::Z | Fields::CLASSIFICATION;
     if format.has_color {
         fields |= Fields::RGB;
     }
@@ -395,12 +398,18 @@ fn decode_node(
     let colors = chunk
         .rgb()
         .map(|rgb| rgb.map(|(r, g, b)| [r, g, b, u16::MAX]).collect());
+    let classes = chunk
+        .classification()
+        .ok_or(CopcError::PartialDecode(chunk.fields))?
+        .map(u32::from)
+        .collect();
     Ok(NodeData {
         points: NodePoints {
             positions,
             extra_heights,
         },
         colors,
+        classes,
     })
 }
 

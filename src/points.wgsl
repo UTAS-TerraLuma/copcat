@@ -1,8 +1,9 @@
 // Draws each point as a screen-space quad (6 vertices, one instance per point),
-// trimmed to a circle in the fragment shader. Two vertex entry points pick the
-// colour: `vs_height` (viridis ramp on Z) or `vs_rgb` (the file's colours).
-// The `_lifted` variants draw each point at a height from a separate buffer
-// (one read from an extra dimension) instead of its Z.
+// trimmed to a circle in the fragment shader. The vertex entry point picks the
+// colour: `vs_height` (viridis ramp on Z), `vs_rgb` (the file's colours) or
+// `vs_class` (a colour per LAS class). The `_lifted` variants draw each point
+// at a height from a separate buffer (one read from an extra dimension)
+// instead of its Z.
 
 struct Uniforms {
     view_proj: mat4x4<f32>,
@@ -19,6 +20,8 @@ struct Uniforms {
     // Points must also be inside this circle on the ground when w > 0:
     // (centre x, centre y, radius, on).
     clip_circle: vec4<f32>,
+    // RGB for each LAS class; w is padding.
+    class_colors: array<vec4<f32>, 256>,
 };
 
 @group(0) @binding(0) var<uniform> u: Uniforms;
@@ -48,6 +51,15 @@ fn vs_rgb(
 }
 
 @vertex
+fn vs_class(
+    @builtin(vertex_index) vertex_index: u32,
+    @location(0) position: vec3<f32>,
+    @location(1) classification: u32,
+) -> VertexOutput {
+    return class_vertex(vertex_index, position, classification);
+}
+
+@vertex
 fn vs_height_lifted(
     @builtin(vertex_index) vertex_index: u32,
     @location(0) position: vec3<f32>,
@@ -66,6 +78,16 @@ fn vs_rgb_lifted(
     return rgb_vertex(vertex_index, vec3(position.xy, height), color);
 }
 
+@vertex
+fn vs_class_lifted(
+    @builtin(vertex_index) vertex_index: u32,
+    @location(0) position: vec3<f32>,
+    @location(1) classification: u32,
+    @location(2) height: f32,
+) -> VertexOutput {
+    return class_vertex(vertex_index, vec3(position.xy, height), classification);
+}
+
 fn height_vertex(vertex_index: u32, position: vec3<f32>) -> VertexOutput {
     let t = clamp((position.z - u.z_min) / max(u.z_max - u.z_min, 1e-6), 0.0, 1.0);
     return point_vertex(vertex_index, position, viridis(t));
@@ -73,6 +95,10 @@ fn height_vertex(vertex_index: u32, position: vec3<f32>) -> VertexOutput {
 
 fn rgb_vertex(vertex_index: u32, position: vec3<f32>, color: vec4<f32>) -> VertexOutput {
     return point_vertex(vertex_index, position, min(color.rgb * u.color_scale, vec3(1.0)));
+}
+
+fn class_vertex(vertex_index: u32, position: vec3<f32>, classification: u32) -> VertexOutput {
+    return point_vertex(vertex_index, position, u.class_colors[classification].rgb);
 }
 
 fn point_vertex(vertex_index: u32, position: vec3<f32>, color: vec3<f32>) -> VertexOutput {
