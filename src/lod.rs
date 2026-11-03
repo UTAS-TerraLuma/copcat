@@ -4,7 +4,7 @@
 //! and easy to unit test.
 
 use std::cmp::Ordering;
-use std::collections::{BinaryHeap, HashMap, VecDeque};
+use std::collections::{BinaryHeap, HashMap};
 
 use copc_streaming::VoxelKey;
 use glam::{Mat4, Vec3, Vec4};
@@ -274,37 +274,6 @@ pub fn select_nodes(octree: &Octree, view: &View, settings: &LodSettings) -> Sel
         }
     }
     selection
-}
-
-/// Every node with points above `footprint`, at every level: all the
-/// full-resolution points that could be inside it, coarsest first. `None` if
-/// they add up to more than `point_limit`.
-pub fn nodes_in_footprint(
-    octree: &Octree,
-    footprint: &Footprint,
-    point_limit: u64,
-) -> Option<Selection> {
-    let mut selection = Selection::default();
-    // Breadth first, so coarse nodes (and a rough result) come first.
-    let mut queue = VecDeque::from([VoxelKey::ROOT]);
-    while let Some(key) = queue.pop_front() {
-        let Some(count) = octree.point_count(&key) else {
-            continue;
-        };
-        let (min, max) = octree.node_bounds(&key);
-        if !footprint.touches_box(min, max) {
-            continue;
-        }
-        selection.points += u64::from(count);
-        if selection.points > point_limit {
-            return None;
-        }
-        if count > 0 {
-            selection.keys.push(key);
-        }
-        queue.extend(key.children());
-    }
-    Some(selection)
 }
 
 /// Roughly how high the points above `footprint` reach: the height ranges in
@@ -596,25 +565,6 @@ mod tests {
             !selection.keys.is_empty() && outside.is_empty(),
             "{outside:?}"
         );
-    }
-
-    #[test]
-    fn nodes_in_footprint_should_take_every_level_under_a_circle() {
-        let octree = full_octree(3, 1000);
-        // Inside one level 3 node (25 m wide), away from its edges, so one
-        // node per level, and every z layer of each: 4 levels × (1, 2, 4, 8).
-        let circle = Footprint::Circle {
-            centre: Vec2::new(12.5, 12.5),
-            radius: 1.0,
-        };
-        let selection = nodes_in_footprint(&octree, &circle, u64::MAX);
-        assert_eq!(selection.map(|s| s.keys.len()), Some(1 + 2 + 4 + 8));
-    }
-
-    #[test]
-    fn nodes_in_footprint_should_give_up_past_the_point_limit() {
-        let octree = full_octree(3, 1000);
-        assert!(nodes_in_footprint(&octree, &slab(), 10_000).is_none());
     }
 
     fn small_circle() -> Footprint {

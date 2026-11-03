@@ -11,7 +11,6 @@ mod heights;
 mod http_source;
 mod loader;
 mod lod;
-mod profile;
 mod renderer;
 mod subcloud;
 mod subcloud_map;

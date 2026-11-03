@@ -16,7 +16,7 @@ pub const LOD: LodSettings = LodSettings {
     target_spacing_px: 2.0,
 };
 
-/// The colour subclouds are drawn in, on the map and in the density profile.
+/// The colour subclouds are drawn in, on the map.
 pub const SUBCLOUD_COLOR: Color32 = Color32::from_rgb(255, 210, 80);
 
 const HANDLE_RADIUS: f32 = 7.0;

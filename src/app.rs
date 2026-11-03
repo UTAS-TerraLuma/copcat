@@ -16,7 +16,6 @@ use crate::gizmo;
 use crate::heights::{HeightKind, HeightSettings, HeightSource, SourceSetting};
 use crate::loader::{Event, Loader, OpenedCloud};
 use crate::lod::{self, LodSettings, Octree, Selection};
-use crate::profile::{self, ProfilePoints, ProfileRequest};
 use crate::renderer::{
     self, EdlSettings, LineVertex, PointColor, PointRenderer, PointStyle, Viewport,
 };
@@ -142,7 +141,6 @@ struct SubcloudMode {
     /// How far one Ctrl+scroll (or Ctrl+Shift+scroll) notch slides the
     /// subcloud, as a percentage of its size that way.
     sweep_step_percent: f32,
-    profile: ProfileSettings,
 }
 
 /// Ways to point the subcloud camera at the subcloud.
@@ -152,16 +150,6 @@ enum Reframe {
     Fit,
     /// Look at it side-on, then fit.
     Aim,
-}
-
-/// The density profile window's settings.
-struct ProfileSettings {
-    /// Whether the window is open. The profile's points are only loaded
-    /// while it is.
-    show: bool,
-    /// Height of each band, in metres.
-    bin_size: f32,
-    point_limit: u64,
 }
 
 /// Everything the user can tweak in the floating window.
@@ -216,8 +204,6 @@ struct Session {
     /// Nodes for the image being saved, if any. Chosen for its size, which
     /// can need more detail than the screen.
     export_selection: Option<Selection>,
-    /// Full-resolution points for the density profile, when it's shown.
-    profile: ProfilePoints,
     /// The height points are drawn at.
     shown: HeightKind,
     /// Frame the camera once the root node arrives: the shown height isn't
@@ -402,7 +388,6 @@ impl Session {
             selection: Selection::default(),
             map_selection: Selection::default(),
             export_selection: None,
-            profile: ProfilePoints::default(),
             shown,
             frame_on_root: false,
             requested: Vec::new(),
@@ -421,7 +406,6 @@ impl Session {
         self.shown = kind;
         self.octree
             .show_heights((!self.shown_is_z()).then_some(kind));
-        self.profile.set_height(kind);
     }
 
     /// Whether the shown height is the file's Z, which the octree is built on.
@@ -445,8 +429,6 @@ impl Session {
                                 self.classes_seen[class as usize] = true;
                             }
                             self.octree.record_node_heights(key, &node.points);
-                            // Moved rather than copied: the GPU has its own copy now.
-                            self.profile.receive(key, node.points);
                         }
                         Err(error) => {
                             self.failed.insert(key, error);
@@ -464,16 +446,10 @@ impl Session {
         }
     }
 
-    /// Picks the nodes for this view (and the map's, density profile's and
-    /// image being saved, if given), asks the loader for missing ones and
+    /// Picks the nodes for this view (and the map's and image being saved,
+    /// if given), asks the loader for missing ones and
     /// frees GPU memory if the cache is over budget.
-    fn update(
-        &mut self,
-        renderer: &mut PointRenderer,
-        views: Views<'_>,
-        profile: Option<ProfileRequest>,
-        settings: &LodSettings,
-    ) {
+    fn update(&mut self, renderer: &mut PointRenderer, views: Views<'_>, settings: &LodSettings) {
         self.selection = lod::select_nodes(&self.octree, views.main, settings);
         self.map_selection = views
             .map
@@ -483,18 +459,8 @@ impl Session {
             .export
             .map(|view| lod::select_nodes(&self.octree, view, settings));
         let export_keys = self.export_selection.iter().flat_map(|s| &s.keys);
-        self.profile.set_request(&self.octree, profile);
 
-        // Profile nodes already on the GPU arrived before the profile wanted
-        // them, so it has no copy: have the loader fetch them again. Nodes
-        // still downloading will reach the profile anyway.
-        let downloading = &self.fetching;
-        let resident = |key: &VoxelKey| renderer.has_node(key) && !downloading.contains(key);
-        for key in self.profile.take_refetches(resident) {
-            self.loader.evicted(key);
-        }
-
-        // The 3D view's nodes go first, so the profile and map never delay
+        // The 3D view's nodes go first, so the map never delays
         // them, except for an image being saved, which the user is waiting for.
         let not_loaded =
             |key: &&VoxelKey| !renderer.has_node(key) && !self.failed.contains_key(key);
@@ -504,11 +470,6 @@ impl Session {
             .clone()
             .chain(&self.selection.keys)
             .filter(&not_loaded)
-            .chain(
-                self.profile
-                    .missing()
-                    .filter(|key| !self.failed.contains_key(key)),
-            )
             .chain(self.map_selection.keys.iter().filter(&not_loaded))
             .filter(|key| seen.insert(**key))
             .copied()
@@ -805,24 +766,6 @@ impl eframe::App for ViewerApp {
         }
 
         self.finish_export(ui.ctx());
-
-        if let (LoadState::Open(session), Mode::Subcloud, Some(subcloud_mode)) =
-            (&mut self.state, self.mode, &mut self.subcloud)
-            && subcloud_mode.profile.show
-        {
-            let mut open = true;
-            egui::Window::new("Density profile")
-                .open(&mut open)
-                // Bottom right, clear of the gizmo in the top right.
-                .pivot(egui::Align2::RIGHT_BOTTOM)
-                .default_pos(central.response.rect.right_bottom() - egui::vec2(8.0, 8.0))
-                .default_size([320.0, 420.0])
-                .resizable(true)
-                .show(ui.ctx(), |ui| {
-                    profile_ui(ui, session, &mut subcloud_mode.profile)
-                });
-            subcloud_mode.profile.show = open;
-        }
     }
 }
 
@@ -1034,104 +977,6 @@ fn render_args(
     }
 }
 
-/// The density profile window: settings, loading progress and the chart.
-fn profile_ui(ui: &mut egui::Ui, session: &mut Session, settings: &mut ProfileSettings) {
-    ui.horizontal(|ui| {
-        ui.label("Band height");
-        ui.add(
-            egui::DragValue::new(&mut settings.bin_size)
-                .range(profile::MIN_BIN_SIZE..=10.0)
-                .speed(0.01)
-                .max_decimals(2)
-                .suffix(" m"),
-        );
-    });
-    ui.add(
-        egui::Slider::new(&mut settings.point_limit, 100_000..=20_000_000)
-            .logarithmic(true)
-            .custom_formatter(|value, _| format_count(value as u64))
-            .text("Point limit"),
-    )
-    .on_hover_text(
-        "The most points to load for the profile. It loads every level of detail \
-         under the shape, and the octree's boxes overlap the shape's edges, so this \
-         counts some points outside it too.",
-    );
-    ui.separator();
-
-    let failed = &session.failed;
-    let loading = match session.profile.status(|key| failed.contains_key(key)) {
-        profile::Status::TooMany => {
-            ui.label(format!(
-                "There are more than {} points under the shape. Make it smaller or \
-                 raise the point limit.",
-                format_count(settings.point_limit)
-            ));
-            return;
-        }
-        profile::Status::Loading {
-            loaded,
-            failed,
-            total,
-            points,
-        } => {
-            let loading = loaded + failed < total;
-            if loading {
-                ui.horizontal(|ui| {
-                    ui.spinner();
-                    ui.label(format!(
-                        "Loading {loaded} of {total} nodes ({} points)",
-                        format_count(points)
-                    ));
-                });
-            }
-            if failed > 0 {
-                ui.colored_label(
-                    ui.visuals().error_fg_color,
-                    format!("{failed} nodes failed to load, so their points are missing"),
-                );
-            }
-            loading
-        }
-    };
-
-    let origin_z = session.info.origin[2];
-    // Heights above ground mean something on their own, so band them from
-    // the ground rather than from the lowest point.
-    let above_ground = session.shown == HeightKind::AboveGround;
-    let zero = above_ground.then_some(-origin_z as f32);
-    match session.profile.histogram(settings.bin_size, zero) {
-        Some(histogram) => {
-            let lowest = f64::from(histogram.lowest) + origin_z;
-            let lowest = if above_ground {
-                format!("{lowest:.2} m above ground")
-            } else {
-                format!("{lowest:.2} m")
-            };
-            ui.label(format!(
-                "{} points, the lowest at {lowest}",
-                format_count(histogram.total)
-            ));
-            ui.weak(if above_ground {
-                format!(
-                    "Points in each {} m band of height above ground",
-                    settings.bin_size
-                )
-            } else {
-                format!(
-                    "Points in each {} m band, by height above the lowest point",
-                    settings.bin_size
-                )
-            });
-            profile::chart(ui, histogram);
-        }
-        None if loading => {}
-        None => {
-            ui.label("There are no points inside the shape.");
-        }
-    }
-}
-
 impl SubcloudMode {
     fn new(bounds: (glam::Vec3, glam::Vec3)) -> Self {
         let (min, max) = bounds;
@@ -1143,11 +988,6 @@ impl SubcloudMode {
             reframe: Some(Reframe::Aim),
             followed_centre: subcloud.centre(),
             sweep_step_percent: subcloud::DEFAULT_SWEEP_STEP_PERCENT,
-            profile: ProfileSettings {
-                show: false,
-                bin_size: profile::DEFAULT_BIN_SIZE,
-                point_limit: profile::DEFAULT_POINT_LIMIT,
-            },
         }
     }
 
@@ -1222,8 +1062,6 @@ impl SubcloudMode {
             {
                 self.reframe = Some(Reframe::Aim);
             }
-            ui.checkbox(&mut self.profile.show, "Density profile")
-                .on_hover_text("Count the subcloud's points in each height band");
         });
         ui.weak(format!("{hint}\nRight-drag: pan · Scroll: zoom"));
         ui.add_space(4.0);
@@ -1319,10 +1157,6 @@ impl SubcloudMode {
         let map_view = map_frame
             .as_ref()
             .map(|frame| lod::View::new(self.map.camera(), frame.size_px));
-        let profile = self.profile.show.then_some(ProfileRequest {
-            footprint,
-            point_limit: self.profile.point_limit,
-        });
         let views = Views {
             main: &view,
             map: map_view.as_ref(),
@@ -1330,7 +1164,7 @@ impl SubcloudMode {
         };
         scene
             .session
-            .update(scene.renderer, views, profile, &scene.settings.lod);
+            .update(scene.renderer, views, &scene.settings.lod);
         let texture_id = scene.render_main(&area, &self.camera, Some(footprint));
         area.paint(ui, texture_id, scene.image_aspect);
 
@@ -1524,7 +1358,7 @@ fn explore_view(ui: &mut egui::Ui, scene: &mut Scene<'_>, camera: &mut OrbitCame
     };
     scene
         .session
-        .update(scene.renderer, views, None, &scene.settings.lod);
+        .update(scene.renderer, views, &scene.settings.lod);
     let texture_id = scene.render_main(&area, camera, None);
     area.paint(ui, texture_id, scene.image_aspect);
 }
