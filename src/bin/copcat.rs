@@ -19,7 +19,11 @@ struct Cli {
 #[derive(Subcommand)]
 enum Commands {
     /// Open a COPC point cloud (a URL or a file path) in a new viewer window.
-    Open { source: String },
+    Open {
+        source: String,
+        #[command(flatten)]
+        heights: copcat::HeightSettings,
+    },
     /// Render a view of a COPC point cloud to a PNG, without opening a window.
     ///
     /// The viewer's Save image section has a Copy as command button that
@@ -31,7 +35,7 @@ enum Commands {
 
 fn main() -> ExitCode {
     let result = match Cli::parse().command {
-        Commands::Open { source } => open(&source),
+        Commands::Open { source, heights } => open(&source, &heights),
         Commands::Render(args) => copcat::render(&args),
         Commands::Update => update(),
     };
@@ -45,10 +49,13 @@ fn main() -> ExitCode {
 }
 
 /// Starts `copcat-viewer` on `source` and returns without waiting for it.
-fn open(source: &str) -> Result<(), String> {
+fn open(source: &str, heights: &copcat::HeightSettings) -> Result<(), String> {
     let viewer = sibling_path("copcat-viewer")?;
     let mut command = Command::new(&viewer);
     command.arg(source);
+    // `=` so a dimension name can't be read as a flag.
+    command.arg(format!("--elevation={}", heights.elevation));
+    command.arg(format!("--hag={}", heights.hag));
     // Detach from our stdio: a caller that reads our output to the end (an
     // agent, a script) would otherwise wait until the window is closed.
     command

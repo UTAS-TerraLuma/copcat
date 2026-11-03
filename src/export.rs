@@ -13,9 +13,9 @@ use eframe::egui_wgpu::wgpu;
 
 use crate::app::{format_count, uses_16_bit_color};
 use crate::camera::{OrbitCamera, Projection, ViewPreset};
-use crate::cloud::CloudInfo;
-use crate::loader::{Event, Loader};
-use crate::lod::{self, LodSettings};
+use crate::heights::{HeightKind, HeightSettings, HeightSource, SourceSetting};
+use crate::loader::{Event, Loader, OpenedCloud};
+use crate::lod::{self, LodSettings, Octree};
 use crate::renderer::{EdlSettings, Image, PointColor, PointRenderer, PointStyle};
 
 /// `copcat render`'s arguments. The viewer's Copy as command writes them too,
@@ -37,6 +37,8 @@ pub struct RenderArgs {
     pub camera: CameraArgs,
     #[command(flatten)]
     pub style: StyleArgs,
+    #[command(flatten)]
+    pub heights: HeightSettings,
 }
 
 /// Where the camera is. Without any of these, it looks at the whole cloud
@@ -80,6 +82,10 @@ pub struct StyleArgs {
     /// Colour by the file's RGB (if it has any, else height) or by height.
     #[arg(long, value_enum, default_value_t = ColorArg::Rgb)]
     pub color: ColorArg,
+    /// Which height to draw points at. Defaults to the one in Z. --target's
+    /// Z is in this height too.
+    #[arg(long, value_enum)]
+    pub z: Option<HeightKind>,
     /// Point diameter in pixels.
     #[arg(long, value_name = "PIXELS", default_value_t = 2.0)]
     pub point_size: f32,
@@ -168,21 +174,21 @@ impl CameraArgs {
         }
     }
 
-    /// The camera these describe, for the cloud `info` describes.
-    pub fn camera(&self, info: &CloudInfo) -> OrbitCamera {
+    /// The camera these describe, for a cloud with these local `bounds`
+    /// whose octree centre is `origin`.
+    pub fn camera(&self, (min, max): (glam::Vec3, glam::Vec3), origin: [f64; 3]) -> OrbitCamera {
         let mut camera = OrbitCamera::default();
         // First, so the default distance fits the cloud in this view.
         if let Some(fov) = self.fov {
             camera.fov_y = fov.clamp(0.1, 179.0).to_radians();
         }
         // Also sets the clip planes to fit the cloud, which nothing else here does.
-        let (min, max) = info.local_bounds();
         camera.frame_bounds(min, max);
         if let Some(view) = self.view {
             camera.set_view(view.into());
         }
         if let Some(target) = self.target {
-            camera.target = glam::Vec3::from_array(crate::cloud::to_local(target, info.origin));
+            camera.target = glam::Vec3::from_array(crate::cloud::to_local(target, origin));
         }
         if let Some(distance) = self.distance {
             camera.distance = distance.max(1e-3);
@@ -208,13 +214,14 @@ impl StyleArgs {
         }
     }
 
-    fn point_style(&self, has_rgb: bool, rgb_is_16_bit: bool) -> PointStyle {
+    fn point_style(&self, has_rgb: bool, rgb_is_16_bit: bool, height: HeightKind) -> PointStyle {
         PointStyle {
             size_px: self.point_size,
             color: match self.color {
                 ColorArg::Rgb if has_rgb => PointColor::rgb(rgb_is_16_bit),
                 _ => PointColor::Height,
             },
+            height,
             edl: (!self.no_edl).then_some(EdlSettings {
                 strength: self.edl_strength,
                 radius_px: self.edl_radius,
@@ -257,7 +264,16 @@ impl RenderArgs {
         if let Some(fov) = camera.fov {
             parts.push(format!("--fov {fov:.4}"));
         }
+        let heights = &self.heights;
+        for (flag, setting) in [("--elevation", &heights.elevation), ("--hag", &heights.hag)] {
+            if *setting != SourceSetting::Auto {
+                parts.push(format!("{flag} {}", quote(&setting.to_string())));
+            }
+        }
         let style = &self.style;
+        if let Some(z) = style.z {
+            parts.push(format!("--z {}", value_name(z)));
+        }
         parts.push(format!("--color {}", value_name(style.color)));
         parts.push(format!("--point-size {:.2}", style.point_size));
         if style.no_edl {
@@ -308,56 +324,73 @@ pub fn render(args: &RenderArgs) -> Result<(), String> {
     }
 
     // The loader wakes egui on news; a context with no window ignores that.
-    let loader = Loader::spawn(args.source.clone(), egui::Context::default());
-    let opened = match loader.recv() {
-        Some(Event::Opened(opened)) => opened,
+    let loader = Loader::spawn(
+        args.source.clone(),
+        args.heights.clone(),
+        egui::Context::default(),
+    );
+    let OpenedCloud { info, mut octree } = match loader.recv() {
+        Some(Event::Opened(opened)) => *opened,
         Some(Event::Failed(error)) => return Err(error.to_string()),
         Some(_) => return Err("the loader sent nodes before opening the file".to_owned()),
         None => return Err("the loader thread crashed".to_owned()),
     };
-    let info = &opened.info;
-    let (min, max) = info.local_bounds();
+    let height = args.style.z.unwrap_or_else(|| info.default_height());
+    let shown_is_z = match &info.heights[height] {
+        Some(source) => *source == HeightSource::Z,
+        None => return Err(format!("the file has no {}", height.label().to_lowercase())),
+    };
+    let mut nodes = NodeLoader {
+        loader,
+        renderer: &mut renderer,
+        octree: &mut octree,
+        done: HashSet::new(),
+        failed: 0,
+        rgb_is_16_bit: false,
+    };
+    if !shown_is_z {
+        // Node bounds come from the heights of nodes loaded so far, so start
+        // with the root to know where the cloud is.
+        nodes.octree.show_heights(Some(height));
+        nodes.load(&[VoxelKey::ROOT])?;
+    }
+
+    let camera = args.camera.camera(nodes.octree.bounds(), info.origin);
+    let view = lod::View::new(&camera, size);
+    // Loading nodes can refine the bounds of their children (when the
+    // height isn't Z), which can change the selection, so select again
+    // until every node it picks is loaded.
+    let selection = loop {
+        let selection = lod::select_nodes(nodes.octree, &view, &args.style.lod());
+        let missing: Vec<VoxelKey> = selection
+            .keys
+            .iter()
+            .filter(|key| !nodes.done.contains(key))
+            .copied()
+            .collect();
+        if missing.is_empty() {
+            break selection;
+        }
+        eprintln!(
+            "Loading {} nodes ({} points selected)",
+            missing.len(),
+            format_count(selection.points)
+        );
+        nodes.load(&missing)?;
+    };
+    if nodes.failed > 0 {
+        eprintln!(
+            "copcat: {} nodes failed to load, so the image is missing their points",
+            nodes.failed
+        );
+    }
+    let rgb_is_16_bit = nodes.rgb_is_16_bit;
+    // Everything's loaded, so the loader thread can stop.
+    drop(nodes);
+    let (min, max) = octree.bounds();
     renderer.set_z_range([min.z, max.z]);
 
-    let camera = args.camera.camera(info);
-    let view = lod::View::new(&camera, size);
-    let selection = lod::select_nodes(&opened.octree, &view, &args.style.lod());
-    eprintln!(
-        "Loading {} nodes ({} points)",
-        selection.keys.len(),
-        format_count(selection.points)
-    );
-
-    loader.want(selection.keys.clone());
-    let mut waiting: HashSet<VoxelKey> = selection.keys.iter().copied().collect();
-    let mut failed = 0;
-    let mut rgb_is_16_bit = false;
-    while !waiting.is_empty() {
-        match loader.recv() {
-            Some(Event::Node { key, result }) => {
-                waiting.remove(&key);
-                match result {
-                    Ok(node) => {
-                        let colors = node.colors.as_deref();
-                        rgb_is_16_bit |= colors.is_some_and(uses_16_bit_color);
-                        renderer.insert_node(key, &node.positions, colors);
-                    }
-                    Err(error) => {
-                        failed += 1;
-                        eprintln!("copcat: node {key:?} failed to load: {error}");
-                    }
-                }
-            }
-            Some(Event::Fetching(_) | Event::Opened(_)) => {}
-            Some(Event::Failed(error)) => return Err(error.to_string()),
-            None => return Err("the loader thread crashed".to_owned()),
-        }
-    }
-    if failed > 0 {
-        eprintln!("copcat: {failed} nodes failed to load, so the image is missing their points");
-    }
-
-    let style = args.style.point_style(info.has_rgb, rgb_is_16_bit);
+    let style = args.style.point_style(info.has_rgb, rgb_is_16_bit, height);
     let mut viewport = renderer.create_viewport();
     let image = renderer.capture(&mut viewport, size, &camera, &style, &selection.keys)?;
     write_png(&args.output, &image)?;
@@ -369,6 +402,49 @@ pub fn render(args: &RenderArgs) -> Result<(), String> {
         format_count(selection.points)
     );
     Ok(())
+}
+
+/// Loads nodes for `render` onto the GPU, waiting for each batch.
+struct NodeLoader<'a> {
+    loader: Loader,
+    renderer: &'a mut PointRenderer,
+    octree: &'a mut Octree,
+    /// Nodes loaded or failed, so they're not asked for again.
+    done: HashSet<VoxelKey>,
+    failed: usize,
+    rgb_is_16_bit: bool,
+}
+
+impl NodeLoader<'_> {
+    /// Loads `keys` and waits until each has loaded or failed.
+    fn load(&mut self, keys: &[VoxelKey]) -> Result<(), String> {
+        self.loader.want(keys.to_vec());
+        let mut waiting: HashSet<VoxelKey> = keys.iter().copied().collect();
+        while !waiting.is_empty() {
+            match self.loader.recv() {
+                Some(Event::Node { key, result }) => {
+                    waiting.remove(&key);
+                    self.done.insert(key);
+                    match result {
+                        Ok(node) => {
+                            let colors = node.colors.as_deref();
+                            self.rgb_is_16_bit |= colors.is_some_and(uses_16_bit_color);
+                            self.renderer.insert_node(key, &node.points, colors);
+                            self.octree.record_node_heights(key, &node.points);
+                        }
+                        Err(error) => {
+                            self.failed += 1;
+                            eprintln!("copcat: node {key:?} failed to load: {error}");
+                        }
+                    }
+                }
+                Some(Event::Fetching(_) | Event::Opened(_)) => {}
+                Some(Event::Failed(error)) => return Err(error.to_string()),
+                None => return Err("the loader thread crashed".to_owned()),
+            }
+        }
+        Ok(())
+    }
 }
 
 /// A GPU device with no window, allowing images as big as the GPU can draw.
@@ -438,12 +514,17 @@ mod tests {
             },
             style: StyleArgs {
                 color: ColorArg::Height,
+                z: Some(HeightKind::AboveGround),
                 point_size: 3.0,
                 no_edl: true,
                 edl_strength: 1.0,
                 edl_radius: 1.4,
                 point_budget: 1_000_000,
                 target_spacing: 1.5,
+            },
+            heights: HeightSettings {
+                elevation: SourceSetting::From(HeightSource::Extra("Z orig".to_owned())),
+                hag: SourceSetting::From(HeightSource::Z),
             },
         };
         let line = args.command_line();
@@ -469,6 +550,8 @@ mod tests {
         assert_eq!(parsed.camera.fov, Some(22.5));
         assert_eq!(parsed.camera.projection, Some(ProjectionArg::Orthographic));
         assert!(parsed.style.no_edl && parsed.style.color == ColorArg::Height);
+        assert_eq!(parsed.style.z, Some(HeightKind::AboveGround));
+        assert_eq!(parsed.heights, args.heights);
     }
 
     #[test]

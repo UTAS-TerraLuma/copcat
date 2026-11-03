@@ -9,6 +9,8 @@ use copc_streaming::VoxelKey;
 use eframe::egui::{self, CornerRadius, Rect, Sense, Stroke};
 
 use crate::app::format_count;
+use crate::heights::HeightKind;
+use crate::loader::NodePoints;
 use crate::lod::{self, Octree, Selection};
 use crate::subcloud::Footprint;
 use crate::subcloud_map::SUBCLOUD_COLOR;
@@ -39,9 +41,11 @@ pub struct ProfilePoints {
     nodes: Option<Selection>,
     /// The same keys as `nodes`, for quick lookups.
     wanted: HashSet<VoxelKey>,
-    /// Copies of the wanted nodes' positions, kept to refilter when the
-    /// footprint changes.
-    positions: HashMap<VoxelKey, Vec<[f32; 3]>>,
+    /// Copies of the wanted nodes' points, kept to refilter when the
+    /// footprint (or the height shown) changes.
+    points: HashMap<VoxelKey, NodePoints>,
+    /// Which height to count.
+    height: HeightKind,
     /// Wanted nodes that were already on the GPU before the profile asked
     /// for them, so the loader was told to fetch them again.
     refetching: HashSet<VoxelKey>,
@@ -89,8 +93,16 @@ impl ProfilePoints {
             .flat_map(|nodes| nodes.keys.iter().copied())
             .collect();
         // `retain` keeps the entries the closure returns true for.
-        self.positions.retain(|key, _| self.wanted.contains(key));
+        self.points.retain(|key, _| self.wanted.contains(key));
         self.heights = None;
+    }
+
+    /// Counts `kind` heights from now on.
+    pub fn set_height(&mut self, kind: HeightKind) {
+        if kind != self.height {
+            self.height = kind;
+            self.heights = None;
+        }
     }
 
     /// Wanted nodes that haven't arrived yet, coarsest first.
@@ -98,7 +110,7 @@ impl ProfilePoints {
         self.nodes
             .iter()
             .flat_map(|nodes| &nodes.keys)
-            .filter(|key| !self.positions.contains_key(key))
+            .filter(|key| !self.points.contains_key(key))
     }
 
     /// Wanted nodes that `is_resident` says are on the GPU, so they arrived
@@ -114,18 +126,18 @@ impl ProfilePoints {
         refetches
     }
 
-    /// Keeps a newly loaded node's positions, if the profile wants them.
-    pub fn receive(&mut self, key: VoxelKey, positions: Vec<[f32; 3]>) {
+    /// Keeps a newly loaded node's points, if the profile wants them.
+    pub fn receive(&mut self, key: VoxelKey, points: NodePoints) {
         self.refetching.remove(&key);
         if !self.wanted.contains(&key) {
             return;
         }
         // Add the new node's heights, unless they'll all be refiltered anyway.
         if let (Some(heights), Some(request)) = (&mut self.heights, &self.request) {
-            heights.extend(heights_inside(&request.footprint, &positions));
+            heights.extend(heights_inside(&request.footprint, &points, self.height));
             self.histogram_is_stale = true;
         }
-        self.positions.insert(key, positions);
+        self.points.insert(key, points);
     }
 
     pub fn status(&self, failed: impl Fn(&VoxelKey) -> bool) -> Status {
@@ -133,69 +145,83 @@ impl ProfilePoints {
             return Status::TooMany;
         };
         Status::Loading {
-            loaded: self.positions.len(),
+            loaded: self.points.len(),
             failed: self.missing().filter(|key| failed(key)).count(),
             total: nodes.keys.len(),
             points: nodes.points,
         }
     }
 
-    /// The profile so far, with bands `bin_size` metres tall. While the
-    /// shape moves this is the last one made, until it holds still.
-    pub fn histogram(&mut self, bin_size: f32) -> Option<&Histogram> {
+    /// The profile so far, with bands `bin_size` metres tall, measured from
+    /// `zero` (a local height) if given, or else from the lowest point. While
+    /// the shape moves this is the last one made, until it holds still.
+    pub fn histogram(&mut self, bin_size: f32, zero: Option<f32>) -> Option<&Histogram> {
         if !self.moving
             && self.heights.is_none()
             && let Some(request) = &self.request
         {
             let heights = self
-                .positions
+                .points
                 .values()
-                .flat_map(|positions| heights_inside(&request.footprint, positions))
+                .flat_map(|points| heights_inside(&request.footprint, points, self.height))
                 .collect();
             self.heights = Some(heights);
             self.histogram_is_stale = true;
         }
-        let bin_size_changed = self
+        let bands_changed = self
             .histogram
             .as_ref()
-            .is_some_and(|histogram| histogram.bin_size != bin_size);
-        if (self.histogram_is_stale || bin_size_changed)
+            .is_some_and(|histogram| histogram.bin_size != bin_size || histogram.zero != zero);
+        if (self.histogram_is_stale || bands_changed)
             && let Some(heights) = &self.heights
         {
-            self.histogram = Histogram::new(heights, bin_size);
+            self.histogram = Histogram::new(heights, bin_size, zero);
             self.histogram_is_stale = false;
         }
         self.histogram.as_ref()
     }
 }
 
-/// The heights of the points in `positions` that are inside `footprint`.
-fn heights_inside(footprint: &Footprint, positions: &[[f32; 3]]) -> impl Iterator<Item = f32> {
-    positions
+/// The `kind` heights of the points that are inside `footprint`.
+fn heights_inside(
+    footprint: &Footprint,
+    points: &NodePoints,
+    kind: HeightKind,
+) -> impl Iterator<Item = f32> {
+    points
+        .positions
         .iter()
-        .filter(|[x, y, _]| footprint.contains(glam::vec2(*x, *y)))
-        .map(|[_, _, z]| *z)
+        .enumerate()
+        .filter(|(_, [x, y, _])| footprint.contains(glam::vec2(*x, *y)))
+        .map(move |(i, _)| points.height(kind, i))
 }
 
 /// Point counts in height bands, from the lowest point up.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Histogram {
     pub bin_size: f32,
-    /// Local height of the lowest point, where the first band starts.
+    /// Local height of the lowest point.
     pub lowest: f32,
+    /// The local height that bands are measured from, if not the lowest point.
+    pub zero: Option<f32>,
+    /// Where the first band starts, measured from `zero` (or the lowest point).
+    pub base: f32,
     /// Points in each band, bottom first.
     pub counts: Vec<u64>,
     pub total: u64,
 }
 
 impl Histogram {
-    /// `None` when there are no heights to count.
-    pub fn new(heights: &[f32], bin_size: f32) -> Option<Self> {
+    /// `None` when there are no heights to count. With a `zero`, bands start
+    /// at whole multiples of `bin_size` from it.
+    pub fn new(heights: &[f32], bin_size: f32, zero: Option<f32>) -> Option<Self> {
         let lowest = heights.iter().copied().reduce(f32::min)?;
+        let base = zero.map_or(0.0, |zero| ((lowest - zero) / bin_size).floor() * bin_size);
+        let start = zero.unwrap_or(lowest) + base;
         let mut counts = Vec::new();
         for height in heights {
             // `as` rounds towards zero, which is a floor for positive values.
-            let bin = ((height - lowest) / bin_size) as usize;
+            let bin = ((height - start).max(0.0) / bin_size) as usize;
             if bin >= counts.len() {
                 counts.resize(bin + 1, 0);
             }
@@ -204,12 +230,14 @@ impl Histogram {
         Some(Self {
             bin_size,
             lowest,
+            zero,
+            base,
             total: heights.len() as u64,
             counts,
         })
     }
 
-    /// From the lowest point to the top of the highest band.
+    /// From the bottom of the lowest band to the top of the highest.
     pub fn height(&self) -> f32 {
         self.counts.len() as f32 * self.bin_size
     }
@@ -250,9 +278,13 @@ pub fn chart(ui: &mut egui::Ui, histogram: &Histogram) {
     let height_step = nice_step(height_max / 6.0);
     // Enough decimals to tell the ticks apart: none for whole metres.
     let decimals = (-height_step.log10()).ceil().max(0.0) as usize;
-    for i in 0..=(height_max / height_step).floor() as u32 {
+    // Labelled from `base`, so ticks fall on whole steps of what's shown.
+    let base = histogram.base;
+    let first_tick = (base / height_step).ceil() as i32;
+    let last_tick = ((base + height_max) / height_step).floor() as i32;
+    for i in first_tick..=last_tick {
         let height = i as f32 * height_step;
-        let at = y(height);
+        let at = y(height - base);
         painter.hline(plot.x_range(), at, grid);
         painter.text(
             egui::pos2(plot.left() - 6.0, at),
@@ -313,7 +345,7 @@ pub fn chart(ui: &mut egui::Ui, histogram: &Histogram) {
 
     if let Some(bin) = hovered_bin {
         let count = histogram.counts[bin];
-        let from = bin as f32 * histogram.bin_size;
+        let from = base + bin as f32 * histogram.bin_size;
         let share = count as f64 / histogram.total.max(1) as f64 * 100.0;
         response.on_hover_ui_at_pointer(|ui| {
             ui.label(format!("{from:.2}–{:.2} m", from + histogram.bin_size));
@@ -342,16 +374,24 @@ fn nice_step(rough: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::heights::PerHeight;
 
     #[test]
     fn histogram_should_count_from_the_lowest_point() {
-        let histogram = Histogram::new(&[10.0, 10.2, 10.6, 11.9], 0.5);
+        let histogram = Histogram::new(&[10.0, 10.2, 10.6, 11.9], 0.5, None);
         assert_eq!(histogram.map(|h| h.counts), Some(vec![2, 1, 0, 1]));
     }
 
     #[test]
+    fn histogram_should_align_bands_to_zero_when_given() {
+        // Heights above ground of 0.3 to 1.2 m, stored 100 m below the origin.
+        let histogram = Histogram::new(&[-99.7, -99.4, -98.8], 0.5, Some(-100.0)).unwrap();
+        assert_eq!((histogram.base, histogram.counts), (0.0, vec![1, 1, 1]));
+    }
+
+    #[test]
     fn histogram_should_be_none_without_points() {
-        assert_eq!(Histogram::new(&[], 0.5), None);
+        assert_eq!(Histogram::new(&[], 0.5, None), None);
     }
 
     #[test]
@@ -388,11 +428,31 @@ mod tests {
         profile.set_request(&octree(), Some(circle()));
         profile.receive(
             VoxelKey::ROOT,
-            vec![[0.0, 0.0, 1.0], [0.5, 0.0, 2.0], [5.0, 0.0, 3.0]],
+            NodePoints {
+                positions: vec![[0.0, 0.0, 1.0], [0.5, 0.0, 2.0], [5.0, 0.0, 3.0]],
+                extra_heights: PerHeight::default(),
+            },
         );
         // The next frame, with the request holding still.
         profile.set_request(&octree(), Some(circle()));
-        assert_eq!(profile.histogram(1.0).map(|h| h.total), Some(2));
+        assert_eq!(profile.histogram(1.0, None).map(|h| h.total), Some(2));
+    }
+
+    #[test]
+    fn histogram_should_count_the_height_shown() {
+        let mut profile = ProfilePoints::default();
+        profile.set_request(&octree(), Some(circle()));
+        profile.receive(
+            VoxelKey::ROOT,
+            NodePoints {
+                positions: vec![[0.0, 0.0, 400.0], [0.5, 0.0, 420.0]],
+                extra_heights: PerHeight([None, Some(vec![1.0, 21.0])]),
+            },
+        );
+        profile.set_request(&octree(), Some(circle()));
+        profile.set_height(HeightKind::AboveGround);
+        let lowest = profile.histogram(1.0, None).map(|h| h.lowest);
+        assert_eq!(lowest, Some(1.0));
     }
 
     #[test]

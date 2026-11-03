@@ -1,6 +1,8 @@
 // Draws each point as a screen-space quad (6 vertices, one instance per point),
 // trimmed to a circle in the fragment shader. Two vertex entry points pick the
 // colour: `vs_height` (viridis ramp on Z) or `vs_rgb` (the file's colours).
+// The `_lifted` variants draw each point at a height from a separate buffer
+// (one read from an extra dimension) instead of its Z.
 
 struct Uniforms {
     view_proj: mat4x4<f32>,
@@ -32,8 +34,7 @@ fn vs_height(
     @builtin(vertex_index) vertex_index: u32,
     @location(0) position: vec3<f32>,
 ) -> VertexOutput {
-    let t = clamp((position.z - u.z_min) / max(u.z_max - u.z_min, 1e-6), 0.0, 1.0);
-    return point_vertex(vertex_index, position, viridis(t));
+    return height_vertex(vertex_index, position);
 }
 
 @vertex
@@ -43,6 +44,34 @@ fn vs_rgb(
     // Unorm16x4: the GPU divides the stored u16s by 65535.
     @location(1) color: vec4<f32>,
 ) -> VertexOutput {
+    return rgb_vertex(vertex_index, position, color);
+}
+
+@vertex
+fn vs_height_lifted(
+    @builtin(vertex_index) vertex_index: u32,
+    @location(0) position: vec3<f32>,
+    @location(2) height: f32,
+) -> VertexOutput {
+    return height_vertex(vertex_index, vec3(position.xy, height));
+}
+
+@vertex
+fn vs_rgb_lifted(
+    @builtin(vertex_index) vertex_index: u32,
+    @location(0) position: vec3<f32>,
+    @location(1) color: vec4<f32>,
+    @location(2) height: f32,
+) -> VertexOutput {
+    return rgb_vertex(vertex_index, vec3(position.xy, height), color);
+}
+
+fn height_vertex(vertex_index: u32, position: vec3<f32>) -> VertexOutput {
+    let t = clamp((position.z - u.z_min) / max(u.z_max - u.z_min, 1e-6), 0.0, 1.0);
+    return point_vertex(vertex_index, position, viridis(t));
+}
+
+fn rgb_vertex(vertex_index: u32, position: vec3<f32>, color: vec4<f32>) -> VertexOutput {
     return point_vertex(vertex_index, position, min(color.rgb * u.color_scale, vec3(1.0)));
 }
 

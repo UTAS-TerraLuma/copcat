@@ -6,6 +6,7 @@ mod camera;
 mod cloud;
 mod export;
 mod gizmo;
+mod heights;
 mod http_source;
 mod loader;
 mod lod;
@@ -21,10 +22,12 @@ use std::sync::Arc;
 use eframe::{egui, egui_wgpu};
 
 pub use export::{RenderArgs, render};
+pub use heights::HeightSettings;
 
 /// Opens the viewer window and blocks until it's closed. `initial_source` is a
-/// COPC URL or file path to load on startup.
-pub fn run_viewer(initial_source: Option<String>) -> eframe::Result {
+/// COPC URL or file path to load on startup, reading its heights from where
+/// `heights` says.
+pub fn run_viewer(initial_source: Option<String>, heights: HeightSettings) -> eframe::Result {
     let mut options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("Copcat")
@@ -46,6 +49,6 @@ pub fn run_viewer(initial_source: Option<String>) -> eframe::Result {
     eframe::run_native(
         "Copcat",
         options,
-        Box::new(|cc| Ok(Box::new(app::ViewerApp::new(cc, initial_source)?))),
+        Box::new(|cc| Ok(Box::new(app::ViewerApp::new(cc, initial_source, heights)?))),
     )
 }

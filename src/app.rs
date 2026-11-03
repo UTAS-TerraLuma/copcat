@@ -9,9 +9,10 @@ use copc_streaming::VoxelKey;
 use eframe::egui;
 
 use crate::camera::{OrbitCamera, Projection, ViewPreset};
-use crate::cloud::CloudInfo;
+use crate::cloud::{CloudInfo, LoadError};
 use crate::export::{self, CameraArgs, ColorArg, RenderArgs, StyleArgs};
 use crate::gizmo;
+use crate::heights::{HeightKind, HeightSettings, HeightSource, SourceSetting};
 use crate::loader::{Event, Loader, OpenedCloud};
 use crate::lod::{self, LodSettings, Octree, Selection};
 use crate::profile::{self, ProfilePoints, ProfileRequest};
@@ -55,6 +56,10 @@ pub struct ViewerApp {
     /// subcloud. Created the first time Subcloud mode is shown for a cloud.
     subcloud: Option<SubcloudMode>,
     export: ImageExport,
+    /// Where the open cloud's heights were read from, as asked.
+    heights: HeightSettings,
+    /// The same, as edited in the Heights section until Reload applies it.
+    heights_draft: HeightSettings,
 }
 
 /// The Save image section's settings, and the image being saved.
@@ -126,8 +131,6 @@ struct SubcloudMode {
     /// switching modes returns each view to where it was.
     camera: OrbitCamera,
     map: SubcloudMap,
-    /// The cloud's local bounds.
-    bounds: (glam::Vec3, glam::Vec3),
     /// How to point `camera` at the subcloud next frame, once the 3D view's
     /// aspect ratio is known.
     reframe: Option<Reframe>,
@@ -193,6 +196,8 @@ enum LoadState {
     Failed {
         source: String,
         error: String,
+        /// The heights couldn't be found where the settings said.
+        bad_heights: bool,
     },
 }
 
@@ -211,9 +216,11 @@ struct Session {
     export_selection: Option<Selection>,
     /// Full-resolution points for the density profile, when it's shown.
     profile: ProfilePoints,
-    /// The lowest and highest point of every node loaded so far, kept after
-    /// the node is evicted (it's tiny), for framing subclouds.
-    height_ranges: HashMap<VoxelKey, (f32, f32)>,
+    /// The height points are drawn at.
+    shown: HeightKind,
+    /// Frame the camera once the root node arrives: the shown height isn't
+    /// in Z, so there's no telling where the cloud is until then.
+    frame_on_root: bool,
     /// The last list sent to the loader: selected nodes that aren't loaded yet.
     requested: Vec<VoxelKey>,
     /// Nodes the loader is downloading right now.
@@ -230,6 +237,7 @@ impl ViewerApp {
     pub fn new(
         cc: &eframe::CreationContext<'_>,
         initial_source: Option<String>,
+        heights: HeightSettings,
     ) -> Result<Self, &'static str> {
         let render_state = cc
             .wgpu_render_state
@@ -269,6 +277,8 @@ impl ViewerApp {
                 writing: None,
                 status: None,
             },
+            heights_draft: heights.clone(),
+            heights,
         };
         if !app.url_input.trim().is_empty() {
             app.start_loading(&cc.egui_ctx);
@@ -278,7 +288,8 @@ impl ViewerApp {
 
     fn start_loading(&mut self, ctx: &egui::Context) {
         let source = self.url_input.trim().to_owned();
-        let loader = Loader::spawn(source.clone(), ctx.clone());
+        self.heights_draft = self.heights.clone();
+        let loader = Loader::spawn(source.clone(), self.heights.clone(), ctx.clone());
         // Replacing the state drops any previous loader, which stops its thread.
         self.state = LoadState::Opening { source, loader };
         self.renderer.clear_nodes();
@@ -294,10 +305,24 @@ impl ViewerApp {
         self.state = match mem::replace(&mut self.state, LoadState::Idle) {
             LoadState::Opening { source, loader } => self.poll_opening(source, loader),
             LoadState::Open(mut session) => match session.receive(&mut self.renderer) {
-                Ok(()) => LoadState::Open(session),
+                Ok(()) => {
+                    // The shown height's range grows as nodes arrive.
+                    let (min, max) = session.octree.bounds();
+                    self.renderer.set_z_range([min.z, max.z]);
+                    let root_loaded = session
+                        .octree
+                        .known_heights(session.shown)
+                        .contains_key(&VoxelKey::ROOT);
+                    if session.frame_on_root && root_loaded {
+                        session.frame_on_root = false;
+                        self.camera.frame_bounds(min, max);
+                    }
+                    LoadState::Open(session)
+                }
                 Err(error) => LoadState::Failed {
                     source: session.info.source.clone(),
                     error,
+                    bad_heights: false,
                 },
             },
             other => other,
@@ -307,13 +332,15 @@ impl ViewerApp {
     fn poll_opening(&mut self, source: String, loader: Loader) -> LoadState {
         match loader.try_recv() {
             Ok(Event::Opened(opened)) => {
-                let (min, max) = opened.info.local_bounds();
+                let session = Session::new(loader, *opened);
+                let (min, max) = session.octree.bounds();
                 self.renderer.set_z_range([min.z, max.z]);
                 self.camera.frame_bounds(min, max);
-                LoadState::Open(Box::new(Session::new(loader, *opened)))
+                LoadState::Open(Box::new(session))
             }
             Ok(Event::Failed(error)) => LoadState::Failed {
                 source,
+                bad_heights: matches!(error, LoadError::Heights(_)),
                 error: error.to_string(),
             },
             // Node events only come after `Opened`, once the UI asks for nodes.
@@ -323,6 +350,7 @@ impl ViewerApp {
             Err(TryRecvError::Disconnected) => LoadState::Failed {
                 source,
                 error: "the loader thread crashed".to_owned(),
+                bad_heights: false,
             },
         }
     }
@@ -362,7 +390,8 @@ impl ViewerApp {
 
 impl Session {
     fn new(loader: Loader, opened: OpenedCloud) -> Self {
-        Self {
+        let shown = opened.info.default_height();
+        let mut session = Self {
             loader,
             info: opened.info,
             octree: opened.octree,
@@ -370,12 +399,29 @@ impl Session {
             map_selection: Selection::default(),
             export_selection: None,
             profile: ProfilePoints::default(),
-            height_ranges: HashMap::new(),
+            shown,
+            frame_on_root: false,
             requested: Vec::new(),
             fetching: HashSet::new(),
             failed: HashMap::new(),
             rgb_is_16_bit: false,
-        }
+        };
+        session.show_height(shown);
+        session.frame_on_root = !session.shown_is_z();
+        session
+    }
+
+    /// Draws points at `kind` heights from now on.
+    fn show_height(&mut self, kind: HeightKind) {
+        self.shown = kind;
+        self.octree
+            .show_heights((!self.shown_is_z()).then_some(kind));
+        self.profile.set_height(kind);
+    }
+
+    /// Whether the shown height is the file's Z, which the octree is built on.
+    fn shown_is_z(&self) -> bool {
+        self.info.heights[self.shown] == Some(HeightSource::Z)
     }
 
     /// Uploads newly loaded nodes. Errors if the loader can't continue.
@@ -389,12 +435,10 @@ impl Session {
                         Ok(node) => {
                             let colors = node.colors.as_deref();
                             self.rgb_is_16_bit |= colors.is_some_and(uses_16_bit_color);
-                            renderer.insert_node(key, &node.positions, colors);
-                            if let Some(range) = height_range(&node.positions) {
-                                self.height_ranges.insert(key, range);
-                            }
+                            renderer.insert_node(key, &node.points, colors);
+                            self.octree.record_node_heights(key, &node.points);
                             // Moved rather than copied: the GPU has its own copy now.
-                            self.profile.receive(key, node.positions);
+                            self.profile.receive(key, node.points);
                         }
                         Err(error) => {
                             self.failed.insert(key, error);
@@ -555,7 +599,7 @@ impl eframe::App for ViewerApp {
         // for both views have been chosen.
         let map_frame = match (&self.state, self.mode) {
             (LoadState::Open(session), Mode::Subcloud) => {
-                let bounds = session.info.local_bounds();
+                let bounds = session.octree.bounds();
                 let subcloud_mode = self
                     .subcloud
                     .get_or_insert_with(|| SubcloudMode::new(bounds));
@@ -575,6 +619,7 @@ impl eframe::App for ViewerApp {
             width as f32 / height as f32
         });
 
+        let mut retry_with_auto_heights = None;
         // The 3D view fills its panel edge to edge; the text states keep margins.
         let frame = match self.state {
             LoadState::Open(_) => egui::Frame::NONE,
@@ -609,18 +654,31 @@ impl eframe::App for ViewerApp {
                             _ => explore_view(ui, &mut scene, &mut self.camera),
                         }
                     }
-                    LoadState::Failed { source, error } => {
+                    LoadState::Failed {
+                        source,
+                        error,
+                        bad_heights,
+                    } => {
                         ui.colored_label(
                             ui.visuals().error_fg_color,
                             format!("Failed to load {source}"),
                         );
                         ui.label(error.as_str());
+                        if *bad_heights && ui.button("Open with automatic heights").clicked() {
+                            retry_with_auto_heights = Some(source.clone());
+                        }
                     }
                 });
+        if let Some(source) = retry_with_auto_heights {
+            self.heights = HeightSettings::default();
+            self.url_input = source;
+            self.start_loading(ui.ctx());
+        }
 
         // Floats over the 3D view rather than taking a side panel, so long
         // sources can't squeeze the viewport. Shown after the central panel so
         // its default position can sit just inside the viewport's corner.
+        let mut heights_action = None;
         if let LoadState::Open(session) = &self.state {
             let in_subcloud = self.mode == Mode::Subcloud;
             let clip = match (self.mode, &self.subcloud) {
@@ -656,6 +714,9 @@ impl eframe::App for ViewerApp {
                     streaming_stats(ui, session, &self.renderer);
                     ui.separator();
                     view_ui(ui, camera);
+                    ui.separator();
+                    heights_action =
+                        heights_ui(ui, session, &mut self.heights_draft, &self.heights);
                     ui.separator();
                     settings_ui(ui, &mut self.settings, session.info.has_rgb);
                     ui.separator();
@@ -710,6 +771,7 @@ impl eframe::App for ViewerApp {
                     let args = render_args(
                         session,
                         &self.settings,
+                        &self.heights,
                         &framed_camera(camera, view_size_px, self.export.size),
                         self.export.size,
                         pixels_per_point,
@@ -719,6 +781,18 @@ impl eframe::App for ViewerApp {
                 }
                 None => {}
             }
+        }
+
+        match heights_action {
+            Some(HeightsAction::Show(kind)) => self.show_height(kind),
+            Some(HeightsAction::Reload) => {
+                if let LoadState::Open(session) = &self.state {
+                    self.url_input = session.info.source.clone();
+                }
+                self.heights = self.heights_draft.clone();
+                self.start_loading(ui.ctx());
+            }
+            None => {}
         }
 
         self.finish_export(ui.ctx());
@@ -744,6 +818,24 @@ impl eframe::App for ViewerApp {
 }
 
 impl ViewerApp {
+    /// Switches the points to `kind` heights, moving each camera to follow.
+    fn show_height(&mut self, kind: HeightKind) {
+        let LoadState::Open(session) = &mut self.state else {
+            return;
+        };
+        let from = session.shown;
+        follow_height(&mut self.camera, &session.octree, from, kind);
+        if let Some(subcloud_mode) = &mut self.subcloud {
+            follow_height(&mut subcloud_mode.camera, &session.octree, from, kind);
+        }
+        session.show_height(kind);
+        if let Some(subcloud_mode) = &mut self.subcloud {
+            subcloud_mode.map.set_bounds(session.octree.bounds());
+        }
+        // Its camera was placed for the other height.
+        self.export.job = None;
+    }
+
     /// Renders the image being saved once its nodes have loaded, and
     /// reports when the PNG has been written.
     fn finish_export(&mut self, ctx: &egui::Context) {
@@ -902,6 +994,7 @@ fn image_frame(rect: egui::Rect, aspect: f32) -> egui::Rect {
 fn render_args(
     session: &Session,
     settings: &ViewSettings,
+    heights: &HeightSettings,
     camera: &OrbitCamera,
     size: [u32; 2],
     pixels_per_point: f32,
@@ -918,6 +1011,7 @@ fn render_args(
                 ColorMode::Rgb => ColorArg::Rgb,
                 ColorMode::Height => ColorArg::Height,
             },
+            z: Some(session.shown),
             // The command takes physical pixels, like `point_style` makes.
             point_size: settings.point_size * pixels_per_point,
             no_edl: !settings.edl_enabled,
@@ -926,6 +1020,7 @@ fn render_args(
             point_budget: settings.lod.point_budget,
             target_spacing: settings.lod.target_spacing_px,
         },
+        heights: heights.clone(),
     }
 }
 
@@ -991,17 +1086,33 @@ fn profile_ui(ui: &mut egui::Ui, session: &mut Session, settings: &mut ProfileSe
     };
 
     let origin_z = session.info.origin[2];
-    match session.profile.histogram(settings.bin_size) {
+    // Heights above ground mean something on their own, so band them from
+    // the ground rather than from the lowest point.
+    let above_ground = session.shown == HeightKind::AboveGround;
+    let zero = above_ground.then_some(-origin_z as f32);
+    match session.profile.histogram(settings.bin_size, zero) {
         Some(histogram) => {
             let lowest = f64::from(histogram.lowest) + origin_z;
+            let lowest = if above_ground {
+                format!("{lowest:.2} m above ground")
+            } else {
+                format!("{lowest:.2} m")
+            };
             ui.label(format!(
-                "{} points, the lowest at {lowest:.2} m",
+                "{} points, the lowest at {lowest}",
                 format_count(histogram.total)
             ));
-            ui.weak(format!(
-                "Points in each {} m band, by height above the lowest point",
-                settings.bin_size
-            ));
+            ui.weak(if above_ground {
+                format!(
+                    "Points in each {} m band of height above ground",
+                    settings.bin_size
+                )
+            } else {
+                format!(
+                    "Points in each {} m band, by height above the lowest point",
+                    settings.bin_size
+                )
+            });
             profile::chart(ui, histogram);
         }
         None if loading => {}
@@ -1019,7 +1130,6 @@ impl SubcloudMode {
             subcloud,
             camera: OrbitCamera::default(),
             map: SubcloudMap::new(bounds),
-            bounds,
             reframe: Some(Reframe::Aim),
             followed_centre: subcloud.centre(),
             sweep_step_percent: subcloud::DEFAULT_SWEEP_STEP_PERCENT,
@@ -1182,10 +1292,11 @@ impl SubcloudMode {
         if let Some(reframe) = self.reframe.take() {
             // A small plot is lost in the height of the whole cloud, so
             // frame just the height of the points loaded around it.
-            let (min, max) = self.bounds;
             let session = &scene.session;
-            let z_range = lod::z_range_under(&session.octree, &footprint, &session.height_ranges)
-                .unwrap_or((min.z, max.z));
+            let (min, max) = session.octree.bounds();
+            let known = session.octree.known_heights(session.shown);
+            let z_range =
+                lod::z_range_under(&session.octree, &footprint, known).unwrap_or((min.z, max.z));
             let aspect = area.rect.aspect_ratio();
             match reframe {
                 Reframe::Fit => self.subcloud.frame(&mut self.camera, z_range, aspect),
@@ -1277,6 +1388,7 @@ fn point_style(
     PointStyle {
         size_px: settings.point_size * pixels_per_point,
         color: session.point_color(settings.color_mode),
+        height: session.shown,
         edl: settings.edl_enabled.then_some(EdlSettings {
             radius_px: settings.edl.radius_px * pixels_per_point,
             ..settings.edl
@@ -1386,7 +1498,7 @@ fn explore_view(ui: &mut egui::Ui, scene: &mut Scene<'_>, camera: &mut OrbitCame
     let area = ViewArea::allocate(ui);
     let input = camera_controls(ui, &area.response, camera);
     if input.reset {
-        let (min, max) = scene.session.info.local_bounds();
+        let (min, max) = scene.session.octree.bounds();
         camera.frame_bounds(min, max);
     }
     // A touchpad pinch zooms like scrolling. (So does Ctrl+scroll, which
@@ -1660,12 +1772,104 @@ fn settings_ui(ui: &mut egui::Ui, settings: &mut ViewSettings, has_rgb: bool) {
     }
 }
 
-/// The lowest and highest Z in `positions`, or `None` if it's empty.
-fn height_range(positions: &[[f32; 3]]) -> Option<(f32, f32)> {
-    positions
-        .iter()
-        .map(|[_, _, z]| (*z, *z))
-        .reduce(|(low, high), (z, _)| (low.min(z), high.max(z)))
+/// A change asked for in the Heights section.
+enum HeightsAction {
+    Show(HeightKind),
+    /// Open the cloud again, reading heights from where the section now says.
+    Reload,
+}
+
+/// The Heights section: which height the points are drawn at, and where in
+/// the file each height comes from.
+fn heights_ui(
+    ui: &mut egui::Ui,
+    session: &Session,
+    draft: &mut HeightSettings,
+    applied: &HeightSettings,
+) -> Option<HeightsAction> {
+    let info = &session.info;
+    let mut action = None;
+    ui.horizontal(|ui| {
+        ui.label("Draw at:");
+        for kind in HeightKind::ALL {
+            let available = info.heights[kind].is_some();
+            let response = ui
+                .add_enabled(
+                    available,
+                    egui::Button::selectable(session.shown == kind, kind.label()),
+                )
+                .on_disabled_hover_text("Not in this file. Choose where it is under Sources.");
+            if response.clicked() && session.shown != kind {
+                action = Some(HeightsAction::Show(kind));
+            }
+        }
+    });
+    egui::CollapsingHeader::new("Sources")
+        .id_salt("height_sources")
+        .show(ui, |ui| {
+            egui::Grid::new("height_sources_grid")
+                .num_columns(3)
+                .show(ui, |ui| {
+                    for kind in HeightKind::ALL {
+                        ui.label(kind.label());
+                        let setting = draft.get_mut(kind);
+                        egui::ComboBox::from_id_salt(("height_source", kind))
+                            .selected_text(setting_label(setting))
+                            .show_ui(ui, |ui| {
+                                let options =
+                                    [SourceSetting::Auto, SourceSetting::From(HeightSource::Z)]
+                                        .into_iter()
+                                        .chain(info.extra_dimensions.iter().map(|name| {
+                                            SourceSetting::From(HeightSource::Extra(name.clone()))
+                                        }))
+                                        .chain([SourceSetting::Absent]);
+                                for option in options {
+                                    let label = setting_label(&option);
+                                    ui.selectable_value(setting, option, label);
+                                }
+                            });
+                        ui.weak(match &info.heights[kind] {
+                            Some(source) => format!("now {source}"),
+                            None => "now missing".to_owned(),
+                        });
+                        ui.end_row();
+                    }
+                });
+            let response = ui
+                .add_enabled(draft != applied, egui::Button::new("Reload with these"))
+                .on_hover_text("Open the cloud again, reading heights from where these say");
+            if response.clicked() {
+                action = Some(HeightsAction::Reload);
+            }
+        });
+    action
+}
+
+fn setting_label(setting: &SourceSetting) -> String {
+    match setting {
+        SourceSetting::Auto => "Auto".to_owned(),
+        SourceSetting::Absent => "None".to_owned(),
+        SourceSetting::From(source) => source.to_string(),
+    }
+}
+
+/// Moves `camera` up or down by how far `to` heights sit from `from` heights
+/// around what it's looking at, so switching heights keeps it on the same
+/// points. A camera over a hill drops by the hill's height, say, switching
+/// from elevation to height above ground.
+fn follow_height(camera: &mut OrbitCamera, octree: &Octree, from: HeightKind, to: HeightKind) {
+    let around = Footprint::Circle {
+        centre: camera.target.truncate(),
+        radius: camera.half_height().max(1.0),
+    };
+    let lowest = |kind| {
+        lod::z_range_under(octree, &around, octree.known_heights(kind))
+            .or_else(|| octree.height_extent(kind))
+            .map(|(low, _)| low)
+    };
+    if let (Some(from), Some(to)) = (lowest(from), lowest(to)) {
+        camera.target.z += to - from;
+    }
 }
 
 /// Whether colours use the 16-bit range LAS specifies, rather than 0..255.

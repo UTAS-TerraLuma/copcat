@@ -18,6 +18,7 @@ use copc_streaming::{
 use eframe::egui;
 
 use crate::cloud::{self, CloudInfo, LoadError, Location};
+use crate::heights::{ExtraDimension, HeightKind, HeightSettings, HeightSource, PerHeight};
 use crate::http_source::{HttpSource, MAX_PARALLEL_REQUESTS};
 use crate::lod::Octree;
 
@@ -35,10 +36,38 @@ pub struct OpenedCloud {
 pub type NodeResult = Result<NodeData, String>;
 
 pub struct NodeData {
-    /// Metres relative to [`CloudInfo::origin`].
-    pub positions: Vec<[f32; 3]>,
+    pub points: NodePoints,
     /// 16-bit RGB plus padding, one per position, if the file has colour.
     pub colors: Option<Vec<[u16; 4]>>,
+}
+
+/// A node's positions, and the heights it stores outside Z.
+pub struct NodePoints {
+    /// Metres relative to [`CloudInfo::origin`], with the file's Z.
+    pub positions: Vec<[f32; 3]>,
+    /// Heights read from extra dimensions, one per position, relative to the
+    /// origin's Z like `positions`. `None` for a height in Z, or missing.
+    pub extra_heights: PerHeight<Option<Vec<f32>>>,
+}
+
+impl NodePoints {
+    /// Point `i`'s `kind` height: its Z, unless that height is elsewhere.
+    pub fn height(&self, kind: HeightKind, i: usize) -> f32 {
+        match &self.extra_heights[kind] {
+            Some(heights) => heights[i],
+            None => self.positions[i][2],
+        }
+    }
+
+    /// The lowest and highest `kind` height, or `None` if there are no points.
+    pub fn height_range(&self, kind: HeightKind) -> Option<(f32, f32)> {
+        (0..self.positions.len())
+            .map(|i| self.height(kind, i))
+            .fold(None, |range, z| match range {
+                None => Some((z, z)),
+                Some((low, high)) => Some((low.min(z), high.max(z))),
+            })
+    }
 }
 
 pub enum Event {
@@ -70,7 +99,8 @@ pub struct Loader {
 }
 
 impl Loader {
-    pub fn spawn(source: String, ctx: egui::Context) -> Self {
+    /// Opens `source`, reading heights from where `heights` says.
+    pub fn spawn(source: String, heights: HeightSettings, ctx: egui::Context) -> Self {
         let (request_sender, request_receiver) = mpsc::channel();
         let (event_sender, event_receiver) = mpsc::channel();
         thread::spawn(move || {
@@ -78,7 +108,7 @@ impl Loader {
                 sender: event_sender,
                 ctx,
             };
-            run(&source, &request_receiver, &events);
+            run(&source, &heights, &request_receiver, &events);
         });
         Self {
             requests: request_sender,
@@ -124,11 +154,11 @@ impl Events {
     }
 }
 
-fn run(input: &str, requests: &Receiver<Request>, events: &Events) {
+fn run(input: &str, heights: &HeightSettings, requests: &Receiver<Request>, events: &Events) {
     let result = match Location::parse(input) {
-        Ok(Location::Http(url)) => serve(HttpSource::new(url), input, requests, events),
+        Ok(Location::Http(url)) => serve(HttpSource::new(url), input, heights, requests, events),
         Ok(Location::File(path)) => match FileSource::open(&path) {
-            Ok(file) => serve(file, input, requests, events),
+            Ok(file) => serve(file, input, heights, requests, events),
             Err(source) => Err(LoadError::OpenFile { path, source }),
         },
         Err(error) => Err(error),
@@ -146,6 +176,7 @@ fn run(input: &str, requests: &Receiver<Request>, events: &Events) {
 fn serve<S: ByteSource>(
     source: S,
     input: &str,
+    heights: &HeightSettings,
     requests: &Receiver<Request>,
     events: &Events,
 ) -> Result<(), LoadError> {
@@ -157,7 +188,18 @@ fn serve<S: ByteSource>(
         Ok::<_, CopcError>(reader)
     })?;
 
-    let info = CloudInfo::from_header(reader.header(), input, started.elapsed());
+    let dimensions = cloud::extra_dimensions(reader.header());
+    let names: Vec<String> = dimensions
+        .iter()
+        .filter(|dimension| dimension.is_number())
+        .map(|dimension| dimension.name.clone())
+        .collect();
+    let sources = heights.resolve(&names).map_err(LoadError::Heights)?;
+    let extra_heights = sources.map(|_, source| match source {
+        Some(HeightSource::Extra(name)) => dimensions.iter().find(|d| d.name == *name).cloned(),
+        _ => None,
+    });
+    let info = CloudInfo::from_header(reader.header(), input, started.elapsed(), names, sources);
     let origin = info.origin;
     let copc_info = reader.copc_info();
     let octree = Octree::new(
@@ -198,7 +240,7 @@ fn serve<S: ByteSource>(
         if !events.send(Event::Fetching(batch.clone())) {
             return Ok(());
         }
-        let results = fetch_nodes(&reader, &batch, origin);
+        let results = fetch_nodes(&reader, &batch, origin, &extra_heights);
         for (key, result) in batch.into_iter().zip(results) {
             if !events.send(Event::Node { key, result }) {
                 return Ok(());
@@ -250,6 +292,7 @@ fn fetch_nodes<S: ByteSource>(
     reader: &CopcStreamingReader<S>,
     keys: &[VoxelKey],
     origin: [f64; 3],
+    extra_heights: &PerHeight<Option<ExtraDimension>>,
 ) -> Vec<NodeResult> {
     let (entries, compressed) = match download(reader, keys) {
         Ok(downloaded) => downloaded,
@@ -265,7 +308,9 @@ fn fetch_nodes<S: ByteSource>(
         let workers: Vec<_> = compressed
             .iter()
             .zip(&entries)
-            .map(|(bytes, entry)| scope.spawn(move || decode_node(bytes, entry, header, origin)))
+            .map(|(bytes, entry)| {
+                scope.spawn(move || decode_node(bytes, entry, header, origin, extra_heights))
+            })
             .collect();
         workers
             .into_iter()
@@ -305,14 +350,17 @@ fn decode_node(
     entry: &HierarchyEntry,
     header: &CopcHeader,
     origin: [f64; 3],
+    extra_heights: &PerHeight<Option<ExtraDimension>>,
 ) -> Result<NodeData, CopcError> {
     // Only the layers we draw: skipping the others saves most of the decode time.
-    let has_rgb = header.las_header().point_format().has_color;
-    let fields = if has_rgb {
-        Fields::Z | Fields::RGB
-    } else {
-        Fields::Z
-    };
+    let format = header.las_header().point_format();
+    let mut fields = Fields::Z;
+    if format.has_color {
+        fields |= Fields::RGB;
+    }
+    if extra_heights.0.iter().any(Option::is_some) {
+        fields |= Fields::EXTRA_BYTES;
+    }
     let chunk = Chunk::decompress(
         compressed,
         entry,
@@ -325,12 +373,35 @@ fn decode_node(
         .ok_or(CopcError::PartialDecode(chunk.fields))?
         .map(|position| cloud::to_local(position, origin))
         .collect();
+    // Each point's extra bytes are the end of its record.
+    let cloud = chunk.cloud();
+    let record_len = cloud.record_len();
+    let extra_start = record_len - usize::from(format.extra_bytes);
+    let extra_heights = extra_heights.map(|_, dimension| {
+        let dimension = dimension.as_ref()?;
+        let heights = cloud
+            .raw_bytes()
+            .chunks_exact(record_len)
+            .map(|record| {
+                // NaN, which nothing draws, if the bytes can't be read.
+                let value = dimension.read(&record[extra_start..]).unwrap_or(f64::NAN);
+                (value - origin[2]) as f32
+            })
+            .collect();
+        Some(heights)
+    });
     // `rgb()` is `None` when the format has no colour, which is what we want.
     // The fourth channel pads to the GPU's Unorm16x4 vertex format.
     let colors = chunk
         .rgb()
         .map(|rgb| rgb.map(|(r, g, b)| [r, g, b, u16::MAX]).collect());
-    Ok(NodeData { positions, colors })
+    Ok(NodeData {
+        points: NodePoints {
+            positions,
+            extra_heights,
+        },
+        colors,
+    })
 }
 
 #[cfg(test)]
@@ -386,7 +457,11 @@ mod tests {
 
     /// Opens `source` and fetches its root node through a real loader thread.
     fn fetch_root(source: &str) -> NodeData {
-        let loader = Loader::spawn(source.to_owned(), egui::Context::default());
+        let loader = Loader::spawn(
+            source.to_owned(),
+            HeightSettings::default(),
+            egui::Context::default(),
+        );
         loop {
             match loader.events.recv_timeout(Duration::from_secs(120)) {
                 Ok(Event::Opened(_)) => loader.want(vec![VoxelKey::ROOT]),
@@ -403,7 +478,9 @@ mod tests {
     #[ignore]
     fn loader_should_read_autzen_root_over_https() {
         let positions =
-            fetch_root("https://s3.amazonaws.com/hobu-lidar/autzen-classified.copc.laz").positions;
+            fetch_root("https://s3.amazonaws.com/hobu-lidar/autzen-classified.copc.laz")
+                .points
+                .positions;
         assert_eq!(positions.len(), 61_201);
     }
 
@@ -415,6 +492,6 @@ mod tests {
         let node = fetch_root(
             "https://object-store.rc.nectar.org.au/v1/AUTH_4df2f67c2eed48a2aaeeed008a4bf0de/naturescan-drone/NSNSMDD001_20260425_m3m01/level2_ard/NSNSMDD001_20260425_m3m01_pc.copc.laz",
         );
-        assert!(!node.positions.is_empty());
+        assert!(!node.points.positions.is_empty());
     }
 }

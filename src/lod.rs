@@ -10,6 +10,8 @@ use copc_streaming::VoxelKey;
 use glam::{Mat4, Vec3, Vec4};
 
 use crate::camera::{OrbitCamera, Projection};
+use crate::heights::{HeightKind, PerHeight};
+use crate::loader::NodePoints;
 use crate::subcloud::Footprint;
 
 /// The shape of a COPC octree: which nodes exist and how many points each holds.
@@ -23,6 +25,15 @@ pub struct Octree {
     /// to it, because a flat site leaves most of each cube empty.
     data_bounds: (Vec3, Vec3),
     point_counts: HashMap<VoxelKey, u32>,
+    /// The lowest and highest of each height in every node loaded so far,
+    /// kept after the node is evicted (it's tiny).
+    known_heights: PerHeight<HashMap<VoxelKey, (f32, f32)>>,
+    /// The range of each height over all of `known_heights`.
+    height_extents: PerHeight<Option<(f32, f32)>>,
+    /// The height points are drawn at, when it isn't the file's Z. The cubes
+    /// are built on Z, so they don't bound any other height: node bounds then
+    /// take their vertical extent from `known_heights` instead.
+    shown: Option<HeightKind>,
 }
 
 impl Octree {
@@ -37,6 +48,49 @@ impl Octree {
             spacing,
             data_bounds,
             point_counts,
+            known_heights: PerHeight::default(),
+            height_extents: PerHeight::default(),
+            shown: None,
+        }
+    }
+
+    /// Notes the range of every height in a node that's loaded.
+    pub fn record_node_heights(&mut self, key: VoxelKey, points: &NodePoints) {
+        for kind in HeightKind::ALL {
+            if let Some(range) = points.height_range(kind) {
+                self.record_heights(key, kind, range);
+            }
+        }
+    }
+
+    /// Notes the range of `kind` heights in a node that's loaded.
+    pub fn record_heights(&mut self, key: VoxelKey, kind: HeightKind, range: (f32, f32)) {
+        self.known_heights[kind].insert(key, range);
+        let extent = &mut self.height_extents[kind];
+        *extent = Some(extent.map_or(range, |extent| union(extent, range)));
+    }
+
+    /// The lowest and highest `kind` height of every node loaded so far.
+    pub fn known_heights(&self, kind: HeightKind) -> &HashMap<VoxelKey, (f32, f32)> {
+        &self.known_heights[kind]
+    }
+
+    /// The range of `kind` heights over every node loaded so far.
+    pub fn height_extent(&self, kind: HeightKind) -> Option<(f32, f32)> {
+        self.height_extents[kind]
+    }
+
+    /// Bounds nodes by the `kind` heights, or by Z (the cubes) for `None`.
+    pub fn show_heights(&mut self, kind: Option<HeightKind>) {
+        self.shown = kind;
+    }
+
+    /// The points' bounding box, with the height being shown.
+    pub fn bounds(&self) -> (Vec3, Vec3) {
+        let (min, max) = self.data_bounds;
+        match self.shown.and_then(|kind| self.height_extents[kind]) {
+            Some((low, high)) => (min.with_z(low), max.with_z(high)),
+            None => (min, max),
         }
     }
 
@@ -60,7 +114,35 @@ impl Octree {
         // `clamp` so a cube entirely outside it collapses flat instead of panicking.
         let (data_min, data_max) = self.data_bounds;
         let clip = |corner: Vec3| corner.max(data_min).min(data_max);
-        (clip(min), clip(max))
+        let (min, max) = (clip(min), clip(max));
+        match self
+            .shown
+            .and_then(|kind| self.estimated_heights(kind, key))
+        {
+            Some((low, high)) => (min.with_z(low), max.with_z(high)),
+            None => (min, max),
+        }
+    }
+
+    /// The range of `kind` heights in a node: measured if it's been loaded,
+    /// or else guessed from its nearest loaded ancestor. An ancestor covers
+    /// the node's ground with a sparser sample of points, so its range is
+    /// close but can miss the node's highest and lowest points; it's padded
+    /// to make that unlikely. `None` before anything has loaded.
+    fn estimated_heights(&self, kind: HeightKind, key: &VoxelKey) -> Option<(f32, f32)> {
+        let known = &self.known_heights[kind];
+        if let Some(range) = known.get(key) {
+            return Some(*range);
+        }
+        let mut ancestor = key.parent();
+        while let Some(key) = ancestor {
+            if let Some(&(low, high)) = known.get(&key) {
+                let pad = 0.1 * (high - low) + self.node_spacing(&key);
+                return Some((low - pad, high + pad));
+            }
+            ancestor = key.parent();
+        }
+        None
     }
 
     /// Each level adds points between its parent's, halving the spacing.
@@ -587,6 +669,27 @@ mod tests {
         let octree = Octree::new(HALFSIZE, 10.0, flat, HashMap::new());
         let (min, max) = octree.node_bounds(&VoxelKey::ROOT);
         assert_eq!((min.z, max.z), (-1.0, 1.0));
+    }
+
+    #[test]
+    fn node_bounds_should_take_a_shown_height_from_the_node_or_its_ancestor() {
+        let mut octree = full_octree(2, 1);
+        let child = VoxelKey::ROOT.children()[0];
+        let grandchild = child.children()[0];
+        octree.record_heights(VoxelKey::ROOT, HeightKind::AboveGround, (0.0, 40.0));
+        octree.record_heights(child, HeightKind::AboveGround, (2.0, 30.0));
+        octree.show_heights(Some(HeightKind::AboveGround));
+
+        let (min, max) = octree.node_bounds(&child);
+        assert_eq!((min.z, max.z), (2.0, 30.0));
+        // Not loaded: the child's range, padded by 10% and its point spacing.
+        let (min, max) = octree.node_bounds(&grandchild);
+        assert!((min.z + 5.8).abs() < 1e-4 && (max.z - 37.8).abs() < 1e-4);
+        // The cubes' X and Y still apply.
+        assert_eq!(max.x, octree.node_bounds(&VoxelKey::ROOT).0.x + 50.0);
+
+        octree.show_heights(None);
+        assert_eq!(octree.node_bounds(&child).0.z, -HALFSIZE);
     }
 
     #[test]

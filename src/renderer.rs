@@ -19,6 +19,8 @@ use glam::{Vec3, Vec4};
 use wgpu::util::DeviceExt;
 
 use crate::camera::{OrbitCamera, Projection};
+use crate::heights::{HeightKind, PerHeight};
+use crate::loader::NodePoints;
 use crate::subcloud::Footprint;
 
 const COLOR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
@@ -143,6 +145,8 @@ pub struct PointStyle {
     /// Diameter in physical pixels.
     pub size_px: f32,
     pub color: PointColor,
+    /// Which height to draw points at.
+    pub height: HeightKind,
     /// `None` turns eye-dome lighting off.
     pub edl: Option<EdlSettings>,
     /// Only draw points above this outline, such as a subcloud's.
@@ -164,6 +168,9 @@ pub struct PointRenderer {
     egui_renderer: Option<Arc<RwLock<egui_wgpu::Renderer>>>,
     height_pipeline: wgpu::RenderPipeline,
     rgb_pipeline: wgpu::RenderPipeline,
+    /// The same, drawing points at a separate height buffer instead of Z.
+    height_lifted_pipeline: wgpu::RenderPipeline,
+    rgb_lifted_pipeline: wgpu::RenderPipeline,
     line_pipeline: wgpu::RenderPipeline,
     edl_pipeline: wgpu::RenderPipeline,
     /// Kept to build each viewport's bind group.
@@ -204,6 +211,8 @@ struct NodeBuffer {
     positions: wgpu::Buffer,
     /// `None` when the file has no colour.
     colors: Option<wgpu::Buffer>,
+    /// Heights to draw at instead of Z, from extra dimensions.
+    heights: PerHeight<Option<wgpu::Buffer>>,
     count: u32,
     last_drawn: u64,
 }
@@ -272,37 +281,61 @@ impl PointRenderer {
             step_mode: wgpu::VertexStepMode::Instance,
             attributes: &color_attributes,
         };
+        let height_attributes = wgpu::vertex_attr_array![2 => Float32];
+        let height_buffer = wgpu::VertexBufferLayout {
+            array_stride: size_of::<f32>() as u64,
+            step_mode: wgpu::VertexStepMode::Instance,
+            attributes: &height_attributes,
+        };
         let point_depth = Some(DepthTest {
             write: true,
             compare: wgpu::CompareFunction::Less,
         });
 
         let points_shader = device.create_shader_module(wgpu::include_wgsl!("points.wgsl"));
-        let height_pipeline = create_pipeline(
-            device,
-            PipelineConfig {
-                label: "height_pipeline",
-                layout: &layout,
-                shader: &points_shader,
-                vertex_entry: "vs_height",
-                vertex_buffers: &[Some(position_buffer.clone())],
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                depth: point_depth,
-                blend: None,
-            },
+        let point_pipeline = |label, vertex_entry, vertex_buffers: &[_]| {
+            create_pipeline(
+                device,
+                PipelineConfig {
+                    label,
+                    layout: &layout,
+                    shader: &points_shader,
+                    vertex_entry,
+                    vertex_buffers,
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    depth: point_depth,
+                    blend: None,
+                },
+            )
+        };
+        let height_pipeline = point_pipeline(
+            "height_pipeline",
+            "vs_height",
+            &[Some(position_buffer.clone())],
         );
-        let rgb_pipeline = create_pipeline(
-            device,
-            PipelineConfig {
-                label: "rgb_pipeline",
-                layout: &layout,
-                shader: &points_shader,
-                vertex_entry: "vs_rgb",
-                vertex_buffers: &[Some(position_buffer), Some(color_buffer)],
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                depth: point_depth,
-                blend: None,
-            },
+        let rgb_pipeline = point_pipeline(
+            "rgb_pipeline",
+            "vs_rgb",
+            &[Some(position_buffer.clone()), Some(color_buffer.clone())],
+        );
+        // A slot with no buffer leaves the lifted height in slot 2 either way.
+        let height_lifted_pipeline = point_pipeline(
+            "height_lifted_pipeline",
+            "vs_height_lifted",
+            &[
+                Some(position_buffer.clone()),
+                None,
+                Some(height_buffer.clone()),
+            ],
+        );
+        let rgb_lifted_pipeline = point_pipeline(
+            "rgb_lifted_pipeline",
+            "vs_rgb_lifted",
+            &[
+                Some(position_buffer),
+                Some(color_buffer),
+                Some(height_buffer),
+            ],
         );
 
         let line_attributes = wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x4];
@@ -371,6 +404,8 @@ impl PointRenderer {
             egui_renderer,
             height_pipeline,
             rgb_pipeline,
+            height_lifted_pipeline,
+            rgb_lifted_pipeline,
             line_pipeline,
             edl_pipeline,
             bind_group_layout,
@@ -430,14 +465,10 @@ impl PointRenderer {
 
     /// Uploads a node, replacing any previous copy. `colors`, if given, has one
     /// entry per position.
-    pub fn insert_node(
-        &mut self,
-        key: VoxelKey,
-        positions: &[[f32; 3]],
-        colors: Option<&[[u16; 4]]>,
-    ) {
+    pub fn insert_node(&mut self, key: VoxelKey, points: &NodePoints, colors: Option<&[[u16; 4]]>) {
+        let positions = &points.positions;
         let device = &self.device;
-        let upload = |label, contents| {
+        let upload = |label, contents: &[u8]| {
             device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some(label),
                 contents,
@@ -447,6 +478,11 @@ impl PointRenderer {
         let node = NodeBuffer {
             positions: upload("node_positions", bytemuck::cast_slice(positions)),
             colors: colors.map(|colors| upload("node_colors", bytemuck::cast_slice(colors))),
+            heights: points.extra_heights.map(|_, heights| {
+                heights
+                    .as_ref()
+                    .map(|heights| upload("node_heights", bytemuck::cast_slice(heights)))
+            }),
             count: positions.len() as u32,
             // Count as just drawn, so a node isn't evicted before its first frame.
             last_drawn: self.frame,
@@ -676,11 +712,6 @@ impl PointRenderer {
                 multiview_mask: None,
             });
             pass.set_bind_group(0, &viewport.bind_group, &[]);
-            let pipeline = match style.color {
-                PointColor::Height => &self.height_pipeline,
-                PointColor::Rgb { .. } => &self.rgb_pipeline,
-            };
-            pass.set_pipeline(pipeline);
             // One draw per node keeps nodes independent, so loading or evicting
             // one never touches the others' buffers.
             let drawable = visible
@@ -688,12 +719,25 @@ impl PointRenderer {
                 .filter_map(|key| self.nodes.get(key))
                 .filter(|node| node.count > 0);
             for node in drawable {
+                // Every node of a cloud has the same buffers, so in practice
+                // this picks the same pipeline for each.
+                let lifted = node.heights[style.height].as_ref();
+                let pipeline = match (style.color, lifted.is_some()) {
+                    (PointColor::Height, false) => &self.height_pipeline,
+                    (PointColor::Height, true) => &self.height_lifted_pipeline,
+                    (PointColor::Rgb { .. }, false) => &self.rgb_pipeline,
+                    (PointColor::Rgb { .. }, true) => &self.rgb_lifted_pipeline,
+                };
+                pass.set_pipeline(pipeline);
                 pass.set_vertex_buffer(0, node.positions.slice(..));
                 if let PointColor::Rgb { .. } = style.color {
                     // The RGB pipeline needs both buffers; a node without
                     // colour can't be drawn with it.
                     let Some(colors) = &node.colors else { continue };
                     pass.set_vertex_buffer(1, colors.slice(..));
+                }
+                if let Some(heights) = lifted {
+                    pass.set_vertex_buffer(2, heights.slice(..));
                 }
                 pass.draw(0..VERTICES_PER_POINT, 0..node.count);
             }

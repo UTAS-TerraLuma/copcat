@@ -6,6 +6,8 @@ use std::time::Duration;
 use copc_streaming::{CopcError, CopcHeader};
 use glam::Vec3;
 
+use crate::heights::{self, ExtraDimension, HeightKind, HeightSource, HeightSources};
+
 /// Where a COPC file lives, parsed from the text the user pasted.
 #[derive(Debug, PartialEq)]
 pub enum Location {
@@ -52,10 +54,20 @@ pub struct CloudInfo {
     pub open_time: Duration,
     /// Whether the point format stores RGB colour.
     pub has_rgb: bool,
+    /// The extra dimensions a height can come from: those that are numbers.
+    pub extra_dimensions: Vec<String>,
+    /// Where each height was read from.
+    pub heights: HeightSources,
 }
 
 impl CloudInfo {
-    pub fn from_header(header: &CopcHeader, source: &str, open_time: Duration) -> Self {
+    pub fn from_header(
+        header: &CopcHeader,
+        source: &str,
+        open_time: Duration,
+        extra_dimensions: Vec<String>,
+        heights: HeightSources,
+    ) -> Self {
         let las_header = header.las_header();
         let bounds = las_header.bounds();
         Self {
@@ -66,7 +78,24 @@ impl CloudInfo {
             origin: header.copc_info().center,
             open_time,
             has_rgb: las_header.point_format().has_color,
+            extra_dimensions,
+            heights,
         }
+    }
+
+    /// The heights the file has, elevation first.
+    pub fn height_kinds(&self) -> impl Iterator<Item = HeightKind> + '_ {
+        HeightKind::ALL
+            .into_iter()
+            .filter(|kind| self.heights[*kind].is_some())
+    }
+
+    /// The height to show first: the one in Z, whose octree bounds are exact.
+    pub fn default_height(&self) -> HeightKind {
+        self.height_kinds()
+            .find(|kind| self.heights[*kind] == Some(HeightSource::Z))
+            .or_else(|| self.height_kinds().next())
+            .expect("resolving the heights checks there's at least one")
     }
 
     /// The file's bounding box relative to `origin`, in the same space as the points.
@@ -74,6 +103,21 @@ impl CloudInfo {
         let to_local = |p: [f64; 3]| Vec3::from_array(to_local(p, self.origin));
         (to_local(self.bounds_min), to_local(self.bounds_max))
     }
+}
+
+/// The dimensions in the file's Extra Bytes VLR (or EVLR), if it has one.
+pub fn extra_dimensions(header: &CopcHeader) -> Vec<ExtraDimension> {
+    let las_header = header.las_header();
+    las_header
+        .vlrs()
+        .iter()
+        .chain(las_header.evlrs())
+        .find(|vlr| {
+            vlr.user_id == heights::EXTRA_BYTES_USER_ID
+                && vlr.record_id == heights::EXTRA_BYTES_RECORD_ID
+        })
+        .map(|vlr| heights::parse_extra_bytes(&vlr.data))
+        .unwrap_or_default()
 }
 
 /// Converts a world position to `f32` metres relative to `origin`.
@@ -93,6 +137,8 @@ pub enum LoadError {
     OpenFile { path: PathBuf, source: CopcError },
     #[error(transparent)]
     Copc(#[from] CopcError),
+    #[error("{0}")]
+    Heights(String),
 }
 
 #[cfg(test)]

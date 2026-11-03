@@ -105,6 +105,14 @@ impl SubcloudMap {
         &self.camera
     }
 
+    /// Fits the map to new bounds, such as the same cloud at another height,
+    /// moving the camera up or down with them but keeping the pan and zoom.
+    pub fn set_bounds(&mut self, bounds: (Vec3, Vec3)) {
+        let centre_z = |(min, max): (Vec3, Vec3)| (min.z + max.z) * 0.5;
+        self.camera.target.z += centre_z(bounds) - centre_z(self.bounds);
+        self.bounds = bounds;
+    }
+
     /// Lays out the map in the rest of `ui` and handles its input.
     pub fn show(&mut self, ui: &mut egui::Ui, subcloud: &mut Subcloud) -> MapFrame {
         let (rect, response) = ui.allocate_exact_size(ui.available_size(), Sense::click_and_drag());

@@ -46,6 +46,35 @@ copcat open https://example.com/cloud.copc.laz
 
 You can also start `copcat-viewer` on its own and paste a path or URL into it.
 
+## Elevation and height above ground
+
+A cloud can hold two heights: elevation, and height above ground (a normalised
+cloud). Either one can be in Z, and the other in an extra dimension. Copcat works
+out which is where from the extra dimensions' names:
+
+- An extra dimension named like `HeightAboveGround` or `HAG` is height above ground,
+  and Z is elevation.
+- An extra dimension named like `Elevation`, `Altitude` or `Z_orig`, with none
+  named like height above ground, is elevation, and Z is height above ground.
+- Otherwise Z is elevation.
+
+Under **Heights** in the Point cloud window, **Draw at** switches between the two.
+The cloud opens at whichever height is in Z. Under **Sources** you can say where
+each height is, and then click **Reload with these**. On the command line, use
+`--elevation` and `--hag`. Each takes `z`, the name of an extra dimension, or
+`none`:
+
+```sh
+copcat open cloud.copc.laz --hag z --elevation Elevation
+copcat render cloud.copc.laz -o canopy.png --z hag
+```
+
+`copcat render --z` picks the height to draw at.
+
+The octree is built on Z. So when you draw at a height in an extra dimension, Copcat
+estimates each node's vertical extent from the nodes loaded so far. It may load
+somewhat more than it needs.
+
 ## Saving images
 
 In the viewer, click **Save PNG…** under **Save image** in the Point cloud window. By
