@@ -27,8 +27,8 @@ use crate::camera::OrbitCamera;
 use crate::cloud::LoadError;
 use crate::heights::{HeightKind, HeightSettings};
 use crate::loader::{Event, Loader};
-use crate::lod::{self, LodSettings, Octree};
-use crate::renderer::{EdlSettings, PointRenderer};
+use crate::lod::{self, Octree};
+use crate::renderer::PointRenderer;
 use crate::subcloud::Footprint;
 use crate::theme::Theme;
 
@@ -40,7 +40,7 @@ use panels::{
 };
 use scene::{Scene, Viewports, explore_view};
 use session::Session;
-use settings::{ColorMode, ViewSettings};
+use settings::Settings;
 use subcloud_mode::SubcloudMode;
 
 pub struct ViewerApp {
@@ -50,7 +50,7 @@ pub struct ViewerApp {
     viewports: Viewports,
     /// The Explore mode camera.
     camera: OrbitCamera,
-    settings: ViewSettings,
+    settings: Settings,
     mode: Mode,
     /// Kept while in Explore mode, so switching back returns to the same
     /// subcloud. Created the first time Subcloud mode is shown for a cloud.
@@ -119,25 +119,8 @@ impl ViewerApp {
             mode: Mode::Explore,
             subcloud: None,
             camera: OrbitCamera::default(),
-            settings: ViewSettings {
-                point_size: 2.0,
-                lod: LodSettings::default(),
-                show_bounds: false,
-                show_loaded_bounds: false,
-                color_mode: ColorMode::Rgb,
-                edl_enabled: true,
-                edl: EdlSettings {
-                    strength: 1.0,
-                    radius_px: 1.4,
-                },
-            },
-            export: ImageExport {
-                match_view: true,
-                size: [1920, 1080],
-                job: None,
-                writing: None,
-                status: None,
-            },
+            settings: Settings::default(),
+            export: ImageExport::default(),
             heights_draft: heights.clone(),
             heights,
             theme,
@@ -319,11 +302,12 @@ impl eframe::App for ViewerApp {
                             heights_action = section(ui, theme, |ui| {
                                 heights_ui(ui, session, &mut self.heights_draft, &self.heights)
                             });
-                            section(ui, theme, |ui| settings_ui(ui, &mut self.settings, session));
+                            section(ui, theme, |ui| settings_ui(ui, &mut self.settings.view, &mut self.settings.diagnostics, session));
                             export_action = section(ui, theme, |ui| {
                                 export_ui(
                                     ui,
                                     &mut self.export,
+                                    &mut self.settings.export,
                                     ExportContext {
                                         max_size: max_image_size,
                                         progress: export_progress,
@@ -352,8 +336,8 @@ impl eframe::App for ViewerApp {
         }
 
         let export_view = self.export.job.as_ref().map(ExportJob::view);
-        let image_aspect = (!self.export.match_view).then(|| {
-            let [width, height] = self.export.size;
+        let image_aspect = (!self.settings.export.match_view).then(|| {
+            let [width, height] = self.settings.export.size;
             width as f32 / height as f32
         });
 
@@ -382,7 +366,8 @@ impl eframe::App for ViewerApp {
                             renderer: &mut self.renderer,
                             viewports: &mut self.viewports,
                             session,
-                            settings: &self.settings,
+                            settings: &self.settings.view,
+                            diagnostics: &self.settings.diagnostics,
                             export_view: export_view.as_ref(),
                             image_aspect,
                             theme: &self.theme,
@@ -429,9 +414,9 @@ impl eframe::App for ViewerApp {
             let view_rect = central.response.rect - self.theme.panel_outer_margin();
             let view_size = view_rect.size() * pixels_per_point;
             let view_size_px = [view_size.x, view_size.y].map(|side| side.round() as u32);
-            if self.export.match_view {
+            if self.settings.export.match_view {
                 let max_image_size = self.renderer.max_image_size();
-                self.export.size = view_size_px.map(|side| side.clamp(1, max_image_size));
+                self.settings.export.size = view_size_px.map(|side| side.clamp(1, max_image_size));
             }
 
             match export_action {
@@ -448,8 +433,8 @@ impl eframe::App for ViewerApp {
                         }
                         self.export.job = Some(ExportJob {
                             path,
-                            size: self.export.size,
-                            camera: framed_camera(camera, view_size_px, self.export.size),
+                            size: self.settings.export.size,
+                            camera: framed_camera(camera, view_size_px, self.settings.export.size),
                             clip,
                             pixels_per_point,
                         });
@@ -459,10 +444,10 @@ impl eframe::App for ViewerApp {
                 Some(ExportAction::CopyCommand) => {
                     let args = render_args(
                         session,
-                        &self.settings,
+                        &self.settings.view,
                         &self.heights,
-                        &framed_camera(camera, view_size_px, self.export.size),
-                        self.export.size,
+                        &framed_camera(camera, view_size_px, self.settings.export.size),
+                        self.settings.export.size,
                         pixels_per_point,
                     );
                     ui.ctx().copy_text(args.command_line());

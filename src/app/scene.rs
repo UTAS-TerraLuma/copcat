@@ -12,7 +12,7 @@ use crate::theme::Theme;
 
 use super::camera_input::camera_controls;
 use super::session::{Session, Views};
-use super::settings::ViewSettings;
+use super::settings::{DiagnosticsSettings, ViewSettings};
 
 /// Gap between the 3D view's edges and the gizmo, in logical pixels.
 const OVERLAY_MARGIN: f32 = 10.0;
@@ -31,6 +31,7 @@ pub(crate) struct Scene<'a> {
     pub(crate) viewports: &'a mut Viewports,
     pub(crate) session: &'a mut Session,
     pub(crate) settings: &'a ViewSettings,
+    pub(crate) diagnostics: &'a DiagnosticsSettings,
     /// The view of the image being saved, if any, whose nodes load too.
     pub(crate) export_view: Option<&'a lod::View>,
     /// Width / height of the image Save image will make, when it isn't the
@@ -79,9 +80,9 @@ impl Scene<'_> {
         camera: &OrbitCamera,
         clip: Option<Footprint>,
     ) -> egui::TextureId {
-        let lines = if self.settings.show_bounds {
+        let lines = if self.diagnostics.show_bounds {
             self.session
-                .bounds_lines(self.renderer, self.settings.show_loaded_bounds)
+                .bounds_lines(self.renderer, self.diagnostics.show_loaded_bounds)
         } else {
             Vec::new()
         };

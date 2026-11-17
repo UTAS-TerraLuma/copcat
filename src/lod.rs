@@ -213,7 +213,7 @@ impl View {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct LodSettings {
     /// Stop adding nodes once this many points are selected.
     pub point_budget: u64,

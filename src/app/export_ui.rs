@@ -15,16 +15,12 @@ use crate::subcloud::Footprint;
 
 use super::scene::point_style;
 use super::session::Session;
-use super::settings::{ColorMode, ViewSettings};
+use super::settings::{ColorMode, ExportSettings, ViewSettings};
 use super::{LoadState, ViewerApp};
 
-/// The Save image section's settings, and the image being saved.
+/// The image being saved. Its size is in [`ExportSettings`].
+#[derive(Default)]
 pub(crate) struct ImageExport {
-    /// Keep `size` the same as the 3D view's. Otherwise the view shows a
-    /// frame around what will be in the image.
-    pub(crate) match_view: bool,
-    /// Width and height in pixels.
-    pub(crate) size: [u32; 2],
     /// Waiting for the nodes it needs to load.
     pub(crate) job: Option<ExportJob>,
     /// Writing the PNG, which can take a few seconds for a big image, off the
@@ -73,7 +69,7 @@ impl ViewerApp {
             && let Some(job) = export.job.take()
         {
             let style = point_style(
-                &self.settings,
+                &self.settings.view,
                 session,
                 job.pixels_per_point,
                 job.clip,
@@ -126,13 +122,14 @@ pub(crate) struct ExportContext {
 pub(crate) fn export_ui(
     ui: &mut egui::Ui,
     export: &mut ImageExport,
+    settings: &mut ExportSettings,
     context: ExportContext,
 ) -> Option<ExportAction> {
     ui.strong("Save image");
     ui.horizontal_wrapped(|ui| {
         ui.label("Size");
-        ui.add_enabled_ui(!export.match_view, |ui| {
-            for side in &mut export.size {
+        ui.add_enabled_ui(!settings.match_view, |ui| {
+            for side in &mut settings.size {
                 ui.add(
                     egui::DragValue::new(side)
                         .range(1..=context.max_size)
@@ -140,7 +137,7 @@ pub(crate) fn export_ui(
                 );
             }
         });
-        ui.checkbox(&mut export.match_view, "Match view")
+        ui.checkbox(&mut settings.match_view, "Match view")
             .on_hover_text(
                 "Save the 3D view as it is on screen, at its size in physical pixels. \
                  Untick to choose a size: the view then darkens what will be outside \

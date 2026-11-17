@@ -96,9 +96,9 @@ pub struct StyleArgs {
     /// Turn off eye-dome lighting, the shading that shows depth.
     #[arg(long)]
     pub no_edl: bool,
-    #[arg(long, default_value_t = 1.0)]
+    #[arg(long, default_value_t = EdlSettings::default().strength)]
     pub edl_strength: f32,
-    #[arg(long, value_name = "PIXELS", default_value_t = 1.4)]
+    #[arg(long, value_name = "PIXELS", default_value_t = EdlSettings::default().radius_px)]
     pub edl_radius: f32,
     /// The most points to draw.
     #[arg(long, default_value_t = LodSettings::default().point_budget)]

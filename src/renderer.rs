@@ -137,12 +137,21 @@ pub(crate) fn uses_16_bit_color(colors: &[[u16; 4]]) -> bool {
     colors.iter().any(|[r, g, b, _]| (*r).max(*g).max(*b) > 255)
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct EdlSettings {
     /// How dark the shading gets. 1 matches Potree's default.
     pub strength: f32,
     /// How far away the neighbours are sampled, in physical pixels.
     pub radius_px: f32,
+}
+
+impl Default for EdlSettings {
+    fn default() -> Self {
+        Self {
+            strength: 1.0,
+            radius_px: 1.4,
+        }
+    }
 }
 
 /// How to draw the points this frame.
