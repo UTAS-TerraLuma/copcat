@@ -17,6 +17,7 @@ use crate::heights::{HeightKind, HeightSettings, HeightSource, SourceSetting};
 use crate::loader::{Event, Loader, OpenedCloud};
 use crate::lod::{self, LodSettings, Octree};
 use crate::renderer::{EdlSettings, Image, PointColor, PointRenderer, PointStyle};
+use crate::theme::Theme;
 
 /// `copcat render`'s arguments. The viewer's Copy as command writes them too,
 /// with `command_line`.
@@ -230,6 +231,9 @@ impl StyleArgs {
                 radius_px: self.edl_radius,
             }),
             clip: None,
+            // The same as the viewer's default theme, so a copied command
+            // renders what was on screen.
+            background: Theme::default().viewport_background(),
         }
     }
 }

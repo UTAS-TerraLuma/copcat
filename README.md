@@ -137,3 +137,9 @@ cargo run --release -- path/to/cloud.copc.laz
 ```
 
 See [docs/releasing.md](docs/releasing.md) for how releases are made.
+
+## Fonts
+
+The viewer has two fonts built in: [Inter](https://github.com/rsms/inter) and
+[JetBrains Mono](https://github.com/JetBrains/JetBrainsMono). Both are under the SIL Open
+Font License 1.1; see [assets/fonts](assets/fonts) for their licences.

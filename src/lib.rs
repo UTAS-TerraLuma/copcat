@@ -14,6 +14,7 @@ mod lod;
 mod renderer;
 mod subcloud;
 mod subcloud_map;
+mod theme;
 #[cfg(windows)]
 mod windows_dpi;
 

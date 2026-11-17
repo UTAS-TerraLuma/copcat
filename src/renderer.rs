@@ -27,12 +27,6 @@ use crate::subcloud::Footprint;
 const COLOR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 const VERTICES_PER_POINT: u32 = 6;
-const BACKGROUND: wgpu::Color = wgpu::Color {
-    r: 0.08,
-    g: 0.08,
-    b: 0.09,
-    a: 1.0,
-};
 
 /// Must match `Uniforms` in `points.wgsl` byte for byte.
 #[repr(C)]
@@ -156,6 +150,8 @@ pub struct PointStyle {
     pub edl: Option<EdlSettings>,
     /// Only draw points above this outline, such as a subcloud's.
     pub clip: Option<Footprint>,
+    /// The colour behind the points, as sRGB bytes.
+    pub background: [u8; 3],
 }
 
 /// An RGBA image read back from the GPU, rows top to bottom.
@@ -735,7 +731,7 @@ impl PointRenderer {
                 label: Some("point_pass"),
                 color_attachments: &[Some(color_attachment(
                     &target.color,
-                    wgpu::LoadOp::Clear(BACKGROUND),
+                    wgpu::LoadOp::Clear(background_color(style.background)),
                 ))],
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                     view: &target.depth,
@@ -997,6 +993,18 @@ fn uniform_layout_entry(
             min_binding_size: None,
         },
         count: None,
+    }
+}
+
+/// `background` as a clear colour. The target isn't sRGB, so the bytes are
+/// stored unconverted, as the UI expects.
+fn background_color([r, g, b]: [u8; 3]) -> wgpu::Color {
+    let channel = |byte: u8| f64::from(byte) / 255.0;
+    wgpu::Color {
+        r: channel(r),
+        g: channel(g),
+        b: channel(b),
+        a: 1.0,
     }
 }
 

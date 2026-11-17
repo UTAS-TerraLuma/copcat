@@ -21,6 +21,7 @@ use crate::renderer::{
 };
 use crate::subcloud::{self, Footprint, ShapeKind, Subcloud};
 use crate::subcloud_map::{self, MapFrame, SubcloudMap};
+use crate::theme::Theme;
 
 /// The GPU cache may hold this many times the point budget. The headroom keeps
 /// recently seen nodes around, so looking back at them doesn't refetch.
@@ -60,6 +61,8 @@ pub struct ViewerApp {
     heights: HeightSettings,
     /// The same, as edited in the Heights section until Reload applies it.
     heights_draft: HeightSettings,
+    /// The UI's colours, fonts and spacing, as applied to the egui context.
+    theme: Theme,
 }
 
 /// The Save image section's settings, and the image being saved.
@@ -236,6 +239,8 @@ impl ViewerApp {
         #[cfg(windows)]
         crate::windows_dpi::defer_dpi_changes_while_dragging(cc);
         let renderer = PointRenderer::new(render_state);
+        let theme = Theme::default();
+        theme.apply(&cc.egui_ctx);
         let viewports = Viewports {
             main: renderer.create_viewport(),
             map: renderer.create_viewport(),
@@ -269,6 +274,7 @@ impl ViewerApp {
             },
             heights_draft: heights.clone(),
             heights,
+            theme,
         };
         if !app.url_input.trim().is_empty() {
             app.start_loading(&cc.egui_ctx);
@@ -559,10 +565,19 @@ impl Session {
 }
 
 impl eframe::App for ViewerApp {
+    /// The gutter, showing between the panels.
+    fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
+        self.theme.colors.gutter.to_normalized_gamma_f32()
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.poll_loader();
 
-        egui::Panel::top("url_bar").show(ui, |ui| self.url_bar(ui));
+        // Panels are separated by gaps, not lines.
+        egui::Panel::top("url_bar")
+            .frame(self.theme.header_frame())
+            .show_separator_line(false)
+            .show(ui, |ui| self.url_bar(ui));
 
         // Subcloud mode's map. Side panels have to be laid out before the
         // central panel, but the map is only drawn after it, once the nodes
@@ -574,6 +589,8 @@ impl eframe::App for ViewerApp {
                     .subcloud
                     .get_or_insert_with(|| SubcloudMode::new(bounds));
                 let panel = egui::Panel::left("subcloud_map")
+                    .frame(self.theme.panel_frame())
+                    .show_separator_line(false)
                     .resizable(true)
                     .default_size(380.0)
                     .min_size(200.0)
@@ -583,6 +600,71 @@ impl eframe::App for ViewerApp {
             _ => None,
         };
 
+        // The cloud's settings, docked on the right like an inspector. Side
+        // panels are laid out before the central panel, so a size that
+        // follows the view shows the last frame's, which is the same unless
+        // the window is being resized.
+        let mut heights_action = None;
+        let mut export_action = None;
+        if let LoadState::Open(session) = &self.state {
+            let in_subcloud = self.mode == Mode::Subcloud;
+            // The view controls act on whichever 3D view is showing.
+            let camera = match (self.mode, &mut self.subcloud) {
+                (Mode::Subcloud, Some(subcloud_mode)) => &mut subcloud_mode.camera,
+                _ => &mut self.camera,
+            };
+            let max_image_size = self.renderer.max_image_size();
+            let export_progress = session.export_progress(&self.renderer);
+            let theme = &self.theme;
+            egui::Panel::right("point_cloud")
+                .frame(theme.panel_frame())
+                .show_separator_line(false)
+                .resizable(true)
+                .default_size(340.0)
+                .min_size(240.0)
+                .show(ui, |ui| {
+                    ui.heading("Point cloud");
+                    egui::ScrollArea::vertical()
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| {
+                            section(ui, theme, |ui| cloud_summary(ui, &session.info));
+                            section(ui, theme, |ui| streaming_stats(ui, session, &self.renderer));
+                            section(ui, theme, |ui| view_ui(ui, camera));
+                            heights_action = section(ui, theme, |ui| {
+                                heights_ui(ui, session, &mut self.heights_draft, &self.heights)
+                            });
+                            section(ui, theme, |ui| settings_ui(ui, &mut self.settings, session));
+                            export_action = section(ui, theme, |ui| {
+                                export_ui(
+                                    ui,
+                                    &mut self.export,
+                                    ExportContext {
+                                        max_size: max_image_size,
+                                        progress: export_progress,
+                                        in_subcloud,
+                                    },
+                                )
+                            });
+                            // On the panel rather than in a box, so it can be the faintest text.
+                            let help =
+                                |text: &str| egui::RichText::new(text).color(theme.colors.text_tertiary);
+                            ui.label(help(
+                                "Drag: orbit\nRight-drag: pan\nScroll: zoom\nDouble-click: reset view\n\
+                                 Gizmo: click an axis to look along it\n\
+                                 7 / 1 / 3: top / front / right (Ctrl: opposite)\n\
+                                 5: perspective / orthographic",
+                            ));
+                            if in_subcloud {
+                                ui.label(help(
+                                    "Ctrl+scroll: slide the subcloud forward (towards its round \
+                                     handle) or back\n\
+                                     Ctrl+Shift+scroll: slide it right or left",
+                                ));
+                            }
+                        });
+                });
+        }
+
         let export_view = self.export.job.as_ref().map(ExportJob::view);
         let image_aspect = (!self.export.match_view).then(|| {
             let [width, height] = self.export.size;
@@ -590,10 +672,11 @@ impl eframe::App for ViewerApp {
         });
 
         let mut retry_with_auto_heights = None;
-        // The 3D view fills its panel edge to edge; the text states keep margins.
+        // The 3D view fills its panel edge to edge, keeping only the gap
+        // between panels; the text states are padded.
         let frame = match self.state {
-            LoadState::Open(_) => egui::Frame::NONE,
-            _ => egui::Frame::central_panel(ui.style()),
+            LoadState::Open(_) => egui::Frame::NONE.outer_margin(self.theme.panel_outer_margin()),
+            _ => self.theme.panel_frame().fill(self.theme.colors.viewport),
         };
         let central =
             egui::CentralPanel::default()
@@ -616,6 +699,7 @@ impl eframe::App for ViewerApp {
                             settings: &self.settings,
                             export_view: export_view.as_ref(),
                             image_aspect,
+                            theme: &self.theme,
                         };
                         match (self.mode, &mut self.subcloud) {
                             (Mode::Subcloud, Some(subcloud_mode)) => {
@@ -645,75 +729,24 @@ impl eframe::App for ViewerApp {
             self.start_loading(ui.ctx());
         }
 
-        // Floats over the 3D view rather than taking a side panel, so long
-        // sources can't squeeze the viewport. Shown after the central panel so
-        // its default position can sit just inside the viewport's corner.
-        let mut heights_action = None;
         if let LoadState::Open(session) = &self.state {
-            let in_subcloud = self.mode == Mode::Subcloud;
             let clip = match (self.mode, &self.subcloud) {
                 (Mode::Subcloud, Some(subcloud_mode)) => Some(subcloud_mode.subcloud.footprint()),
                 _ => None,
             };
-            // The view controls act on whichever 3D view is showing.
             let camera = match (self.mode, &mut self.subcloud) {
                 (Mode::Subcloud, Some(subcloud_mode)) => &mut subcloud_mode.camera,
                 _ => &mut self.camera,
             };
             let pixels_per_point = ui.ctx().pixels_per_point();
-            let view_size = central.response.rect.size() * pixels_per_point;
+            // The panel's rect includes the gap kept around the view.
+            let view_rect = central.response.rect - self.theme.panel_outer_margin();
+            let view_size = view_rect.size() * pixels_per_point;
             let view_size_px = [view_size.x, view_size.y].map(|side| side.round() as u32);
-            let max_image_size = self.renderer.max_image_size();
             if self.export.match_view {
+                let max_image_size = self.renderer.max_image_size();
                 self.export.size = view_size_px.map(|side| side.clamp(1, max_image_size));
             }
-            let export_progress = session.export_progress(&self.renderer);
-            let mut export_action = None;
-            egui::Window::new("Point cloud")
-                // egui remembers a window's position by its id. One per mode
-                // keeps it over the 3D view, rather than over the map after
-                // switching to Subcloud mode.
-                .id(egui::Id::new(("point_cloud_window", self.mode)))
-                .default_pos(central.response.rect.min + egui::vec2(8.0, 8.0))
-                .collapsible(true)
-                .resizable(false)
-                .max_width(360.0)
-                .show(ui.ctx(), |ui| {
-                    cloud_summary(ui, &session.info);
-                    ui.separator();
-                    streaming_stats(ui, session, &self.renderer);
-                    ui.separator();
-                    view_ui(ui, camera);
-                    ui.separator();
-                    heights_action =
-                        heights_ui(ui, session, &mut self.heights_draft, &self.heights);
-                    ui.separator();
-                    settings_ui(ui, &mut self.settings, session);
-                    ui.separator();
-                    export_action = export_ui(
-                        ui,
-                        &mut self.export,
-                        ExportContext {
-                            max_size: max_image_size,
-                            progress: export_progress,
-                            in_subcloud,
-                        },
-                    );
-                    ui.separator();
-                    ui.label(
-                        "Drag: orbit\nRight-drag: pan\nScroll: zoom\nDouble-click: reset view\n\
-                         Gizmo: click an axis to look along it\n\
-                         7 / 1 / 3: top / front / right (Ctrl: opposite)\n\
-                         5: perspective / orthographic",
-                    );
-                    if in_subcloud {
-                        ui.label(
-                            "Ctrl+scroll: slide the subcloud forward (towards its round \
-                             handle) or back\n\
-                             Ctrl+Shift+scroll: slide it right or left",
-                        );
-                    }
-                });
 
             match export_action {
                 Some(ExportAction::Save) => {
@@ -797,7 +830,13 @@ impl ViewerApp {
             && done == total
             && let Some(job) = export.job.take()
         {
-            let style = point_style(&self.settings, session, job.pixels_per_point, job.clip);
+            let style = point_style(
+                &self.settings,
+                session,
+                job.pixels_per_point,
+                job.clip,
+                &self.theme,
+            );
             let keys = session.export_selection.take().unwrap_or_default().keys;
             // Its own viewport, dropped afterwards, so the big target doesn't
             // stay in GPU memory.
@@ -832,6 +871,21 @@ impl ViewerApp {
     }
 }
 
+/// One section of the Point cloud window, in a box filling its width.
+fn section<R>(
+    ui: &mut egui::Ui,
+    theme: &Theme,
+    add_contents: impl FnOnce(&mut egui::Ui) -> R,
+) -> R {
+    theme
+        .box_frame()
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            add_contents(ui)
+        })
+        .inner
+}
+
 /// What the Save image section shows, beyond its own settings.
 struct ExportContext {
     /// The biggest side the GPU can draw.
@@ -848,7 +902,7 @@ fn export_ui(
     context: ExportContext,
 ) -> Option<ExportAction> {
     ui.strong("Save image");
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         ui.label("Size");
         ui.add_enabled_ui(!export.match_view, |ui| {
             for side in &mut export.size {
@@ -869,7 +923,7 @@ fn export_ui(
 
     let busy = export.job.is_some() || export.writing.is_some();
     let mut action = None;
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         let save = ui
             .add_enabled(!busy, egui::Button::new("Save PNG…"))
             .on_hover_text(
@@ -897,7 +951,7 @@ fn export_ui(
     if let Some((done, total)) = context.progress {
         ui.horizontal(|ui| {
             ui.spinner();
-            ui.label(format!("Loading detail: {done} of {total} nodes"));
+            ui.add(egui::Label::new(format!("Loading detail: {done} of {total} nodes")).wrap());
         });
     } else if export.job.is_some() || export.writing.is_some() {
         ui.horizontal(|ui| {
@@ -993,7 +1047,6 @@ impl SubcloudMode {
 
     /// The left panel: subcloud settings above the map.
     fn map_panel(&mut self, ui: &mut egui::Ui) -> MapFrame {
-        ui.add_space(4.0);
         ui.horizontal(|ui| {
             ui.label("Shape");
             for shape in ShapeKind::ALL {
@@ -1064,7 +1117,6 @@ impl SubcloudMode {
             }
         });
         ui.weak(format!("{hint}\nRight-drag: pan · Scroll: zoom"));
-        ui.add_space(4.0);
 
         // The 3D view follows whatever this does to the shape, in `view`.
         self.map.show(ui, &mut self.subcloud)
@@ -1151,7 +1203,7 @@ impl SubcloudMode {
                 Reframe::Aim => self.subcloud.aim(&mut self.camera, z_range, aspect),
             }
         }
-        show_gizmo(ui, area.rect, &mut self.camera);
+        show_gizmo(ui, area.rect, &mut self.camera, scene.theme);
 
         let view = lod::View::new(&self.camera, area.size_px).clipped_to(footprint);
         let map_view = map_frame
@@ -1166,7 +1218,7 @@ impl SubcloudMode {
             .session
             .update(scene.renderer, views, &scene.settings.lod);
         let texture_id = scene.render_main(&area, &self.camera, Some(footprint));
-        area.paint(ui, texture_id, scene.image_aspect);
+        area.paint(ui, texture_id, scene.image_aspect, scene.theme);
 
         if let Some(frame) = map_frame {
             let style = scene.style(area.pixels_per_point, None);
@@ -1212,6 +1264,7 @@ struct Scene<'a> {
     /// Width / height of the image Save image will make, when it isn't the
     /// view's own. The view frames it.
     image_aspect: Option<f32>,
+    theme: &'a Theme,
 }
 
 /// The views `Session::update` chooses nodes for.
@@ -1228,6 +1281,7 @@ fn point_style(
     session: &Session,
     pixels_per_point: f32,
     clip: Option<Footprint>,
+    theme: &Theme,
 ) -> PointStyle {
     PointStyle {
         size_px: settings.point_size * pixels_per_point,
@@ -1238,12 +1292,19 @@ fn point_style(
             ..settings.edl
         }),
         clip,
+        background: theme.viewport_background(),
     }
 }
 
 impl Scene<'_> {
     fn style(&self, pixels_per_point: f32, clip: Option<Footprint>) -> PointStyle {
-        point_style(self.settings, self.session, pixels_per_point, clip)
+        point_style(
+            self.settings,
+            self.session,
+            pixels_per_point,
+            clip,
+            self.theme,
+        )
     }
 
     /// Draws the selected nodes (and debug bounds) into the main viewport.
@@ -1302,15 +1363,24 @@ impl ViewArea {
         }
     }
 
-    /// Paints the 3D image, and if `image_aspect` is given, darkens what's
-    /// outside an image of that shape.
-    fn paint(&self, ui: &egui::Ui, texture_id: egui::TextureId, image_aspect: Option<f32>) {
+    /// Paints the 3D image with a panel's rounded corners, and if
+    /// `image_aspect` is given, darkens what's outside an image of that shape.
+    fn paint(
+        &self,
+        ui: &egui::Ui,
+        texture_id: egui::TextureId,
+        image_aspect: Option<f32>,
+        theme: &Theme,
+    ) {
         let full_uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
         let painter = ui.painter();
-        painter.set(
-            self.image_slot,
-            egui::Shape::image(texture_id, self.rect, full_uv, egui::Color32::WHITE),
-        );
+        let image = egui::epaint::RectShape::filled(
+            self.rect,
+            theme.shape.panel_radius,
+            egui::Color32::WHITE,
+        )
+        .with_texture(texture_id, full_uv);
+        painter.set(self.image_slot, image);
         let Some(aspect) = image_aspect else { return };
         let view = self.rect;
         let frame = image_frame(view, aspect);
@@ -1348,7 +1418,7 @@ fn explore_view(ui: &mut egui::Ui, scene: &mut Scene<'_>, camera: &mut OrbitCame
     // A touchpad pinch zooms like scrolling. (So does Ctrl+scroll, which
     // egui reports the same way.)
     camera.zoom(input.pinch_px);
-    show_gizmo(ui, area.rect, camera);
+    show_gizmo(ui, area.rect, camera, scene.theme);
 
     let view = lod::View::new(camera, area.size_px);
     let views = Views {
@@ -1360,10 +1430,10 @@ fn explore_view(ui: &mut egui::Ui, scene: &mut Scene<'_>, camera: &mut OrbitCame
         .session
         .update(scene.renderer, views, &scene.settings.lod);
     let texture_id = scene.render_main(&area, camera, None);
-    area.paint(ui, texture_id, scene.image_aspect);
+    area.paint(ui, texture_id, scene.image_aspect, scene.theme);
 }
 
-fn show_gizmo(ui: &mut egui::Ui, view_rect: egui::Rect, camera: &mut OrbitCamera) {
+fn show_gizmo(ui: &mut egui::Ui, view_rect: egui::Rect, camera: &mut OrbitCamera, theme: &Theme) {
     let rect = egui::Rect::from_min_size(
         egui::pos2(
             view_rect.right() - OVERLAY_MARGIN - gizmo::SIZE,
@@ -1371,7 +1441,7 @@ fn show_gizmo(ui: &mut egui::Ui, view_rect: egui::Rect, camera: &mut OrbitCamera
         ),
         egui::Vec2::splat(gizmo::SIZE),
     );
-    gizmo::show(ui, rect, camera);
+    gizmo::show(ui, rect, camera, theme.axis_colors());
 }
 
 /// Input over a 3D view that the caller acts on, beyond moving the camera.
@@ -1437,7 +1507,7 @@ fn camera_controls(
 }
 
 fn view_ui(ui: &mut egui::Ui, camera: &mut OrbitCamera) {
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         ui.label("Projection:");
         // Not `radio_value`: the camera needs to hear about the click, even on
         // the option already selected, to know the user chose it.
@@ -1474,38 +1544,29 @@ fn cloud_summary(ui: &mut egui::Ui, info: &CloudInfo) {
     let [max_x, max_y, max_z] = info.bounds_max;
     let [ox, oy, oz] = info.origin;
 
-    egui::Grid::new("cloud_summary")
-        .num_columns(2)
-        .striped(true)
-        .show(ui, |ui| {
-            // Full URLs run to hundreds of characters; the file name is enough
-            // to identify the cloud, with the full source on hover.
-            ui.label("Source");
-            ui.add(egui::Label::new(file_name(&info.source)).truncate())
-                .on_hover_text(&info.source);
-            ui.end_row();
-
-            ui.label("Total points");
-            ui.label(format_count(info.total_points));
-            ui.end_row();
-
-            ui.label("Extent (m)");
-            ui.label(format!(
+    stat_grid(ui, "cloud_summary", |ui| {
+        // Full URLs run to hundreds of characters; the file name is enough
+        // to identify the cloud, with the full source on hover.
+        stat_row(ui, "Source", file_name(&info.source)).on_hover_text(&info.source);
+        stat_row(ui, "Total points", mono(format_count(info.total_points)));
+        stat_row(
+            ui,
+            "Extent (m)",
+            mono(format!(
                 "{:.1} × {:.1} × {:.1}",
                 max_x - min_x,
                 max_y - min_y,
                 max_z - min_z
-            ));
-            ui.end_row();
-
-            ui.label("Octree centre");
-            ui.label(format!("{ox:.2}, {oy:.2}, {oz:.2}"));
-            ui.end_row();
-
-            ui.label("Open time");
-            ui.label(format!("{:.2} s", info.open_time.as_secs_f64()));
-            ui.end_row();
-        });
+            )),
+        );
+        stat_row(ui, "Centre", mono(format!("{ox:.2}, {oy:.2}, {oz:.2}")))
+            .on_hover_text("The octree's centre: X, Y and Z");
+        stat_row(
+            ui,
+            "Open time",
+            mono(format!("{:.2} s", info.open_time.as_secs_f64())),
+        );
+    });
 }
 
 fn streaming_stats(ui: &mut egui::Ui, session: &Session, renderer: &PointRenderer) {
@@ -1517,90 +1578,190 @@ fn streaming_stats(ui: &mut egui::Ui, session: &Session, renderer: &PointRendere
         .filter(|key| renderer.has_node(key))
         .count();
 
-    egui::Grid::new("streaming_stats")
-        .num_columns(2)
-        .striped(true)
-        .show(ui, |ui| {
-            ui.label("Points drawn");
-            ui.label(format!(
-                "{} of {} selected",
+    stat_grid(ui, "streaming_stats", |ui| {
+        stat_row(
+            ui,
+            "Points drawn",
+            mono(format!(
+                "{} of {}",
                 format_count(session.drawn_points(renderer)),
                 format_count(session.selection.points)
-            ));
-            ui.end_row();
-
-            ui.label("Nodes drawn");
-            ui.label(format!(
-                "{drawn} of {selected} selected ({} in file)",
-                session.octree.node_count()
-            ));
-            ui.end_row();
-
-            ui.label("Requested");
-            ui.label(format!(
-                "{} nodes ({} downloading)",
+            )),
+        )
+        .on_hover_text("Points drawn, of those selected for the view");
+        stat_row(ui, "Nodes drawn", mono(format!("{drawn} of {selected}")))
+            .on_hover_text("Nodes drawn, of those selected for the view");
+        stat_row(
+            ui,
+            "Nodes in file",
+            mono(session.octree.node_count().to_string()),
+        );
+        stat_row(
+            ui,
+            "Requested",
+            mono(format!(
+                "{} ({} downloading)",
                 session.requested.len(),
                 session.fetching.len()
-            ));
-            ui.end_row();
+            )),
+        )
+        .on_hover_text("Nodes waiting to load, and how many of those are downloading");
+        stat_row(
+            ui,
+            "GPU cache",
+            mono(format!(
+                "{} in {} nodes",
+                format_count(renderer.resident_points()),
+                renderer.node_count()
+            )),
+        )
+        .on_hover_text("Points kept on the GPU, and the nodes they're in");
 
-            ui.label("GPU cache");
-            ui.label(format!(
-                "{} nodes, {} points",
-                renderer.node_count(),
-                format_count(renderer.resident_points())
-            ));
+        if let Some(error) = session.failed.values().next() {
+            ui.colored_label(ui.visuals().error_fg_color, "Failed");
+            ui.add(egui::Label::new(mono(format!("{} nodes", session.failed.len()))).truncate())
+                .on_hover_text(error);
             ui.end_row();
+        }
+    });
+}
 
-            if let Some(error) = session.failed.values().next() {
-                ui.colored_label(ui.visuals().error_fg_color, "Failed");
-                ui.label(format!("{} nodes", session.failed.len()))
-                    .on_hover_text(error);
-                ui.end_row();
-            }
-        });
+/// A striped two-column grid of read-only values, whose rows are added with
+/// [`stat_row`].
+fn stat_grid(ui: &mut egui::Ui, id: &str, add_rows: impl FnOnce(&mut egui::Ui)) {
+    egui::Grid::new(id)
+        .num_columns(2)
+        .striped(true)
+        .show(ui, add_rows);
+}
+
+/// A row of a [`stat_grid`]: the label in secondary text, then the value,
+/// cut short with "…" where the box is too narrow for it. Returns the value's
+/// response, for hover text.
+fn stat_row(ui: &mut egui::Ui, label: &str, value: impl Into<egui::WidgetText>) -> egui::Response {
+    ui.weak(label);
+    let value = ui
+        .horizontal(|ui| {
+            // The value's cell fills the row, so the stripes run across the
+            // whole box, however short the value.
+            ui.set_min_width(ui.available_width());
+            ui.add(egui::Label::new(value).truncate())
+        })
+        .inner;
+    ui.end_row();
+    value
+}
+
+/// A value, such as a number, set in the monospaced font.
+fn mono(text: impl Into<String>) -> egui::RichText {
+    egui::RichText::new(text).monospace()
+}
+
+/// How wide `text` is on one line, in `style` unless it says otherwise.
+fn text_width(ui: &egui::Ui, text: impl Into<egui::WidgetText>, style: egui::TextStyle) -> f32 {
+    text.into()
+        .into_galley(ui, Some(egui::TextWrapMode::Extend), f32::INFINITY, style)
+        .size()
+        .x
+}
+
+/// A two-column grid of settings, labels on the left. Grids given the same
+/// `label_width` line their controls up.
+fn settings_grid(
+    ui: &mut egui::Ui,
+    id: &str,
+    label_width: f32,
+    add_rows: impl FnOnce(&mut egui::Ui),
+) {
+    egui::Grid::new(id)
+        .num_columns(2)
+        .min_col_width(label_width)
+        .show(ui, add_rows);
+}
+
+/// A slider as wide as the rest of the row, leaving room for its value.
+fn fitted_slider(ui: &mut egui::Ui, slider: egui::Slider<'_>) -> egui::Response {
+    // Wide enough for the longest value the sliders show, such as a point
+    // budget of "30.00 M".
+    let value_width = text_width(ui, mono("00.00 M"), egui::TextStyle::Monospace)
+        + 2.0 * ui.spacing().button_padding.x;
+    let spacing = ui.spacing();
+    let value_width = value_width.max(spacing.interact_size.x);
+    let slider_width =
+        (ui.available_width() - value_width - spacing.item_spacing.x).max(spacing.interact_size.y);
+    ui.spacing_mut().slider_width = slider_width;
+    ui.add(slider)
 }
 
 fn settings_ui(ui: &mut egui::Ui, settings: &mut ViewSettings, session: &Session) {
-    ui.horizontal(|ui| {
-        ui.label("Colour:");
-        ui.radio_value(&mut settings.color_mode, ColorMode::Height, "Height");
-        ui.add_enabled_ui(session.info.has_rgb, |ui| {
-            ui.radio_value(&mut settings.color_mode, ColorMode::Rgb, "RGB")
-                .on_disabled_hover_text("This file has no colour");
+    // One label column for every grid here, so their controls line up.
+    let label_width = ["Colour", "Point size", "Point budget", "Spacing (px)"]
+        .map(|label| text_width(ui, label, egui::TextStyle::Body))
+        .into_iter()
+        .fold(0.0, f32::max);
+
+    settings_grid(ui, "display_settings", label_width, |ui| {
+        ui.weak("Colour");
+        ui.horizontal_wrapped(|ui| {
+            ui.radio_value(&mut settings.color_mode, ColorMode::Height, "Height");
+            ui.add_enabled_ui(session.info.has_rgb, |ui| {
+                ui.radio_value(&mut settings.color_mode, ColorMode::Rgb, "RGB")
+                    .on_disabled_hover_text("This file has no colour");
+            });
+            ui.radio_value(&mut settings.color_mode, ColorMode::Classification, "Class");
         });
-        ui.radio_value(&mut settings.color_mode, ColorMode::Classification, "Class");
+        ui.end_row();
     });
     if settings.color_mode == ColorMode::Classification {
         class_legend_ui(ui, &session.classes_seen);
     }
-    ui.add(egui::Slider::new(&mut settings.point_size, 1.0..=10.0).text("Point size"));
+    settings_grid(ui, "point_settings", label_width, |ui| {
+        ui.weak("Point size");
+        fitted_slider(ui, egui::Slider::new(&mut settings.point_size, 1.0..=10.0));
+        ui.end_row();
+    });
 
     ui.checkbox(&mut settings.edl_enabled, "Eye-dome lighting")
         .on_hover_text("Shades points by how much nearer their neighbours are, to show depth.");
     if settings.edl_enabled {
+        // Narrower by the indent, so these sliders line up with the others.
+        let indented_width = label_width - ui.spacing().indent;
         ui.indent("edl_options", |ui| {
-            ui.add(egui::Slider::new(&mut settings.edl.strength, 0.1..=5.0).text("Strength"));
-            ui.add(egui::Slider::new(&mut settings.edl.radius_px, 1.0..=4.0).text("Radius (px)"));
+            settings_grid(ui, "edl_settings", indented_width, |ui| {
+                ui.weak("Strength");
+                fitted_slider(ui, egui::Slider::new(&mut settings.edl.strength, 0.1..=5.0));
+                ui.end_row();
+                ui.weak("Radius (px)");
+                fitted_slider(
+                    ui,
+                    egui::Slider::new(&mut settings.edl.radius_px, 1.0..=4.0),
+                );
+                ui.end_row();
+            });
         });
     }
 
     ui.separator();
-    ui.add(
-        egui::Slider::new(&mut settings.lod.point_budget, 500_000..=30_000_000)
-            .logarithmic(true)
-            .custom_formatter(|value, _| format_count(value as u64))
-            .text("Point budget"),
-    );
-    ui.add(
-        egui::Slider::new(&mut settings.lod.target_spacing_px, 0.5..=20.0)
-            .logarithmic(true)
-            .text("Target spacing (px)"),
-    )
-    .on_hover_text(
-        "Nodes are refined until their points are at most this far apart on screen. \
-         Lower means more detail, up to the point budget.",
-    );
+    settings_grid(ui, "lod_settings", label_width, |ui| {
+        ui.weak("Point budget");
+        fitted_slider(
+            ui,
+            egui::Slider::new(&mut settings.lod.point_budget, 500_000..=30_000_000)
+                .logarithmic(true)
+                .custom_formatter(|value, _| format_count(value as u64)),
+        );
+        ui.end_row();
+        let spacing_hint = "The target spacing: nodes are refined until their points are at \
+                            most this far apart on screen. Lower means more detail, up to the \
+                            point budget.";
+        ui.weak("Spacing (px)").on_hover_text(spacing_hint);
+        fitted_slider(
+            ui,
+            egui::Slider::new(&mut settings.lod.target_spacing_px, 0.5..=20.0).logarithmic(true),
+        )
+        .on_hover_text(spacing_hint);
+        ui.end_row();
+    });
 
     ui.checkbox(&mut settings.show_bounds, "Show node bounds");
     if settings.show_bounds {
@@ -1637,7 +1798,7 @@ fn heights_ui(
 ) -> Option<HeightsAction> {
     let info = &session.info;
     let mut action = None;
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         ui.label("Draw at:");
         for kind in HeightKind::ALL {
             let available = info.heights[kind].is_some();
@@ -1656,29 +1817,47 @@ fn heights_ui(
         .id_salt("height_sources")
         .show(ui, |ui| {
             egui::Grid::new("height_sources_grid")
-                .num_columns(3)
+                .num_columns(2)
                 .show(ui, |ui| {
                     for kind in HeightKind::ALL {
-                        ui.label(kind.label());
-                        let setting = draft.get_mut(kind);
-                        egui::ComboBox::from_id_salt(("height_source", kind))
-                            .selected_text(setting_label(setting))
-                            .show_ui(ui, |ui| {
-                                let options =
-                                    [SourceSetting::Auto, SourceSetting::From(HeightSource::Z)]
-                                        .into_iter()
-                                        .chain(info.extra_dimensions.iter().map(|name| {
-                                            SourceSetting::From(HeightSource::Extra(name.clone()))
-                                        }))
-                                        .chain([SourceSetting::Absent]);
-                                for option in options {
-                                    let label = setting_label(&option);
-                                    ui.selectable_value(setting, option, label);
-                                }
-                            });
-                        ui.weak(match &info.heights[kind] {
-                            Some(source) => format!("now {source}"),
-                            None => "now missing".to_owned(),
+                        ui.weak(kind.label());
+                        // What it's set to, then where it was read from this
+                        // time.
+                        ui.horizontal_wrapped(|ui| {
+                            let setting = draft.get_mut(kind);
+                            // Narrower than usual if that's all there's room for.
+                            let width = ui.available_width().min(ui.spacing().combo_width);
+                            egui::ComboBox::from_id_salt(("height_source", kind))
+                                .selected_text(setting_label(setting))
+                                .width(width)
+                                .show_ui(ui, |ui| {
+                                    let options =
+                                        [SourceSetting::Auto, SourceSetting::From(HeightSource::Z)]
+                                            .into_iter()
+                                            .chain(info.extra_dimensions.iter().map(|name| {
+                                                SourceSetting::From(HeightSource::Extra(
+                                                    name.clone(),
+                                                ))
+                                            }))
+                                            .chain([SourceSetting::Absent]);
+                                    for option in options {
+                                        let label = setting_label(&option);
+                                        ui.selectable_value(setting, option, label);
+                                    }
+                                });
+                            let now = match &info.heights[kind] {
+                                Some(source) => format!("now {source}"),
+                                None => "now missing".to_owned(),
+                            };
+                            // Kept on one line: under the box if it doesn't fit beside it,
+                            // and cut short if it doesn't fit there either.
+                            let now = egui::RichText::new(now).weak();
+                            if text_width(ui, now.clone(), egui::TextStyle::Body)
+                                > ui.available_width()
+                            {
+                                ui.end_row();
+                            }
+                            ui.add(egui::Label::new(now).truncate());
                         });
                         ui.end_row();
                     }
@@ -1728,7 +1907,9 @@ fn class_legend_ui(ui: &mut egui::Ui, classes_seen: &[bool; 256]) {
             // Only the swatch is coloured: dark classes would be hard to read.
             ui.horizontal(|ui| {
                 ui.colored_label(legend_color([r, g, b, 1.0]), "■");
-                ui.label(format!("{class} {}", classification::name(class)));
+                ui.add(
+                    egui::Label::new(format!("{class} {}", classification::name(class))).truncate(),
+                );
             });
         }
     });
