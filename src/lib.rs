@@ -6,6 +6,7 @@ mod camera;
 mod classification;
 mod cloud;
 mod export;
+mod format;
 mod gizmo;
 mod heights;
 mod http_source;

@@ -131,6 +131,12 @@ impl PointColor {
     }
 }
 
+/// Whether colours use the 16-bit range LAS specifies, rather than 0..255.
+/// Once any value has, [`PointColor::rgb`] should be told so.
+pub(crate) fn uses_16_bit_color(colors: &[[u16; 4]]) -> bool {
+    colors.iter().any(|[r, g, b, _]| (*r).max(*g).max(*b) > 255)
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct EdlSettings {
     /// How dark the shading gets. 1 matches Potree's default.
@@ -1091,5 +1097,18 @@ mod tests {
             delta.length() == 1.0
         });
         assert!(lines.len() == 24 && axis_aligned);
+    }
+
+    #[test]
+    fn uses_16_bit_color_should_be_false_for_8_bit_values() {
+        assert!(!uses_16_bit_color(&[[255, 128, 0, u16::MAX]]));
+    }
+
+    #[test]
+    fn uses_16_bit_color_should_be_true_above_255() {
+        assert!(uses_16_bit_color(&[
+            [0, 0, 0, u16::MAX],
+            [256, 0, 0, u16::MAX]
+        ]));
     }
 }

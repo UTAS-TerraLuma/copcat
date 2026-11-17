@@ -11,12 +11,14 @@ use copc_streaming::VoxelKey;
 use eframe::egui;
 use eframe::egui_wgpu::wgpu;
 
-use crate::app::{format_count, uses_16_bit_color};
 use crate::camera::{OrbitCamera, Projection, ViewPreset};
+use crate::format::format_count;
 use crate::heights::{HeightKind, HeightSettings, HeightSource, SourceSetting};
 use crate::loader::{Event, Loader, OpenedCloud};
 use crate::lod::{self, LodSettings, Octree};
-use crate::renderer::{EdlSettings, Image, PointColor, PointRenderer, PointStyle};
+use crate::renderer::{
+    EdlSettings, Image, PointColor, PointRenderer, PointStyle, uses_16_bit_color,
+};
 use crate::theme::Theme;
 
 /// `copcat render`'s arguments. The viewer's Copy as command writes them too,
