@@ -14,6 +14,7 @@ mod lod;
 mod renderer;
 mod subcloud;
 mod subcloud_map;
+mod summary;
 mod theme;
 #[cfg(windows)]
 mod windows_dpi;
@@ -24,6 +25,7 @@ use eframe::{egui, egui_wgpu};
 
 pub use export::{RenderArgs, render};
 pub use heights::HeightSettings;
+pub use summary::{CloudSummary, SummaryPoint, read_cloud};
 
 /// Opens the viewer window and blocks until it's closed. `initial_source` is a
 /// COPC URL or file path to load on startup, reading its heights from where

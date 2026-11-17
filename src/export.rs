@@ -456,14 +456,28 @@ impl NodeLoader<'_> {
 }
 
 /// A GPU device with no window, allowing images as big as the GPU can draw.
+///
+/// `WGPU_ADAPTER_NAME` picks the first adapter whose name contains it (any
+/// case), so tests can render on a software rasterizer such as WARP
+/// ("Microsoft Basic Render Driver") or lavapipe ("llvmpipe").
 fn create_device() -> Result<(wgpu::Device, wgpu::Queue), String> {
     let instance =
         wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
-    let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-        power_preference: wgpu::PowerPreference::HighPerformance,
-        ..Default::default()
-    }))
-    .map_err(|e| format!("couldn't find a GPU: {e}"))?;
+    let adapter = match std::env::var("WGPU_ADAPTER_NAME") {
+        Ok(wanted) => {
+            let wanted = wanted.to_lowercase();
+            let adapters = pollster::block_on(instance.enumerate_adapters(wgpu::Backends::all()));
+            adapters
+                .into_iter()
+                .find(|adapter| adapter.get_info().name.to_lowercase().contains(&wanted))
+                .ok_or_else(|| format!("couldn't find a GPU named like {wanted:?}"))?
+        }
+        Err(_) => pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::HighPerformance,
+            ..Default::default()
+        }))
+        .map_err(|e| format!("couldn't find a GPU: {e}"))?,
+    };
     pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
         label: Some("copcat render"),
         required_limits: adapter.limits(),
