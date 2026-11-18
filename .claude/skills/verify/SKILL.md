@@ -18,6 +18,8 @@ it, and start again from step 1.
      is drawn and against `tests/golden/*.png`.
    - `tests/ui_kittest.rs`: the real viewer in egui_kittest, loaded with the
      fixture and snapshotted against `tests/snapshots/*.png`.
+   - `tests/ui_settings.rs`: the viewer reading settings files from scratch
+     directories (never `~/.copcat`): layering, warnings, save and reload.
 4. Read the test output for `SKIPPED:` lines. A skipped GPU test verified
    nothing; say so in your report. `COPCAT_REQUIRE_GPU=1 cargo test --locked`
    turns a missing adapter into a failure.

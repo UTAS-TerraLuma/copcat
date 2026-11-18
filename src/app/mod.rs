@@ -12,6 +12,7 @@
 //! - [`export_ui`]: the Save image section and its job.
 //! - [`open_ui`]: the Open menu and the Open URL dialog.
 //! - [`panels`]: the settings panel's sections and the status indicator.
+//! - [`user_config`]: the settings files applied, and the settings commands.
 
 mod camera_input;
 mod commands;
@@ -22,6 +23,7 @@ mod scene;
 mod session;
 mod settings;
 mod subcloud_mode;
+mod user_config;
 
 use std::mem;
 use std::sync::mpsc::TryRecvError;
@@ -31,6 +33,7 @@ use eframe::egui;
 
 use crate::camera::OrbitCamera;
 use crate::cloud::LoadError;
+use crate::config::Locations;
 use crate::heights::{HeightKind, HeightSettings};
 use crate::loader::{Event, Loader};
 use crate::lod::{self, Octree};
@@ -48,6 +51,7 @@ use scene::{Scene, Viewports, explore_view};
 use session::Session;
 use settings::Settings;
 use subcloud_mode::{Reframe, SubcloudMode};
+use user_config::UserConfig;
 
 pub struct ViewerApp {
     state: LoadState,
@@ -69,6 +73,8 @@ pub struct ViewerApp {
     theme: Theme,
     /// Which shortcut runs which command.
     keymap: Keymap,
+    /// The settings files, and problems found in them.
+    user_config: UserConfig,
     /// Commands asked for this frame, by buttons and shortcuts. They run
     /// together once the frame is laid out, when the 3D view's size is known.
     pending: Vec<Command>,
@@ -107,11 +113,13 @@ enum LoadState {
 }
 
 impl ViewerApp {
-    /// `initial_source`, if given, starts loading immediately.
+    /// `initial_source`, if given, starts loading immediately. Settings
+    /// are read from the files at `config_locations`, or none if `None`.
     pub fn new(
         cc: &eframe::CreationContext<'_>,
         initial_source: Option<String>,
         heights: HeightSettings,
+        config_locations: Option<Locations>,
     ) -> Result<Self, &'static str> {
         let render_state = cc
             .wgpu_render_state
@@ -139,10 +147,12 @@ impl ViewerApp {
             heights,
             theme,
             keymap: Keymap::default(),
+            user_config: UserConfig::new(config_locations),
             pending: Vec::new(),
             url_dialog: None,
             view_size_px: [1, 1],
         };
+        app.load_user_config(&cc.egui_ctx);
         if let Some(source) = initial_source.as_deref().and_then(open_ui::clean_source) {
             app.start_loading(&cc.egui_ctx, source);
         }
@@ -265,7 +275,8 @@ impl ViewerApp {
             Command::OpenSource(_)
             | Command::OpenFileDialog
             | Command::OpenUrlDialog
-            | Command::ToggleDiagnostics => true,
+            | Command::ToggleDiagnostics
+            | Command::Settings(_) => true,
             Command::SaveImage => is_open && !self.export.is_busy(),
             Command::SetMode(_)
             | Command::SetView(_)
@@ -317,6 +328,7 @@ impl ViewerApp {
                 let diagnostics = &mut self.settings.diagnostics;
                 diagnostics.visible = !diagnostics.visible;
             }
+            Command::Settings(command) => self.run_settings_command(ctx, command),
         }
         // The change shows next frame.
         ctx.request_repaint();
@@ -445,6 +457,7 @@ impl eframe::App for ViewerApp {
             .frame(self.theme.header_frame())
             .show_separator_line(false)
             .show(ui, |ui| self.top_bar(ui));
+        self.settings_bar(ui);
 
         // Subcloud mode's map. Side panels have to be laid out before the
         // central panel, but the map is only drawn after it, once the nodes
