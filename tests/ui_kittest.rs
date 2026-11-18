@@ -76,6 +76,16 @@ fn viewer_should_load_the_fixture_and_draw_it() {
     let started = Instant::now();
     loop {
         harness.step();
+        // The streaming numbers are in the Diagnostics section, which starts
+        // collapsed: open it once the cloud is open and the section is there.
+        if text_after(&harness, "Nodes drawn").is_none()
+            && let Some(header) = harness.query_by_label("Diagnostics")
+        {
+            header.scroll_to_me();
+            harness.step();
+            harness.get_by_label("Diagnostics").click();
+            harness.step();
+        }
         let drawn = text_after(&harness, "Nodes drawn");
         let requested = text_after(&harness, "Requested");
         if let (Some(drawn), Some(requested)) = (&drawn, &requested) {
