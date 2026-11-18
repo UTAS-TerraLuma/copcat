@@ -53,7 +53,15 @@ pub const WORKSPACE_ENV: &str = "COPCAT_WORKSPACE";
 pub mod ranges {
     use std::ops::RangeInclusive;
 
+    /// The fixed point size, in logical pixels.
     pub const POINT_SIZE: RangeInclusive<f32> = 1.0..=10.0;
+    /// Adaptive point sizes: diameter as a multiple of the points' spacing
+    /// on screen.
+    pub const FILL: RangeInclusive<f32> = 0.5..=4.0;
+    /// Adaptive point sizes: the smallest, in logical pixels.
+    pub const MIN_POINT_SIZE: RangeInclusive<f32> = 0.5..=8.0;
+    /// Adaptive point sizes: the largest, in logical pixels.
+    pub const MAX_POINT_SIZE: RangeInclusive<f32> = 2.0..=64.0;
     pub const EDL_STRENGTH: RangeInclusive<f32> = 0.1..=5.0;
     pub const EDL_RADIUS: RangeInclusive<f32> = 1.0..=4.0;
     pub const POINT_BUDGET: RangeInclusive<u64> = 500_000..=30_000_000;
@@ -80,7 +88,18 @@ pub struct Config {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct DisplayConfig {
     pub color_mode: Option<ColorModeName>,
+    /// Adaptive or fixed point sizes. Only this chooses the mode: setting
+    /// `point_size` alone doesn't switch to fixed.
+    pub point_size_mode: Option<PointSizeModeName>,
+    /// The fixed point size, used in fixed mode.
     pub point_size: Option<f32>,
+    /// Adaptive point sizes: diameter as a multiple of the points' spacing
+    /// on screen.
+    pub fill: Option<f32>,
+    /// Adaptive point sizes: the smallest, in logical pixels.
+    pub min_point_size: Option<f32>,
+    /// Adaptive point sizes: the largest, in logical pixels.
+    pub max_point_size: Option<f32>,
     pub edl: EdlConfig,
     pub projection: Option<Projection>,
 }
@@ -124,6 +143,26 @@ impl ColorModeName {
             Self::Height => "height",
             Self::Rgb => "rgb",
             Self::Classification => "classification",
+        }
+    }
+}
+
+/// How big points are drawn, as a settings file names it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PointSizeModeName {
+    /// By their spacing on screen, between the smallest and largest sizes.
+    Adaptive,
+    /// All `pointSize`.
+    Fixed,
+}
+
+impl PointSizeModeName {
+    pub const ALL: [Self; 2] = [Self::Adaptive, Self::Fixed];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Adaptive => "adaptive",
+            Self::Fixed => "fixed",
         }
     }
 }
@@ -207,7 +246,14 @@ impl Config {
             theme: over.theme.or(self.theme),
             display: DisplayConfig {
                 color_mode: over.display.color_mode.or(self.display.color_mode),
+                point_size_mode: over
+                    .display
+                    .point_size_mode
+                    .or(self.display.point_size_mode),
                 point_size: over.display.point_size.or(self.display.point_size),
+                fill: over.display.fill.or(self.display.fill),
+                min_point_size: over.display.min_point_size.or(self.display.min_point_size),
+                max_point_size: over.display.max_point_size.or(self.display.max_point_size),
                 edl: EdlConfig {
                     enabled: over.display.edl.enabled.or(self.display.edl.enabled),
                     strength: over.display.edl.strength.or(self.display.edl.strength),

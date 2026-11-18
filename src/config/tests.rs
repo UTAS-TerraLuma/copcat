@@ -32,7 +32,11 @@ const FULL: &str = r#"{
   "theme": "graphite",
   "display": {
     "colorMode": "classification",
+    "pointSizeMode": "fixed",
     "pointSize": 3.5,
+    "fill": 2.5,
+    "minPointSize": 1.5,
+    "maxPointSize": 32.0,
     "edl": { "enabled": false, "strength": 2.0, "radius": 2.5 },
     "projection": "orthographic"
   },
@@ -53,7 +57,14 @@ fn a_full_file_should_set_everything() {
         config.display.color_mode,
         Some(ColorModeName::Classification)
     );
+    assert_eq!(
+        config.display.point_size_mode,
+        Some(PointSizeModeName::Fixed)
+    );
     assert_eq!(config.display.point_size, Some(3.5));
+    assert_eq!(config.display.fill, Some(2.5));
+    assert_eq!(config.display.min_point_size, Some(1.5));
+    assert_eq!(config.display.max_point_size, Some(32.0));
     assert_eq!(config.display.edl.enabled, Some(false));
     assert_eq!(config.display.edl.strength, Some(2.0));
     assert_eq!(config.display.edl.radius, Some(2.5));
@@ -124,6 +135,14 @@ fn templates_should_be_valid_once_uncommented() {
     };
     let user = parse_clean(&uncomment(USER_TEMPLATE));
     assert_eq!(user.display.color_mode, Some(ColorModeName::Rgb));
+    assert_eq!(
+        user.display.point_size_mode,
+        Some(PointSizeModeName::Adaptive)
+    );
+    assert!(user.display.fill.is_some());
+    assert!(user.display.min_point_size.is_some());
+    assert!(user.display.max_point_size.is_some());
+    assert!(user.display.point_size.is_some());
     assert_eq!(user.connectors.folders.len(), 1);
     assert_eq!(user.keybindings.len(), 2);
     let workspace = parse_clean(&uncomment(WORKSPACE_TEMPLATE));
@@ -138,8 +157,14 @@ fn comments_and_trailing_commas_should_be_allowed() {
 
 #[test]
 fn choices_should_ignore_case_and_spaces() {
-    let config = parse_clean(r#"{"display": {"colorMode": " RGB ", "projection": "Perspective"}}"#);
+    let config = parse_clean(
+        r#"{"display": {"colorMode": " RGB ", "projection": "Perspective", "pointSizeMode": "Fixed "}}"#,
+    );
     assert_eq!(config.display.color_mode, Some(ColorModeName::Rgb));
+    assert_eq!(
+        config.display.point_size_mode,
+        Some(PointSizeModeName::Fixed)
+    );
     assert_eq!(config.display.projection, Some(Projection::Perspective));
 }
 
@@ -185,7 +210,7 @@ fn wrong_types_should_warn_and_be_skipped() {
     let (config, warnings) = parse(
         r#"{
             "theme": 3,
-            "display": {"pointSize": "big", "colorMode": "rainbow", "edl": {"enabled": "yes", "strength": 2}},
+            "display": {"pointSize": "big", "colorMode": "rainbow", "pointSizeMode": "huge", "fill": "lots", "edl": {"enabled": "yes", "strength": 2}},
             "performance": [],
             "keybindings": {"view.top": 7}
         }"#,
@@ -193,12 +218,18 @@ fn wrong_types_should_warn_and_be_skipped() {
     assert_eq!(config.theme, None);
     assert_eq!(config.display.point_size, None);
     assert_eq!(config.display.color_mode, None);
+    assert_eq!(config.display.point_size_mode, None);
+    assert_eq!(config.display.fill, None);
     assert_eq!(config.display.edl.enabled, None);
     // The good value beside the bad ones is still used.
     assert_eq!(config.display.edl.strength, Some(2.0));
     assert!(config.keybindings.is_empty());
     let messages = messages(&warnings);
-    assert_eq!(messages.len(), 6, "{messages:#?}");
+    assert_eq!(messages.len(), 8, "{messages:#?}");
+    assert!(messages.contains(
+        &"display.pointSizeMode should be one of \"adaptive\", \"fixed\", not \"huge\"".to_owned()
+    ));
+    assert!(messages.contains(&"display.fill should be a number, not \"lots\"".to_owned()));
     assert!(messages.contains(&"theme should be a string, not 3".to_owned()));
     assert!(messages.contains(
         &"display.colorMode should be one of \"height\", \"rgb\", \"classification\", not \"rainbow\""
@@ -219,12 +250,21 @@ fn null_should_mean_not_set() {
 fn numbers_out_of_range_should_be_clamped_with_a_warning() {
     let (config, warnings) = parse(
         r#"{
-            "display": {"pointSize": 50, "edl": {"strength": 0, "radius": 9}},
+            "display": {"pointSize": 50, "fill": 0.1, "minPointSize": 0, "maxPointSize": 100, "edl": {"strength": 0, "radius": 9}},
             "performance": {"pointBudget": 10, "spacingPx": 100},
             "export": {"width": 0, "height": 100000}
         }"#,
     );
     assert_eq!(config.display.point_size, Some(*ranges::POINT_SIZE.end()));
+    assert_eq!(config.display.fill, Some(*ranges::FILL.start()));
+    assert_eq!(
+        config.display.min_point_size,
+        Some(*ranges::MIN_POINT_SIZE.start())
+    );
+    assert_eq!(
+        config.display.max_point_size,
+        Some(*ranges::MAX_POINT_SIZE.end())
+    );
     assert_eq!(
         config.display.edl.strength,
         Some(*ranges::EDL_STRENGTH.start())
@@ -240,10 +280,14 @@ fn numbers_out_of_range_should_be_clamped_with_a_warning() {
     );
     assert_eq!(config.export.width, Some(1));
     assert_eq!(config.export.height, Some(*ranges::EXPORT_SIDE.end()));
-    assert_eq!(warnings.len(), 7);
+    assert_eq!(warnings.len(), 10, "{warnings:#?}");
     assert_eq!(
         warnings[0].message,
         "display.pointSize is 50, outside 1 to 10; using 10"
+    );
+    assert_eq!(
+        warnings[1].message,
+        "display.fill is 0.1, outside 0.5 to 4; using 0.5"
     );
 }
 
@@ -357,6 +401,39 @@ fn merge_should_override_key_by_key() {
     assert_eq!(merged.display.color_mode, Some(ColorModeName::Height));
     assert_eq!(merged.display.edl.strength, Some(2.0));
     assert_eq!(merged.display.edl.radius, Some(3.0));
+}
+
+#[test]
+fn merge_should_layer_point_size_settings_key_by_key() {
+    let user = parse_clean(
+        r#"{"display": {"pointSizeMode": "fixed", "pointSize": 4, "fill": 2, "minPointSize": 2}}"#,
+    );
+    // Sets the fixed size only: the user file's mode stays.
+    let workspace = parse_clean(r#"{"display": {"pointSize": 6, "maxPointSize": 30}}"#);
+    let merged = user.merge(workspace);
+    assert_eq!(
+        merged.display.point_size_mode,
+        Some(PointSizeModeName::Fixed)
+    );
+    assert_eq!(merged.display.point_size, Some(6.0));
+    assert_eq!(merged.display.fill, Some(2.0));
+    assert_eq!(merged.display.min_point_size, Some(2.0));
+    assert_eq!(merged.display.max_point_size, Some(30.0));
+
+    let back = parse_clean(r#"{"display": {"pointSizeMode": "adaptive"}}"#);
+    let merged = merged.merge(back);
+    assert_eq!(
+        merged.display.point_size_mode,
+        Some(PointSizeModeName::Adaptive)
+    );
+    assert_eq!(merged.display.point_size, Some(6.0));
+}
+
+#[test]
+fn point_size_alone_should_not_set_the_mode() {
+    let config = parse_clean(r#"{"display": {"pointSize": 5}}"#);
+    assert_eq!(config.display.point_size, Some(5.0));
+    assert_eq!(config.display.point_size_mode, None);
 }
 
 #[test]
@@ -586,7 +663,11 @@ prop_compose! {
     fn arb_config()(
         theme in proptest::option::of("[a-z]{1,10}"),
         color_mode in proptest::option::of(proptest::sample::select(ColorModeName::ALL.to_vec())),
+        point_size_mode in proptest::option::of(proptest::sample::select(PointSizeModeName::ALL.to_vec())),
         point_size in proptest::option::of(in_range(ranges::POINT_SIZE)),
+        fill in proptest::option::of(in_range(ranges::FILL)),
+        min_point_size in proptest::option::of(in_range(ranges::MIN_POINT_SIZE)),
+        max_point_size in proptest::option::of(in_range(ranges::MAX_POINT_SIZE)),
         enabled in proptest::option::of(any::<bool>()),
         strength in proptest::option::of(in_range(ranges::EDL_STRENGTH)),
         radius in proptest::option::of(in_range(ranges::EDL_RADIUS)),
@@ -611,7 +692,11 @@ prop_compose! {
             theme,
             display: DisplayConfig {
                 color_mode,
+                point_size_mode,
                 point_size,
+                fill,
+                min_point_size,
+                max_point_size,
                 edl: EdlConfig { enabled, strength, radius },
                 projection,
             },
@@ -687,6 +772,8 @@ fn arb_json() -> impl Strategy<Value = serde_json::Value> {
             Just("name".to_owned()),
             Just("keybindings".to_owned()),
             Just("pointSize".to_owned()),
+            Just("pointSizeMode".to_owned()),
+            Just("minPointSize".to_owned()),
             "[a-z]{1,6}",
         ];
         prop_oneof![

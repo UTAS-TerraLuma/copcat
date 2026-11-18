@@ -17,7 +17,11 @@ pub(crate) const USER_TEMPLATE: &str = r#"// Copcat user settings. Every key is 
   // "theme": "graphite",
   // "display": {
   //   "colorMode": "rgb",            // "height", "rgb" or "classification"
-  //   "pointSize": 2.0,              // 1 to 10
+  //   "pointSizeMode": "adaptive",   // or "fixed"; only this picks the mode
+  //   "fill": 1.5,                   // adaptive: size per spacing, 0.5 to 4
+  //   "minPointSize": 1.0,           // adaptive: smallest, 0.5 to 8
+  //   "maxPointSize": 20.0,          // adaptive: largest, 2 to 64
+  //   "pointSize": 2.0,              // fixed: 1 to 10 (doesn't pick fixed)
   //   "edl": { "enabled": true, "strength": 1.0, "radius": 1.4 },
   //   "projection": "perspective"    // or "orthographic"
   // },

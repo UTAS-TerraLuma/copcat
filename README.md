@@ -123,7 +123,11 @@ Every key, with its default:
   "theme": "graphite",              // the only theme so far
   "display": {
     "colorMode": "rgb",             // "height", "rgb" or "classification"
-    "pointSize": 2.0,               // 1 to 10 (logical pixels)
+    "pointSizeMode": "adaptive",    // or "fixed"; see below
+    "fill": 1.5,                    // adaptive: size per point spacing, 0.5 to 4
+    "minPointSize": 1.0,            // adaptive: smallest, 0.5 to 8 (logical pixels)
+    "maxPointSize": 20.0,           // adaptive: largest, 2 to 64 (logical pixels)
+    "pointSize": 2.0,               // fixed: 1 to 10 (logical pixels)
     "edl": {                        // eye-dome lighting
       "enabled": true,
       "strength": 1.0,              // 0.1 to 5
@@ -155,6 +159,13 @@ Every key, with its default:
   }
 }
 ```
+
+Point sizes are adaptive by default: each point is drawn `fill` times its spacing
+on screen, between `minPointSize` and `maxPointSize` (a `maxPointSize` below
+`minPointSize` is raised to it). `"pointSizeMode": "fixed"` draws every point
+`pointSize` pixels instead. Only `pointSizeMode` picks the mode: a file that sets
+`pointSize` without it keeps the mode it had (adaptive, unless an earlier file chose
+fixed), and `pointSize` waits to be used in fixed mode.
 
 A shortcut is modifiers and a key joined by `+`, in any case: `Ctrl+Shift+P`, `F5`,
 `Alt+Up`, `Ctrl++`. `Ctrl` means Cmd on a Mac. Keys are egui's names: letters,
@@ -199,8 +210,9 @@ close it. The settings commands (in the command palette, or bound to a shortcut)
   commented template if it's missing, and open it in your editor for `.json` files.
 - **Reload settings** reads the files again and applies them.
 - **Save current display settings as defaults** writes the display and performance
-  settings (colour, point size, eye-dome lighting, projection, point budget and
-  spacing) into the user file, keeping its other keys. The file is rewritten as plain
+  settings (colour, point size mode, fill, smallest and largest adaptive sizes, fixed
+  point size, eye-dome lighting, projection, point budget and spacing) into the user
+  file, keeping its other keys. The file is rewritten as plain
   JSON, so its comments are lost.
 
 `COPCAT_CONFIG_DIR` moves the user settings directory (from `~/.copcat`), and

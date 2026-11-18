@@ -103,7 +103,20 @@ fn slider_value(harness: &Harness<'_, impl eframe::App>, label: &str) -> f64 {
         .expect("a slider has a value")
 }
 
-/// Whether the colour mode radio button labelled `label` is selected.
+/// Whether there's a slider labelled `label`.
+fn has_slider(harness: &Harness<'_, impl eframe::App>, label: &str) -> bool {
+    harness
+        .query_all_by_label(label)
+        .any(|node| node.accesskit_node().role() == egui::accesskit::Role::Slider)
+}
+
+/// Clicks the radio button labelled `label` and lets the UI settle.
+fn click_radio(harness: &mut Harness<'_, impl eframe::App>, label: &str) {
+    by_role_and_label(harness, egui::accesskit::Role::RadioButton, label).click();
+    harness.run_ok();
+}
+
+/// Whether the radio button labelled `label` is selected.
 fn toggled(harness: &Harness<'_, impl eframe::App>, label: &str) -> bool {
     by_role_and_label(harness, egui::accesskit::Role::RadioButton, label)
         .accesskit_node()
@@ -135,6 +148,7 @@ fn settings_files_should_set_the_display_defaults() {
         {
           "display": {
             "colorMode": "classification",
+            "pointSizeMode": "fixed",
             "pointSize": 4.0,
             "edl": { "strength": 2.5, "radius": 2.0 },
           },
@@ -155,7 +169,16 @@ fn settings_files_should_set_the_display_defaults() {
         "colour by class from the user file"
     );
     assert!(!toggled(&harness, "RGB"));
-    assert_eq!(slider_value(&harness, "Point size"), 4.0);
+    assert!(
+        toggled(&harness, "Fixed"),
+        "fixed point size from the user file"
+    );
+    assert!(!toggled(&harness, "Adaptive"));
+    assert_eq!(slider_value(&harness, "Size (px)"), 4.0);
+    assert!(
+        !has_slider(&harness, "Fill"),
+        "no adaptive controls when fixed"
+    );
     assert_eq!(
         slider_value(&harness, "Strength"),
         3.0,
@@ -166,6 +189,57 @@ fn settings_files_should_set_the_display_defaults() {
         2.0,
         "from the user file"
     );
+    assert_eq!(
+        warnings(&harness),
+        Vec::<String>::new(),
+        "good files shouldn't warn"
+    );
+}
+
+#[test]
+fn adaptive_point_sizes_from_the_files_should_reach_the_ui() {
+    if !has_adapter() {
+        common::skip_or_fail_without_gpu("couldn't find a GPU: no wgpu adapters");
+        return;
+    }
+    let scratch = common::scratch_dir("adaptive_point_sizes_from_the_files");
+    let user_dir = scratch.join("home").join(".copcat");
+    let workspace = scratch.join("project");
+    // `pointSize` without `pointSizeMode` doesn't switch to fixed.
+    write(
+        &user_dir.join("settings.json"),
+        r#"{ "display": { "fill": 2.5, "minPointSize": 2.0, "pointSize": 7.0 } }"#,
+    );
+    write(
+        &workspace.join(".copcat").join("settings.json"),
+        r#"{ "display": { "maxPointSize": 30.0 } }"#,
+    );
+
+    let fixture = common::fixture().to_str().unwrap().to_owned();
+    let (mut harness, woken) = viewer(&user_dir, &workspace, Some(fixture));
+    wait_for_display_section(&mut harness, &woken);
+
+    assert!(toggled(&harness, "Adaptive"), "still the default mode");
+    assert!(!toggled(&harness, "Fixed"));
+    assert!(!has_slider(&harness, "Size (px)"));
+    assert_eq!(slider_value(&harness, "Fill"), 2.5, "from the user file");
+    harness.get_by_label("Advanced").click();
+    harness.run_ok();
+    assert_eq!(
+        slider_value(&harness, "Min (px)"),
+        2.0,
+        "from the user file"
+    );
+    assert_eq!(
+        slider_value(&harness, "Max (px)"),
+        30.0,
+        "from the workspace"
+    );
+
+    // The file's fixed size is what Fixed then uses.
+    click_radio(&mut harness, "Fixed");
+    assert_eq!(slider_value(&harness, "Size (px)"), 7.0);
+    assert!(!has_slider(&harness, "Fill"));
     assert_eq!(
         warnings(&harness),
         Vec::<String>::new(),
@@ -197,7 +271,8 @@ fn a_bad_settings_file_should_show_a_warning_and_keep_the_good_one() {
 
     // The user file's good value is used; the broken workspace file isn't.
     assert!(toggled(&harness, "Height"));
-    assert_eq!(slider_value(&harness, "Point size"), 2.0, "the default");
+    assert!(toggled(&harness, "Adaptive"), "the default mode");
+    assert_eq!(slider_value(&harness, "Fill"), 1.5, "the default");
     assert_eq!(slider_value(&harness, "Strength"), 1.0, "the default");
 
     let shown = warnings(&harness);
@@ -222,6 +297,9 @@ fn a_bad_settings_file_should_show_a_warning_and_keep_the_good_one() {
     harness.run_ok();
     assert_eq!(warnings(&harness), Vec::<String>::new());
     assert!(toggled(&harness, "Height"));
+    // The bad fixed size wasn't used either.
+    click_radio(&mut harness, "Fixed");
+    assert_eq!(slider_value(&harness, "Size (px)"), 2.0, "the default");
 }
 
 #[test]
@@ -268,7 +346,7 @@ fn save_and_reload_should_round_trip_through_the_user_file() {
         &user_file,
         r#"{
           "theme": "graphite",
-          "display": { "pointSize": 3.0 },
+          "display": { "pointSizeMode": "fixed", "pointSize": 3.0, "fill": 2.0 },
           "keybindings": {
             "settings.save_display_defaults": "F9",
             "settings.reload": "F10",
@@ -280,19 +358,26 @@ fn save_and_reload_should_round_trip_through_the_user_file() {
     let fixture = common::fixture().to_str().unwrap().to_owned();
     let (mut harness, woken) = viewer(&user_dir, &scratch.join("nowhere"), Some(fixture));
     wait_for_display_section(&mut harness, &woken);
-    assert_eq!(slider_value(&harness, "Point size"), 3.0);
+    assert!(toggled(&harness, "Fixed"));
+    assert_eq!(slider_value(&harness, "Size (px)"), 3.0);
 
-    // A change in the window, saved as the default.
+    // Changes in the window, saved as the default.
     harness.key_press(egui::Key::H);
     harness.run_ok();
     assert!(toggled(&harness, "Height"));
+    click_radio(&mut harness, "Adaptive");
+    assert_eq!(slider_value(&harness, "Fill"), 2.0, "from the file");
     harness.key_press(egui::Key::F9);
     harness.run_ok();
 
     let saved: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(&user_file).unwrap()).unwrap();
     assert_eq!(saved["display"]["colorMode"], "height");
-    assert_eq!(saved["display"]["pointSize"], 3.0);
+    assert_eq!(saved["display"]["pointSizeMode"], "adaptive");
+    assert_eq!(saved["display"]["pointSize"], 3.0, "kept for fixed mode");
+    assert_eq!(saved["display"]["fill"], 2.0);
+    assert_eq!(saved["display"]["minPointSize"], 1.0);
+    assert_eq!(saved["display"]["maxPointSize"], 20.0);
     assert_eq!(saved["display"]["edl"]["strength"], 1.0);
     assert_eq!(saved["performance"]["pointBudget"], 5_000_000);
     // Everything else in the file is kept.
@@ -310,11 +395,16 @@ fn save_and_reload_should_round_trip_through_the_user_file() {
     // An edit to the file shows once reloaded.
     let edited = fs::read_to_string(&user_file)
         .unwrap()
-        .replace("\"pointSize\": 3.0", "\"pointSize\": 6.0");
+        .replace("\"pointSize\": 3.0", "\"pointSize\": 6.0")
+        .replace(
+            "\"pointSizeMode\": \"adaptive\"",
+            "\"pointSizeMode\": \"fixed\"",
+        );
     fs::write(&user_file, edited).unwrap();
     harness.key_press(egui::Key::F10);
     harness.run_ok();
-    assert_eq!(slider_value(&harness, "Point size"), 6.0);
+    assert!(toggled(&harness, "Fixed"), "the edited mode");
+    assert_eq!(slider_value(&harness, "Size (px)"), 6.0);
     assert!(toggled(&harness, "Height"), "the saved colour mode");
     assert_eq!(warnings(&harness), Vec::<String>::new());
 }

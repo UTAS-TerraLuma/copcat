@@ -14,13 +14,13 @@ use eframe::egui::{self, Key, KeyboardShortcut, Modifiers};
 use crate::camera::{OrbitCamera, Projection};
 use crate::config::{
     self, Binding, ColorModeName, Config, Connectors, DisplayConfig, EdlConfig, Locations,
-    PerformanceConfig, Warning,
+    PerformanceConfig, PointSizeModeName, Warning,
 };
 use crate::theme::Theme;
 
 use super::ViewerApp;
 use super::commands::{Keymap, SettingsCommand};
-use super::settings::{ColorMode, ExportSettings, Settings, ViewSettings};
+use super::settings::{ColorMode, ExportSettings, PointSizeMode, Settings, ViewSettings};
 
 /// The settings files and what came of reading them.
 #[derive(Debug, Default)]
@@ -87,6 +87,24 @@ impl From<ColorMode> for ColorModeName {
     }
 }
 
+impl From<PointSizeModeName> for PointSizeMode {
+    fn from(name: PointSizeModeName) -> Self {
+        match name {
+            PointSizeModeName::Adaptive => Self::Adaptive,
+            PointSizeModeName::Fixed => Self::Fixed,
+        }
+    }
+}
+
+impl From<PointSizeMode> for PointSizeModeName {
+    fn from(mode: PointSizeMode) -> Self {
+        match mode {
+            PointSizeMode::Adaptive => Self::Adaptive,
+            PointSizeMode::Fixed => Self::Fixed,
+        }
+    }
+}
+
 /// Sets what `config` sets in `settings` and `camera`, leaving the rest.
 pub(crate) fn apply_settings(config: &Config, settings: &mut Settings, camera: &mut OrbitCamera) {
     let display = &config.display;
@@ -94,9 +112,25 @@ pub(crate) fn apply_settings(config: &Config, settings: &mut Settings, camera: &
     if let Some(mode) = display.color_mode {
         view.color_mode = mode.into();
     }
+    // Only `pointSizeMode` picks the mode; `pointSize` alone doesn't.
+    if let Some(mode) = display.point_size_mode {
+        view.point_size_mode = mode.into();
+    }
     if let Some(size) = display.point_size {
         view.point_size = size;
     }
+    let adaptive = &mut view.adaptive_size;
+    if let Some(fill) = display.fill {
+        adaptive.fill = fill;
+    }
+    if let Some(min) = display.min_point_size {
+        adaptive.min_px = min;
+    }
+    if let Some(max) = display.max_point_size {
+        adaptive.max_px = max;
+    }
+    // As the sliders do: the largest is never below the smallest.
+    adaptive.max_px = adaptive.max_px.max(adaptive.min_px);
     if let Some(enabled) = display.edl.enabled {
         view.edl_enabled = enabled;
     }
@@ -133,7 +167,11 @@ pub(crate) fn current_defaults(view: &ViewSettings, projection: Projection) -> C
     Config {
         display: DisplayConfig {
             color_mode: Some(view.color_mode.into()),
+            point_size_mode: Some(view.point_size_mode.into()),
             point_size: Some(view.point_size),
+            fill: Some(view.adaptive_size.fill),
+            min_point_size: Some(view.adaptive_size.min_px),
+            max_point_size: Some(view.adaptive_size.max_px),
             edl: EdlConfig {
                 enabled: Some(view.edl_enabled),
                 strength: Some(view.edl.strength),
@@ -515,6 +553,8 @@ mod tests {
         assert_eq!(settings.view.edl.strength, 3.0);
         assert_eq!(settings.view.edl.radius_px, defaults.view.edl.radius_px);
         assert_eq!(settings.view.point_size, defaults.view.point_size);
+        assert_eq!(settings.view.point_size_mode, defaults.view.point_size_mode);
+        assert_eq!(settings.view.adaptive_size, defaults.view.adaptive_size);
         assert_eq!(settings.view.lod.target_spacing_px, 4.0);
         assert_eq!(
             settings.view.lod.point_budget,
@@ -534,6 +574,12 @@ mod tests {
         let defaults = ViewSettings::default();
         let view = ViewSettings {
             color_mode: ColorMode::Height,
+            point_size_mode: PointSizeMode::Fixed,
+            adaptive_size: crate::app::settings::AdaptiveSizeSettings {
+                fill: 2.25,
+                min_px: 1.5,
+                max_px: 32.0,
+            },
             point_size: 4.5,
             edl_enabled: false,
             edl: crate::renderer::EdlSettings {
@@ -554,6 +600,45 @@ mod tests {
         apply_settings(&read, &mut settings, &mut camera);
         assert_eq!(settings.view, view);
         assert_eq!(camera.projection(), Projection::Orthographic);
+    }
+
+    #[test]
+    fn point_size_alone_should_not_switch_to_fixed() {
+        let (config, warnings) = Config::parse(r#"{"display": {"pointSize": 6}}"#, None);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        let mut settings = Settings::default();
+        apply_settings(&config, &mut settings, &mut OrbitCamera::default());
+        assert_eq!(settings.view.point_size_mode, PointSizeMode::Adaptive);
+        assert_eq!(settings.view.point_size, 6.0, "kept for fixed mode");
+    }
+
+    #[test]
+    fn point_size_mode_and_adaptive_sizes_should_apply() {
+        let (config, warnings) = Config::parse(
+            r#"{"display": {"pointSizeMode": "fixed", "pointSize": 3, "fill": 2.5, "minPointSize": 2, "maxPointSize": 40}}"#,
+            None,
+        );
+        assert!(warnings.is_empty(), "{warnings:?}");
+        let mut settings = Settings::default();
+        apply_settings(&config, &mut settings, &mut OrbitCamera::default());
+        assert_eq!(settings.view.point_size_mode, PointSizeMode::Fixed);
+        assert_eq!(settings.view.point_size, 3.0);
+        assert_eq!(settings.view.adaptive_size.fill, 2.5);
+        assert_eq!(settings.view.adaptive_size.min_px, 2.0);
+        assert_eq!(settings.view.adaptive_size.max_px, 40.0);
+    }
+
+    #[test]
+    fn a_max_point_size_below_the_min_should_be_raised_to_it() {
+        let (config, warnings) = Config::parse(
+            r#"{"display": {"minPointSize": 6, "maxPointSize": 3}}"#,
+            None,
+        );
+        assert!(warnings.is_empty(), "{warnings:?}");
+        let mut settings = Settings::default();
+        apply_settings(&config, &mut settings, &mut OrbitCamera::default());
+        assert_eq!(settings.view.adaptive_size.min_px, 6.0);
+        assert_eq!(settings.view.adaptive_size.max_px, 6.0);
     }
 
     #[test]

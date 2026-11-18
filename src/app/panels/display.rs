@@ -4,6 +4,7 @@
 use eframe::egui;
 
 use crate::classification;
+use crate::config::ranges;
 use crate::format::format_count;
 use crate::lod::LodSettings;
 
@@ -77,12 +78,12 @@ pub(crate) fn display_ui(
                 slider_row(
                     ui,
                     "Strength",
-                    egui::Slider::new(&mut settings.edl.strength, 0.1..=5.0),
+                    egui::Slider::new(&mut settings.edl.strength, ranges::EDL_STRENGTH),
                 );
                 slider_row(
                     ui,
                     "Radius (px)",
-                    egui::Slider::new(&mut settings.edl.radius_px, 1.0..=4.0),
+                    egui::Slider::new(&mut settings.edl.radius_px, ranges::EDL_RADIUS),
                 );
             });
         });
@@ -113,7 +114,7 @@ fn point_size_ui(ui: &mut egui::Ui, settings: &mut ViewSettings, label_width: f3
                 slider_row(
                     ui,
                     "Fill",
-                    egui::Slider::new(&mut settings.adaptive_size.fill, 0.5..=4.0),
+                    egui::Slider::new(&mut settings.adaptive_size.fill, ranges::FILL),
                 )
                 .on_hover_text(
                     "Point size as a multiple of the points' spacing on screen. Higher fills \
@@ -124,7 +125,7 @@ fn point_size_ui(ui: &mut egui::Ui, settings: &mut ViewSettings, label_width: f3
                 slider_row(
                     ui,
                     "Size (px)",
-                    egui::Slider::new(&mut settings.point_size, 1.0..=10.0),
+                    egui::Slider::new(&mut settings.point_size, ranges::POINT_SIZE),
                 );
             }
         }
@@ -139,7 +140,8 @@ fn point_size_ui(ui: &mut egui::Ui, settings: &mut ViewSettings, label_width: f3
                     slider_row(
                         ui,
                         "Min (px)",
-                        egui::Slider::new(&mut size.min_px, 0.5..=8.0).logarithmic(true),
+                        egui::Slider::new(&mut size.min_px, ranges::MIN_POINT_SIZE)
+                            .logarithmic(true),
                     )
                     .on_hover_text(
                         "The smallest points are drawn. Detail finer than this can show isn't \
@@ -148,7 +150,8 @@ fn point_size_ui(ui: &mut egui::Ui, settings: &mut ViewSettings, label_width: f3
                     slider_row(
                         ui,
                         "Max (px)",
-                        egui::Slider::new(&mut size.max_px, 2.0..=64.0).logarithmic(true),
+                        egui::Slider::new(&mut size.max_px, ranges::MAX_POINT_SIZE)
+                            .logarithmic(true),
                     )
                     .on_hover_text("The biggest points are drawn, close up past the finest detail");
                 });
@@ -169,7 +172,7 @@ pub(crate) fn performance_ui(ui: &mut egui::Ui, lod: &mut LodSettings) {
                 slider_row(
                     ui,
                     "Point budget",
-                    egui::Slider::new(&mut lod.point_budget, 500_000..=30_000_000)
+                    egui::Slider::new(&mut lod.point_budget, ranges::POINT_BUDGET)
                         .logarithmic(true)
                         .custom_formatter(|value, _| format_count(value as u64)),
                 )
@@ -182,7 +185,8 @@ pub(crate) fn performance_ui(ui: &mut egui::Ui, lod: &mut LodSettings) {
                 slider_row(
                     ui,
                     "Spacing (px)",
-                    egui::Slider::new(&mut lod.target_spacing_px, 0.5..=20.0).logarithmic(true),
+                    egui::Slider::new(&mut lod.target_spacing_px, ranges::SPACING_PX)
+                        .logarithmic(true),
                 )
                 .on_hover_text(spacing_hint);
             });

@@ -7,8 +7,8 @@ use std::path::{Path, PathBuf};
 use serde_json::{Map, Value, json};
 
 use super::{
-    Binding, ColorModeName, Config, FolderConnector, StacConnector, Warning, jsonc,
-    projection_name, ranges,
+    Binding, ColorModeName, Config, FolderConnector, PointSizeModeName, StacConnector, Warning,
+    jsonc, projection_name, ranges,
 };
 use crate::camera::Projection;
 
@@ -82,7 +82,16 @@ impl Reader<'_> {
             top,
             "",
             "display",
-            &["colorMode", "pointSize", "edl", "projection"],
+            &[
+                "colorMode",
+                "pointSizeMode",
+                "pointSize",
+                "fill",
+                "minPointSize",
+                "maxPointSize",
+                "edl",
+                "projection",
+            ],
         ) {
             let path = "display";
             config.display.color_mode = self.choice(
@@ -95,7 +104,21 @@ impl Reader<'_> {
                     ("classification", ColorModeName::Classification),
                 ],
             );
+            config.display.point_size_mode = self.choice(
+                display,
+                path,
+                "pointSizeMode",
+                &[
+                    ("adaptive", PointSizeModeName::Adaptive),
+                    ("fixed", PointSizeModeName::Fixed),
+                ],
+            );
             config.display.point_size = self.f32_in(display, path, "pointSize", ranges::POINT_SIZE);
+            config.display.fill = self.f32_in(display, path, "fill", ranges::FILL);
+            config.display.min_point_size =
+                self.f32_in(display, path, "minPointSize", ranges::MIN_POINT_SIZE);
+            config.display.max_point_size =
+                self.f32_in(display, path, "maxPointSize", ranges::MAX_POINT_SIZE);
             config.display.projection = self.choice(
                 display,
                 path,
@@ -480,8 +503,24 @@ pub(super) fn to_json(config: &Config) -> Value {
     );
     put(
         &mut display_json,
+        "pointSizeMode",
+        display.point_size_mode.map(|mode| Value::from(mode.name())),
+    );
+    put(
+        &mut display_json,
         "pointSize",
         display.point_size.map(f32_json),
+    );
+    put(&mut display_json, "fill", display.fill.map(f32_json));
+    put(
+        &mut display_json,
+        "minPointSize",
+        display.min_point_size.map(f32_json),
+    );
+    put(
+        &mut display_json,
+        "maxPointSize",
+        display.max_point_size.map(f32_json),
     );
     put_object(&mut display_json, "edl", edl);
     put(
