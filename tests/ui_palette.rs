@@ -233,6 +233,63 @@ fn palette_should_run_commands_and_open_a_typed_path() {
     assert!(palette_text(&harness).is_none());
 }
 
+/// Every palette row's label and where it is, top to bottom.
+fn row_rects(harness: &Harness<'_, impl eframe::App>) -> Vec<(String, egui::Rect)> {
+    let mut rows: Vec<_> = harness
+        .query_all_by_role(Role::Button)
+        .filter_map(|node| Some((node.accesskit_node().label()?, node.rect())))
+        .collect();
+    rows.sort_by(|a, b| a.1.top().total_cmp(&b.1.top()));
+    rows
+}
+
+#[test]
+fn palette_rows_should_not_move_as_the_selection_or_hover_moves() {
+    if !has_adapter() {
+        common::skip_or_fail_without_gpu("couldn't find a GPU: no wgpu adapters");
+        return;
+    }
+    let _gpu = ONE_VIEWER_AT_A_TIME
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let (mut harness, woken) = idle_viewer();
+    // With a cloud open, so the view commands can be selected.
+    quick_open(&mut harness);
+    type_text(&mut harness, &fixture_path());
+    press(&mut harness, Modifiers::NONE, Key::Enter);
+    wait_for_fixture(&mut harness, &woken);
+    harness.remove_cursor();
+    command_palette(&mut harness);
+    type_text(&mut harness, "view from");
+    let before = row_rects(&harness);
+
+    // Selected and plain rows are the same height.
+    let palette_rows: Vec<_> = before
+        .iter()
+        .filter(|(label, _)| label.starts_with("View from"))
+        .collect();
+    assert_eq!(row_enabled(&harness, "View from top"), Some(true));
+    assert!(palette_rows.len() > 3, "{before:#?}");
+    let height = palette_rows[0].1.height();
+    for (label, rect) in &palette_rows {
+        assert_eq!(rect.height(), height, "{label:?} is a different height");
+    }
+
+    // Moving the selection down leaves every row where it was.
+    harness.key_press(Key::ArrowDown);
+    harness.run_ok();
+    assert_eq!(row_rects(&harness), before, "after ArrowDown");
+    harness.key_press(Key::ArrowDown);
+    harness.run_ok();
+    assert_eq!(row_rects(&harness), before, "after a second ArrowDown");
+
+    // So does hovering one.
+    let (_, third) = palette_rows[3];
+    harness.hover_at(third.center());
+    harness.run_ok();
+    assert_eq!(row_rects(&harness), before, "while hovering a row");
+}
+
 #[test]
 fn palette_should_ask_for_open_urls_argument_itself() {
     if !has_adapter() {

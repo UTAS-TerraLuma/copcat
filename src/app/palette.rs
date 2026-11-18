@@ -832,6 +832,7 @@ impl Palette {
             .auto_shrink([false, true])
             .show(ui, |ui| {
                 ui.spacing_mut().item_spacing.y = 2.0;
+                same_size_rows(ui);
                 for (at, item) in view.items.iter().enumerate() {
                     let selected = self.selected == Some(at);
                     // One line, the detail fainter after the title, cut short
@@ -844,9 +845,17 @@ impl Palette {
                         text.append(" ", 0.0, format(colors.text));
                         text.append(&item.detail, 8.0, format(colors.text_secondary));
                     }
-                    let mut button = egui::Button::selectable(selected, text)
+                    // Always framed (see `same_size_rows`); the selected row
+                    // keeps the outline it had at rest.
+                    let mut button = egui::Button::new(text)
+                        .selected(selected)
+                        .frame(true)
+                        .frame_when_inactive(true)
                         .truncate()
                         .min_size(egui::vec2(ui.available_width(), 0.0));
+                    if selected {
+                        button = button.stroke(egui::Stroke::new(ROW_STROKE, colors.strong_stroke));
+                    }
                     if let Some(shortcut) = &item.shortcut {
                         button = button.shortcut_text(ui.ctx().format_shortcut(shortcut));
                     }
@@ -861,6 +870,31 @@ impl Palette {
             });
         clicked
     }
+}
+
+/// The outline width of every palette row, highlighted or not.
+const ROW_STROKE: f32 = 1.0;
+
+/// Makes every row in `ui` the same size in every state. egui frames a
+/// button only once it's hovered, pressed or selected, and its padding
+/// allows for the outline only when it's framed, so a plain row was smaller
+/// by its outline width on each side and the rows below moved as the
+/// highlight did. Here every state has the same outline width and no
+/// expansion, and plain rows are framed in transparent colours. The padding
+/// gives back the outline's height, so rows stay the height plain ones were.
+fn same_size_rows(ui: &mut egui::Ui) {
+    ui.spacing_mut().button_padding.y -= ROW_STROKE;
+    let widgets = &mut ui.visuals_mut().widgets;
+    for state in [
+        &mut widgets.inactive,
+        &mut widgets.hovered,
+        &mut widgets.active,
+    ] {
+        state.expansion = 0.0;
+        state.bg_stroke.width = ROW_STROKE;
+    }
+    widgets.inactive.bg_stroke.color = egui::Color32::TRANSPARENT;
+    widgets.inactive.weak_bg_fill = egui::Color32::TRANSPARENT;
 }
 
 #[cfg(test)]
@@ -1313,6 +1347,52 @@ mod tests {
         assert_eq!(titles(&view.items), ["Survey data"]);
         assert_eq!(enter(&mut palette), None);
         assert_eq!(palette.breadcrumb().as_deref(), Some("Survey data"));
+    }
+
+    /// The rows' rects as `list_ui` lays them out with `theme`, with `selected`
+    /// selected and the pointer at `hover`.
+    fn row_rects(theme: &Theme, selected: usize, hover: Option<egui::Pos2>) -> Vec<egui::Rect> {
+        use egui_kittest::kittest::Queryable;
+        let mut palette = Palette::default();
+        palette.open(PaletteMode::Commands);
+        let view = view_of(&mut palette);
+        palette.selected = Some(selected);
+        let theme = theme.clone();
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(600.0, 800.0))
+            .build_ui(move |ui| {
+                theme.apply(ui.ctx());
+                palette.list_ui(ui, &theme, &view);
+            });
+        harness.run();
+        if let Some(pos) = hover {
+            harness.hover_at(pos);
+            harness.run();
+        }
+        harness
+            .query_all_by_role(egui::accesskit::Role::Button)
+            .map(|node| node.rect())
+            .collect()
+    }
+
+    #[test]
+    fn rows_should_stay_put_as_the_selection_and_hover_move() {
+        // Large enough text that rows are taller than the minimum height,
+        // where a border on highlighted rows only once made them bigger.
+        for button_size in [Theme::default().fonts.button_size, 20.0] {
+            let mut theme = Theme::default();
+            theme.fonts.button_size = button_size;
+            let first = row_rects(&theme, 0, None);
+            assert!(first.len() > 3);
+            let height = first[0].height();
+            assert!(
+                first.iter().all(|rect| rect.height() == height),
+                "rows of different heights at {button_size} pt: {first:?}"
+            );
+            assert_eq!(row_rects(&theme, 2, None), first, "{button_size} pt");
+            let hover = Some(first[1].center());
+            assert_eq!(row_rects(&theme, 2, hover), first, "{button_size} pt");
+        }
     }
 
     #[test]
