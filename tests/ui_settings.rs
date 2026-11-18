@@ -9,7 +9,7 @@ mod common;
 
 use std::fs;
 use std::path::Path;
-use std::sync::mpsc;
+use std::sync::{Mutex, mpsc};
 use std::time::{Duration, Instant};
 
 use eframe::egui;
@@ -19,6 +19,12 @@ use egui_kittest::kittest::{NodeT, Queryable};
 
 /// Only stops a hang: the fixture opens in well under a second.
 const LOAD_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Held by each test while its viewer is alive, so only one at a time has a
+/// GPU device: two egui_kittest wgpu harnesses on parallel test threads
+/// crash now and then (an access violation) on Windows. Seen here in 2 of
+/// 40 runs before this lock. The cause isn't known yet.
+static ONE_VIEWER_AT_A_TIME: Mutex<()> = Mutex::new(());
 
 fn has_adapter() -> bool {
     let instance =
@@ -75,6 +81,9 @@ fn wait_for_display_section(
     loop {
         harness.step();
         if harness.query_by_label("Eye-dome lighting").is_some() {
+            // The panel's first frame with a cloud open isn't its final
+            // layout; run until it settles so clicks land where widgets are.
+            harness.run_ok();
             return;
         }
         let left = LOAD_TIMEOUT.saturating_sub(started.elapsed());
@@ -139,6 +148,9 @@ fn settings_files_should_set_the_display_defaults() {
         common::skip_or_fail_without_gpu("couldn't find a GPU: no wgpu adapters");
         return;
     }
+    let _gpu = ONE_VIEWER_AT_A_TIME
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let scratch = common::scratch_dir("settings_files_should_set_the_display_defaults");
     let user_dir = scratch.join("home").join(".copcat");
     let workspace = scratch.join("project");
@@ -202,6 +214,9 @@ fn adaptive_point_sizes_from_the_files_should_reach_the_ui() {
         common::skip_or_fail_without_gpu("couldn't find a GPU: no wgpu adapters");
         return;
     }
+    let _gpu = ONE_VIEWER_AT_A_TIME
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let scratch = common::scratch_dir("adaptive_point_sizes_from_the_files");
     let user_dir = scratch.join("home").join(".copcat");
     let workspace = scratch.join("project");
@@ -253,6 +268,9 @@ fn a_bad_settings_file_should_show_a_warning_and_keep_the_good_one() {
         common::skip_or_fail_without_gpu("couldn't find a GPU: no wgpu adapters");
         return;
     }
+    let _gpu = ONE_VIEWER_AT_A_TIME
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let scratch = common::scratch_dir("a_bad_settings_file_should_show_a_warning");
     let user_dir = scratch.join("home").join(".copcat");
     let workspace = scratch.join("project");
@@ -308,6 +326,9 @@ fn an_unknown_theme_and_bad_shortcut_should_warn_without_a_cloud() {
         common::skip_or_fail_without_gpu("couldn't find a GPU: no wgpu adapters");
         return;
     }
+    let _gpu = ONE_VIEWER_AT_A_TIME
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let scratch = common::scratch_dir("an_unknown_theme_and_bad_shortcut_should_warn");
     let user_dir = scratch.join("home");
     write(
@@ -337,6 +358,9 @@ fn save_and_reload_should_round_trip_through_the_user_file() {
         common::skip_or_fail_without_gpu("couldn't find a GPU: no wgpu adapters");
         return;
     }
+    let _gpu = ONE_VIEWER_AT_A_TIME
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let scratch = common::scratch_dir("save_and_reload_should_round_trip");
     let user_dir = scratch.join("home");
     let user_file = user_dir.join("settings.json");
