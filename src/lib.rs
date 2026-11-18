@@ -55,3 +55,14 @@ pub fn run_viewer(initial_source: Option<String>, heights: HeightSettings) -> ef
         Box::new(|cc| Ok(Box::new(app::ViewerApp::new(cc, initial_source, heights)?))),
     )
 }
+
+/// The viewer as an [`eframe::App`], for UI tests that drive it without a
+/// window (egui_kittest). `cc` needs a wgpu render state. Not a stable API.
+#[doc(hidden)]
+pub fn viewer_app(
+    cc: &eframe::CreationContext<'_>,
+    initial_source: Option<String>,
+    heights: HeightSettings,
+) -> Result<impl eframe::App + use<>, &'static str> {
+    app::ViewerApp::new(cc, initial_source, heights)
+}
