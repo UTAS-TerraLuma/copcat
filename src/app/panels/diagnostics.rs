@@ -83,10 +83,13 @@ fn streaming_stats(ui: &mut egui::Ui, session: &Session, renderer: &PointRendere
         )
         .on_hover_text("Points kept on the GPU, and the nodes they're in");
 
-        if let Some(error) = session.failed.values().next() {
+        if let Some(error) = &session.last_error {
             ui.colored_label(ui.visuals().error_fg_color, "Failed");
             ui.add(egui::Label::new(mono(format!("{} nodes", session.failed.len()))).truncate())
-                .on_hover_text(error);
+                .on_hover_text("Nodes that failed to load. Retry in the status bar asks again.");
+            ui.end_row();
+            ui.colored_label(ui.visuals().error_fg_color, "Last error");
+            ui.add(egui::Label::new(error.as_str()).wrap());
             ui.end_row();
         }
     });

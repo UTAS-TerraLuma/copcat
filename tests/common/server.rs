@@ -12,9 +12,13 @@
 //! `{{base}}` in a `.json` file is replaced by the server's address (such as
 //! `http://127.0.0.1:50123`), so absolute links can point back at it. The
 //! query is ignored when finding the file, but logged.
+//!
+//! [`FileServer::fail_ranges`] makes range requests starting in some bytes
+//! fail with 503, to test how the viewer handles nodes that don't load.
 
 use std::io::{BufRead, BufReader, Write};
 use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
+use std::ops::Range;
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -35,6 +39,8 @@ pub struct FileServer {
     addr: SocketAddr,
     stop: Arc<AtomicBool>,
     log: Arc<Mutex<Vec<Logged>>>,
+    /// Range requests whose first byte is in here get 503.
+    failing: Arc<Mutex<Option<Range<u64>>>>,
     thread: Option<JoinHandle<()>>,
 }
 
@@ -47,9 +53,11 @@ impl FileServer {
         let addr = listener.local_addr().unwrap();
         let stop = Arc::new(AtomicBool::new(false));
         let log = Arc::new(Mutex::new(Vec::new()));
+        let failing = Arc::new(Mutex::new(None));
         let thread = {
             let stop = stop.clone();
             let log = log.clone();
+            let failing = failing.clone();
             thread::spawn(move || {
                 for stream in listener.incoming() {
                     if stop.load(Ordering::SeqCst) {
@@ -58,8 +66,9 @@ impl FileServer {
                     let Ok(stream) = stream else { continue };
                     let root = root.clone();
                     let log = log.clone();
+                    let failing = failing.lock().unwrap().clone();
                     thread::spawn(move || {
-                        if let Some(entry) = handle(stream, &root, addr) {
+                        if let Some(entry) = handle(stream, &root, addr, failing) {
                             log.lock().unwrap().push(entry);
                         }
                     });
@@ -70,8 +79,15 @@ impl FileServer {
             addr,
             stop,
             log,
+            failing,
             thread: Some(thread),
         }
+    }
+
+    /// From now on, answers range requests whose first byte is in `bytes`
+    /// with 503 Service Unavailable, or none if `None`.
+    pub fn fail_ranges(&self, bytes: Option<Range<u64>>) {
+        *self.failing.lock().unwrap() = bytes;
     }
 
     /// The URL of `path` (relative to the served directory, `/`-separated).
@@ -96,7 +112,12 @@ impl Drop for FileServer {
     }
 }
 
-fn handle(stream: TcpStream, root: &Path, addr: SocketAddr) -> Option<Logged> {
+fn handle(
+    stream: TcpStream,
+    root: &Path,
+    addr: SocketAddr,
+    failing: Option<Range<u64>>,
+) -> Option<Logged> {
     let mut reader = BufReader::new(stream.try_clone().ok()?);
     let mut request_line = String::new();
     reader.read_line(&mut request_line).ok()?;
@@ -125,7 +146,15 @@ fn handle(stream: TcpStream, root: &Path, addr: SocketAddr) -> Option<Logged> {
         None => (target.to_owned(), None),
     };
     let base = format!("http://{addr}");
-    let status = respond(stream, root, &base, &method, &path, range.as_deref());
+    let status = respond(
+        stream,
+        root,
+        &base,
+        &method,
+        &path,
+        range.as_deref(),
+        failing,
+    );
     Some(Logged {
         method,
         path,
@@ -143,6 +172,7 @@ fn respond(
     method: &str,
     path: &str,
     range: Option<&str>,
+    failing: Option<Range<u64>>,
 ) -> u16 {
     let mut send = |status: u16, reason: &str, headers: &[(&str, String)], body: &[u8]| {
         let mut head = format!("HTTP/1.1 {status} {reason}\r\nConnection: close\r\n");
@@ -178,6 +208,17 @@ fn respond(
             .into_bytes();
     }
     let total = bytes.len() as u64;
+    if let (Some(failing), Some(RangeRequest::Bytes(first, _))) =
+        (failing, range.map(|r| parse_range(r, total)))
+        && failing.contains(&first)
+    {
+        return send(
+            503,
+            "Service Unavailable",
+            &[("Content-Length", "0".into())],
+            b"",
+        );
+    }
     let content_type = ("Content-Type", content_type(&file).to_owned());
     let accept = ("Accept-Ranges", "bytes".to_owned());
     match range.map(|r| parse_range(r, total)) {

@@ -15,7 +15,7 @@
 //! - [`connectors`]: data sources (STAC catalogs and folders) to browse to
 //!   clouds in, and [`feed`], their listings fetched in the background.
 //! - [`palette`]: the command palette (Ctrl+Shift+P) and quick open (Ctrl+P).
-//! - [`panels`]: the settings panel's sections and the status indicator.
+//! - [`panels`]: the settings panel's sections and the status bar.
 //! - [`user_config`]: the settings files applied, and the settings commands.
 
 mod camera_input;
@@ -55,7 +55,7 @@ use export_ui::{ExportContext, ExportJob, ImageExport, export_ui};
 use palette::{Palette, PaletteMode};
 use panels::{
     HeightsAction, cloud_summary, diagnostics_ui, display_ui, heights_ui, performance_ui, section,
-    status_indicator, view_ui,
+    status_bar, view_ui,
 };
 use scene::{Scene, Viewports, explore_view};
 use session::Session;
@@ -254,8 +254,7 @@ impl ViewerApp {
         }
     }
 
-    /// The toolbar: the modes, the subcloud tools, the Open menu, and how
-    /// loading is going.
+    /// The toolbar: the modes, the subcloud tools and the Open menu.
     fn top_bar(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             let is_open = matches!(self.state, LoadState::Open(_));
@@ -287,9 +286,6 @@ impl ViewerApp {
             });
             ui.separator();
             open_ui::open_menu(ui, &self.keymap, &self.sources, &mut self.pending);
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                status_indicator(ui, &self.state);
-            });
         });
     }
 
@@ -354,6 +350,9 @@ impl ViewerApp {
             | Command::ToggleEdl
             | Command::SetColorMode(_)
             | Command::CopyCommandLine => is_open,
+            Command::RetryFailedNodes => {
+                matches!(&self.state, LoadState::Open(session) if !session.failed.is_empty())
+            }
         }
     }
 
@@ -405,6 +404,11 @@ impl ViewerApp {
             Command::SetColorMode(mode) => self.settings.view.color_mode = mode,
             Command::SaveImage => self.save_image(ctx),
             Command::CopyCommandLine => self.copy_render_command(ctx),
+            Command::RetryFailedNodes => {
+                if let LoadState::Open(session) = &mut self.state {
+                    session.retry_failed();
+                }
+            }
             Command::ToggleDiagnostics => {
                 let diagnostics = &mut self.settings.diagnostics;
                 diagnostics.visible = !diagnostics.visible;
@@ -541,6 +545,22 @@ impl eframe::App for ViewerApp {
             .frame(self.theme.header_frame())
             .show_separator_line(false)
             .show(ui, |ui| self.top_bar(ui));
+        // Added before the settings messages, so it's the bottom-most and
+        // they stack above it.
+        egui::Panel::bottom("status_bar")
+            .frame(self.theme.status_bar_frame())
+            .show_separator_line(false)
+            .resizable(false)
+            .exact_size(self.theme.status_bar_height())
+            .show(ui, |ui| {
+                status_bar(
+                    ui,
+                    &self.state,
+                    &self.renderer,
+                    &self.theme,
+                    &mut self.pending,
+                );
+            });
         self.settings_bar(ui);
 
         // Subcloud mode's map. Side panels have to be laid out before the

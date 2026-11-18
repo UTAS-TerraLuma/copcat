@@ -47,8 +47,11 @@ pub(crate) struct Session {
     pub(crate) requested: Vec<VoxelKey>,
     /// Nodes the loader is downloading right now.
     pub(crate) fetching: HashSet<VoxelKey>,
-    /// Nodes that failed, with the reason. These aren't retried.
+    /// Nodes that failed, with the reason. These aren't asked for again
+    /// until [`Session::retry_failed`].
     pub(crate) failed: HashMap<VoxelKey, String>,
+    /// Why the most recent node failed, while any have.
+    pub(crate) last_error: Option<String>,
     /// Whether any colour value so far needed more than 8 bits. LAS says RGB
     /// is 16-bit, but some writers store 0..255, which would look black.
     pub(crate) rgb_is_16_bit: bool,
@@ -71,6 +74,7 @@ impl Session {
             requested: Vec::new(),
             fetching: HashSet::new(),
             failed: HashMap::new(),
+            last_error: None,
             rgb_is_16_bit: false,
             classes_seen: [false; 256],
         };
@@ -109,7 +113,8 @@ impl Session {
                             self.octree.record_node_heights(key, &node.points);
                         }
                         Err(error) => {
-                            self.failed.insert(key, error);
+                            self.failed.insert(key, error.clone());
+                            self.last_error = Some(error);
                         }
                     }
                 }
@@ -122,6 +127,15 @@ impl Session {
                 }
             }
         }
+    }
+
+    /// Asks for the failed nodes again, the next time they're wanted.
+    pub(crate) fn retry_failed(&mut self) {
+        let keys: Vec<VoxelKey> = self.failed.drain().map(|(key, _)| key).collect();
+        self.last_error = None;
+        self.loader.retry(keys);
+        // So the next update sends a fresh list, with the failed nodes in it.
+        self.requested.clear();
     }
 
     /// Picks the nodes for this view (and the map's and image being saved,

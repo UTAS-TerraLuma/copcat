@@ -92,6 +92,8 @@ enum Request {
     Want(Vec<VoxelKey>),
     /// The UI dropped this node, so fetch it again if it's wanted later.
     Evicted(VoxelKey),
+    /// These nodes failed; fetch them again if they're wanted.
+    Retry(Vec<VoxelKey>),
 }
 
 /// Handle to the loader thread. Dropping it stops the thread once its
@@ -129,6 +131,12 @@ impl Loader {
     /// Tells the worker the UI dropped `key`, so it may be fetched again.
     pub fn evicted(&self, key: VoxelKey) {
         let _ = self.requests.send(Request::Evicted(key));
+    }
+
+    /// Tells the worker to fetch `keys` again, which failed, the next time
+    /// they're wanted. Send before the [`Loader::want`] that asks for them.
+    pub fn retry(&self, keys: Vec<VoxelKey>) {
+        let _ = self.requests.send(Request::Retry(keys));
     }
 
     pub fn try_recv(&self) -> Result<Event, TryRecvError> {
@@ -273,6 +281,11 @@ impl FetchQueue {
             }
             Request::Evicted(key) => {
                 self.delivered.remove(&key);
+            }
+            Request::Retry(keys) => {
+                for key in keys {
+                    self.delivered.remove(&key);
+                }
             }
         }
     }
@@ -461,6 +474,17 @@ mod tests {
         queue.next_batch();
         queue.apply(Request::Evicted(key(1, 0)));
         queue.apply(Request::Want(vec![key(1, 0)]));
+        assert_eq!(queue.next_batch(), vec![key(1, 0)]);
+    }
+
+    #[test]
+    fn fetch_queue_should_refetch_retried_keys() {
+        let mut queue = FetchQueue::default();
+        queue.apply(Request::Want(vec![key(1, 0), key(1, 1)]));
+        queue.next_batch();
+        // Both failed; only the first is retried.
+        queue.apply(Request::Retry(vec![key(1, 0)]));
+        queue.apply(Request::Want(vec![key(1, 0), key(1, 1)]));
         assert_eq!(queue.next_batch(), vec![key(1, 0)]);
     }
 

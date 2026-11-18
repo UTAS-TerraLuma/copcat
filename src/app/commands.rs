@@ -47,6 +47,8 @@ pub(crate) enum Command {
     SaveImage,
     /// Copy a `copcat render` command for the 3D view.
     CopyCommandLine,
+    /// Ask again for the nodes that failed to load.
+    RetryFailedNodes,
     /// Show or hide the Diagnostics section.
     ToggleDiagnostics,
     /// Show the command palette, listing every command.
@@ -153,6 +155,7 @@ impl Command {
         commands.extend([
             Self::SaveImage,
             Self::CopyCommandLine,
+            Self::RetryFailedNodes,
             Self::ToggleDiagnostics,
             Self::ShowCommands,
             Self::QuickOpen,
@@ -237,6 +240,7 @@ impl Command {
             }
             Self::SaveImage => info("export.save_image", "Save image…", command_key(Key::S)),
             Self::CopyCommandLine => info("export.copy_command", "Copy render command", None),
+            Self::RetryFailedNodes => info("view.retry_failed_nodes", "Retry failed nodes", None),
             Self::ToggleDiagnostics => info(
                 "view.toggle_diagnostics",
                 "Toggle diagnostics",
