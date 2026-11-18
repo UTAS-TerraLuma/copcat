@@ -139,9 +139,8 @@ fn circle_tool_should_open_a_subcloud_where_it_was_dragged() {
         "Subcloud should wait for a subcloud to be drawn"
     );
 
-    harness.get_by_label("Top").scroll_to_me();
-    harness.run_ok();
-    harness.get_by_label("Top").click();
+    // Top view, from its default shortcut (the panel has no view buttons).
+    harness.key_press(egui::Key::Num7);
     harness.run_ok();
     harness.get_by_label("Circle").click();
     harness.run_ok();

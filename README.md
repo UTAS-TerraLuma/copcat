@@ -113,7 +113,7 @@ user one replaces it, and the rest are added after the user's.
 
 Comments (`//`, `/* */`) and trailing commas are allowed. A file that isn't valid JSON
 is skipped; an unknown key or a value of the wrong type is skipped; a number outside
-what the UI's slider allows is clamped. Each problem shows in a bar at the foot of
+what the UI's field allows is clamped. Each problem shows in a bar at the foot of
 the window (and on stderr), naming the file, and the rest of the settings still
 apply.
 
@@ -124,7 +124,7 @@ Every key, with its default:
   "theme": "graphite",              // the only theme so far
   "display": {
     "colorMode": "rgb",             // "height", "rgb" or "classification"
-    "pointSizeMode": "adaptive",    // or "fixed"; see below
+    "pointSizeMode": "fixed",       // or "adaptive"; see below
     "fill": 1.5,                    // adaptive: size per point spacing, 0.5 to 4
     "minPointSize": 1.0,            // adaptive: smallest, 0.5 to 8 (logical pixels)
     "maxPointSize": 20.0,           // adaptive: largest, 2 to 64 (logical pixels)
@@ -161,12 +161,12 @@ Every key, with its default:
 }
 ```
 
-Point sizes are adaptive by default: each point is drawn `fill` times its spacing
-on screen, between `minPointSize` and `maxPointSize` (a `maxPointSize` below
-`minPointSize` is raised to it). `"pointSizeMode": "fixed"` draws every point
-`pointSize` pixels instead. Only `pointSizeMode` picks the mode: a file that sets
-`pointSize` without it keeps the mode it had (adaptive, unless an earlier file chose
-fixed), and `pointSize` waits to be used in fixed mode.
+Points are drawn `pointSize` pixels across by default. `"pointSizeMode": "adaptive"`
+draws each point `fill` times its spacing on screen instead, between `minPointSize`
+and `maxPointSize` (a `maxPointSize` below `minPointSize` is raised to it). Only
+`pointSizeMode` picks the mode: a file that sets `fill` or `pointSize` without it
+keeps the mode it had (fixed, unless an earlier file chose adaptive), and the other
+mode's settings wait to be used in that mode.
 
 A shortcut is modifiers and a key joined by `+`, in any case: `Ctrl+Shift+P`, `F5`,
 `Alt+Up`, `Ctrl++`. `Ctrl` means Cmd on a Mac. Keys are egui's names: letters,

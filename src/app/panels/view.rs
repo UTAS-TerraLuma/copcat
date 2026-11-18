@@ -1,16 +1,17 @@
-//! The View section: projection and view presets.
+//! The View section: the projection. The views from each side, and Reset,
+//! are on the 3D view's gizmo, in the command palette and on shortcuts.
 
 use eframe::egui;
 
-use crate::camera::{OrbitCamera, Projection, ViewPreset};
+use crate::camera::{OrbitCamera, Projection};
 
 use crate::app::commands::Command;
 
-/// The View section, for `camera`, the 3D view's. Its buttons ask for
-/// commands.
+/// The View section, for `camera`, the 3D view's. Picking a projection asks
+/// for a command.
 pub(crate) fn view_ui(ui: &mut egui::Ui, camera: &mut OrbitCamera, commands: &mut Vec<Command>) {
     ui.horizontal_wrapped(|ui| {
-        ui.label("Projection:");
+        ui.weak("Projection");
         // Not `radio_value`: the camera needs to hear about the click, even on
         // the option already selected, to know the user chose it.
         for (projection, label) in [
@@ -27,26 +28,4 @@ pub(crate) fn view_ui(ui: &mut egui::Ui, camera: &mut OrbitCamera, commands: &mu
             "Snapping to top, front, etc. switches to orthographic; \
              orbiting away switches back to perspective.",
         );
-    ui.horizontal_wrapped(|ui| {
-        ui.label("View:");
-        for preset in ViewPreset::ALL {
-            if ui
-                .button(preset.label())
-                .on_hover_text(preset.description(camera.axes))
-                .clicked()
-            {
-                commands.push(Command::SetView(preset));
-            }
-        }
-        if ui
-            .button("Reset")
-            .on_hover_text(
-                "Look at the whole cloud again, or side-on at the subcloud (or double-click \
-                 the view)",
-            )
-            .clicked()
-        {
-            commands.push(Command::ResetView);
-        }
-    });
 }
