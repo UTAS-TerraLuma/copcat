@@ -188,7 +188,18 @@ fn palette_should_run_commands_and_open_a_typed_path() {
     // Arrow keys move down the list.
     command_palette(&mut harness);
     type_text(&mut harness, "view from");
-    press(&mut harness, Modifiers::NONE, Key::ArrowDown);
+    // The frame the key arrives on must look like the one after it: the
+    // field once lost the focus for that frame, so its outline flashed.
+    harness.key_press(Key::ArrowDown);
+    harness.step();
+    let on_the_press = harness.render().expect("a frame");
+    harness.step();
+    let after_it = harness.render().expect("a frame");
+    assert!(
+        on_the_press == after_it,
+        "the palette flashed on an arrow key"
+    );
+    harness.run_ok();
     press(&mut harness, Modifiers::NONE, Key::Enter);
     // The second view, Bottom, is axis-aligned, which switches to
     // orthographic.

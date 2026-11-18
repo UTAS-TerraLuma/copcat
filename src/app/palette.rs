@@ -757,7 +757,12 @@ impl Palette {
                             .set_char_range(Some(egui::text_selection::CCursorRange::one(end)));
                         output.state.store(ui.ctx(), output.response.id);
                     }
-                    output.response.request_focus();
+                    // Only when it's lost: asking again each frame would
+                    // drop the field's hold on the arrow keys, and egui
+                    // would move the focus off it for a frame at each press.
+                    if !output.response.has_focus() {
+                        output.response.request_focus();
+                    }
 
                     // After the field, so the list follows what was just typed.
                     view = self.view(env);
