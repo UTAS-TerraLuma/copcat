@@ -6,6 +6,7 @@ use std::time::Duration;
 use copc_streaming::{CopcError, CopcHeader};
 use glam::Vec3;
 
+use crate::crs::{self, CrsKind};
 use crate::heights::{self, ExtraDimension, HeightKind, HeightSource, HeightSources};
 
 /// Where a COPC file lives, parsed from the text the user pasted.
@@ -58,6 +59,8 @@ pub struct CloudInfo {
     pub extra_dimensions: Vec<String>,
     /// Where each height was read from.
     pub heights: HeightSources,
+    /// The kind of coordinate system, if the file says.
+    pub crs: Option<CrsKind>,
 }
 
 impl CloudInfo {
@@ -80,6 +83,7 @@ impl CloudInfo {
             has_rgb: las_header.point_format().has_color,
             extra_dimensions,
             heights,
+            crs: crs_kind(header),
         }
     }
 
@@ -118,6 +122,20 @@ pub fn extra_dimensions(header: &CopcHeader) -> Vec<ExtraDimension> {
         })
         .map(|vlr| heights::parse_extra_bytes(&vlr.data))
         .unwrap_or_default()
+}
+
+/// The kind of CRS in the file's projection VLRs (or EVLRs), if any.
+fn crs_kind(header: &CopcHeader) -> Option<CrsKind> {
+    let las_header = header.las_header();
+    let record = |record_id: u16| {
+        las_header
+            .vlrs()
+            .iter()
+            .chain(las_header.evlrs())
+            .find(|vlr| vlr.user_id == crs::PROJECTION_USER_ID && vlr.record_id == record_id)
+            .map(|vlr| vlr.data.as_slice())
+    };
+    crs::crs_kind(record(crs::WKT_RECORD_ID), record(crs::GEOKEYS_RECORD_ID))
 }
 
 /// Converts a world position to `f32` metres relative to `origin`.

@@ -243,7 +243,7 @@ impl SubcloudMode {
                 Reframe::Aim => self.subcloud.aim(&mut self.camera, z_range, aspect),
             }
         }
-        show_gizmo(ui, area.rect, &mut self.camera, scene.theme);
+        show_gizmo(ui, area.rect, &mut self.camera, scene);
 
         let view = lod::View::new(&self.camera, area.size_px).clipped_to(footprint);
         let map_view = map_frame

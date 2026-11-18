@@ -243,7 +243,7 @@ pub(crate) fn explore_view(
     // A touchpad pinch zooms like scrolling. (So does Ctrl+scroll, which
     // egui reports the same way.)
     camera.zoom(input.pinch_px);
-    show_gizmo(ui, area.rect, camera, scene.theme);
+    show_gizmo(ui, area.rect, camera, scene);
 
     let view = lod::View::new(camera, area.size_px);
     let views = Views {
@@ -263,7 +263,7 @@ pub(crate) fn show_gizmo(
     ui: &mut egui::Ui,
     view_rect: egui::Rect,
     camera: &mut OrbitCamera,
-    theme: &Theme,
+    scene: &Scene<'_>,
 ) {
     let rect = egui::Rect::from_min_size(
         egui::pos2(
@@ -272,7 +272,8 @@ pub(crate) fn show_gizmo(
         ),
         egui::Vec2::splat(gizmo::SIZE),
     );
-    gizmo::show(ui, rect, camera, theme.axis_colors());
+    let colors = scene.theme.axis_colors();
+    gizmo::show(ui, rect, camera, colors, scene.session.info.crs);
 }
 
 /// The part of a view of `rect` that an image of `aspect` (width / height)

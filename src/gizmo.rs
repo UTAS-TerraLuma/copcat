@@ -1,10 +1,12 @@
 //! The axis gizmo in the corner of the 3D view. It shows which way X, Y and Z
-//! point; clicking an axis end looks along that axis, and dragging it orbits.
+//! point (E, N and U for a projected cloud); clicking an axis end looks along
+//! that axis, and dragging it orbits.
 
 use eframe::egui::{self, Color32, Pos2, Rect, Sense, Stroke};
 use glam::Vec3;
 
-use crate::camera::{OrbitCamera, ViewPreset};
+use crate::camera::{Axes, OrbitCamera, ViewPreset};
+use crate::crs::CrsKind;
 
 /// Side of the gizmo's square, in logical pixels.
 pub const SIZE: f32 = 96.0;
@@ -12,13 +14,40 @@ const HANDLE_RADIUS: f32 = 9.0;
 /// Centre to handle, leaving room for the handle inside the square.
 const ARM_LENGTH: f32 = SIZE * 0.5 - HANDLE_RADIUS - 2.0;
 
+/// What the axes are called.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AxisNames {
+    Xyz,
+    /// Easting, northing and up.
+    Enu,
+}
+
+impl AxisNames {
+    /// E, N and U when the camera's axes are the world's and the cloud is in
+    /// a projected CRS, so X and Y really are eastings and northings. A
+    /// subcloud's turned axes, or an unknown CRS, keep X, Y and Z.
+    pub fn for_view(crs: Option<CrsKind>, axes: Axes) -> Self {
+        match (crs, axes) {
+            (Some(CrsKind::Projected), Axes::World) => Self::Enu,
+            _ => Self::Xyz,
+        }
+    }
+
+    pub fn names(self) -> [&'static str; 3] {
+        match self {
+            Self::Xyz => ["X", "Y", "Z"],
+            Self::Enu => ["E", "N", "U"],
+        }
+    }
+}
+
 /// One clickable end of an axis.
 struct Handle {
     axis: Vec3,
-    /// Which of the X, Y and Z colours it's drawn in.
-    color_index: usize,
+    /// Which axis: its colour and name.
+    index: usize,
     /// Only the positive ends are labelled, like Blender's gizmo.
-    label: Option<&'static str>,
+    positive: bool,
     /// The view from this end, looking back at the target.
     preset: ViewPreset,
 }
@@ -28,38 +57,38 @@ struct Handle {
 static HANDLES: [Handle; 6] = [
     Handle {
         axis: Vec3::X,
-        color_index: 0,
-        label: Some("X"),
+        index: 0,
+        positive: true,
         preset: ViewPreset::Right,
     },
     Handle {
         axis: Vec3::NEG_X,
-        color_index: 0,
-        label: None,
+        index: 0,
+        positive: false,
         preset: ViewPreset::Left,
     },
     Handle {
         axis: Vec3::Y,
-        color_index: 1,
-        label: Some("Y"),
+        index: 1,
+        positive: true,
         preset: ViewPreset::Back,
     },
     Handle {
         axis: Vec3::NEG_Y,
-        color_index: 1,
-        label: None,
+        index: 1,
+        positive: false,
         preset: ViewPreset::Front,
     },
     Handle {
         axis: Vec3::Z,
-        color_index: 2,
-        label: Some("Z"),
+        index: 2,
+        positive: true,
         preset: ViewPreset::Top,
     },
     Handle {
         axis: Vec3::NEG_Z,
-        color_index: 2,
-        label: None,
+        index: 2,
+        positive: false,
         preset: ViewPreset::Bottom,
     },
 ];
@@ -73,11 +102,21 @@ struct Placed {
 }
 
 /// Handles input for the gizmo in `rect` and paints it, with the X, Y and Z
-/// axes in `axis_colors`.
-pub fn show(ui: &mut egui::Ui, rect: Rect, camera: &mut OrbitCamera, axis_colors: [Color32; 3]) {
+/// axes in `axis_colors`. `crs` decides what the axes are called.
+pub fn show(
+    ui: &mut egui::Ui,
+    rect: Rect,
+    camera: &mut OrbitCamera,
+    axis_colors: [Color32; 3],
+    crs: Option<CrsKind>,
+) {
     // Registered after the 3D view, so it's on top and gets the pointer first.
     let response = ui.interact(rect, ui.id().with("axis_gizmo"), Sense::click_and_drag());
-    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Other, true, "View gizmo"));
+    let names = AxisNames::for_view(crs, camera.axes).names();
+    response.widget_info(|| {
+        let label = format!("View gizmo ({})", names.join(", "));
+        egui::WidgetInfo::labeled(egui::WidgetType::Other, true, label)
+    });
     if response.dragged_by(egui::PointerButton::Primary) {
         let drag = response.drag_delta();
         camera.orbit(glam::vec2(drag.x, drag.y));
@@ -85,19 +124,22 @@ pub fn show(ui: &mut egui::Ui, rect: Rect, camera: &mut OrbitCamera, axis_colors
 
     let hovered = response
         .hover_pos()
-        .and_then(|pointer| handle_at(&place_handles(rect, camera), pointer))
-        .map(|handle| handle.preset);
-    if let Some(preset) = hovered {
+        .and_then(|pointer| handle_at(&place_handles(rect, camera), pointer));
+    if let Some(handle) = hovered {
         if response.clicked() {
-            camera.set_view(preset);
+            camera.set_view(handle.preset);
         }
-        response.on_hover_text(preset.description(camera.axes));
+        let sign = if handle.positive { "+" } else { "-" };
+        let name = names[handle.index];
+        let description = handle.preset.description(camera.axes);
+        response.on_hover_text(format!("{sign}{name}: {description}"));
     }
 
     // Placed again so the picture matches the camera after any click or drag.
     let mut handles = place_handles(rect, camera);
     handles.sort_by(|a, b| a.depth.total_cmp(&b.depth));
-    paint(ui.painter(), rect, &handles, hovered, axis_colors);
+    let hovered = hovered.map(|handle| handle.preset);
+    paint(ui.painter(), rect, &handles, hovered, axis_colors, names);
 }
 
 fn place_handles(rect: Rect, camera: &OrbitCamera) -> Vec<Placed> {
@@ -132,6 +174,7 @@ fn paint(
     handles: &[Placed],
     hovered: Option<ViewPreset>,
     axis_colors: [Color32; 3],
+    names: [&str; 3],
 ) {
     let centre = rect.center();
     painter.circle_filled(centre, SIZE * 0.5, Color32::from_black_alpha(90));
@@ -139,23 +182,20 @@ fn paint(
     for placed in handles {
         let Placed { handle, pos, .. } = placed;
         let is_hovered = hovered == Some(handle.preset);
-        let color = axis_colors[handle.color_index];
-        match handle.label {
-            Some(label) => {
-                painter.line_segment([centre, *pos], Stroke::new(2.0, color));
-                painter.circle_filled(*pos, HANDLE_RADIUS, color);
-                painter.text(
-                    *pos,
-                    egui::Align2::CENTER_CENTER,
-                    label,
-                    egui::FontId::proportional(12.0),
-                    Color32::BLACK,
-                );
-            }
-            None => {
-                painter.circle_filled(*pos, HANDLE_RADIUS - 2.0, color.gamma_multiply(0.35));
-                painter.circle_stroke(*pos, HANDLE_RADIUS - 2.0, Stroke::new(1.5, color));
-            }
+        let color = axis_colors[handle.index];
+        if handle.positive {
+            painter.line_segment([centre, *pos], Stroke::new(2.0, color));
+            painter.circle_filled(*pos, HANDLE_RADIUS, color);
+            painter.text(
+                *pos,
+                egui::Align2::CENTER_CENTER,
+                names[handle.index],
+                egui::FontId::proportional(12.0),
+                Color32::BLACK,
+            );
+        } else {
+            painter.circle_filled(*pos, HANDLE_RADIUS - 2.0, color.gamma_multiply(0.35));
+            painter.circle_stroke(*pos, HANDLE_RADIUS - 2.0, Stroke::new(1.5, color));
         }
         if is_hovered {
             painter.circle_stroke(*pos, HANDLE_RADIUS + 1.5, Stroke::new(2.0, Color32::WHITE));
@@ -194,6 +234,19 @@ mod tests {
             "{:?}",
             x.pos
         );
+    }
+
+    #[test]
+    fn axis_names_should_be_enu_only_for_projected_world_axes() {
+        let world = Axes::World;
+        let names = |crs, axes| AxisNames::for_view(crs, axes).names();
+        assert_eq!(names(Some(CrsKind::Projected), world), ["E", "N", "U"]);
+        assert_eq!(names(Some(CrsKind::Geographic), world), ["X", "Y", "Z"]);
+        assert_eq!(names(Some(CrsKind::Other), world), ["X", "Y", "Z"]);
+        assert_eq!(names(None, world), ["X", "Y", "Z"]);
+        // A transect's X runs along it, not east.
+        let transect = Axes::Transect { heading: 1.0 };
+        assert_eq!(names(Some(CrsKind::Projected), transect), ["X", "Y", "Z"]);
     }
 
     #[test]

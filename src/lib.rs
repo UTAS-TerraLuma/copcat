@@ -6,6 +6,7 @@ mod camera;
 mod classification;
 mod cloud;
 mod config;
+mod crs;
 mod export;
 mod folder_scan;
 mod format;
