@@ -1,0 +1,18 @@
+{
+  "type": "Catalog",
+  "id": "fixture-api",
+  "title": "Fixture STAC API",
+  "description": "A fake STAC API for Copcat's tests. {{base}} is the test server's address.",
+  "stac_version": "1.0.0",
+  "conformsTo": [
+    "https://api.stacspec.org/v1.0.0/core",
+    "https://api.stacspec.org/v1.0.0/collections",
+    "http://www.opengis.net/spec/ogcapi-features-1/1.0/conf/core"
+  ],
+  "links": [
+    { "rel": "self", "type": "application/json", "href": "{{base}}/stac/api/" },
+    { "rel": "root", "type": "application/json", "href": "{{base}}/stac/api/" },
+    { "rel": "data", "type": "application/json", "href": "{{base}}/stac/api/collections" },
+    { "rel": "search", "type": "application/geo+json", "href": "{{base}}/stac/api/search", "method": "POST" }
+  ]
+}

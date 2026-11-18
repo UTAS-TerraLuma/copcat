@@ -45,7 +45,8 @@ copcat open https://example.com/cloud.copc.laz
 ```
 
 You can also start `copcat-viewer` on its own and use **Open…** in its toolbar to
-choose a file (Ctrl+O) or type a URL (Ctrl+L).
+choose a file (Ctrl+O) or type a URL (Ctrl+L), or press Ctrl+P to browse a STAC
+catalog or a folder of clouds (see [Data sources](#data-sources)).
 
 ## Elevation and height above ground
 
@@ -186,11 +187,14 @@ commands are:
 | `settings.open_workspace` | Open workspace settings | |
 | `settings.reload` | Reload settings | |
 | `settings.save_display_defaults` | Save current display settings as defaults | |
+| `sources.add_stac` | Add STAC source… | |
+| `sources.add_folder` | Add folder source… | |
+| `sources.remove` | Remove data source… | |
 
-Connectors are places to open clouds from: STAC APIs (`url`, `http` or `https`) and
-folders (`path`). A relative folder path is relative to the folder holding the
-`.copcat` directory that declares it, so `"path": "."` in a workspace file is the
-workspace. Each needs a `name`.
+Connectors are places to open clouds from: STAC catalogs and APIs (`url`, `http` or
+`https`) and folders (`path`). A relative folder path is relative to the folder holding
+the `.copcat` directory that declares it, so `"path": "."` in a workspace file is the
+workspace. Each needs a `name`. See [Data sources](#data-sources) for browsing them.
 
 The files are the source of truth: changing a setting in the window lasts until you
 close it. The settings commands (in the command palette, or bound to a shortcut):
@@ -207,6 +211,61 @@ close it. The settings commands (in the command palette, or bound to a shortcut)
 `COPCAT_WORKSPACE` sets the workspace folder (from the current directory).
 `copcat render` doesn't read settings files: its output depends only on its
 arguments.
+
+## Data sources
+
+Data sources (connectors) let you browse to a cloud without leaving the viewer. Press
+Ctrl+P (quick open): each source is listed by name, marked **STAC source** or
+**Folder source**. Choose one to browse into it, type to filter, and press Enter on a
+cloud to open it. Esc, or Backspace in an empty field, goes back up a level. The
+**Open…** menu lists the sources too, and opens quick open at the one you pick.
+
+- **STAC sources** browse a [STAC](https://stacspec.org) catalog: its catalogs and
+  collections, then their items, showing each item's title and date. Choosing an item
+  opens its COPC point cloud (an asset of type `application/vnd.laszip+copc`, or
+  whose file ends `.copc.laz`); an item with several lists them to choose from. Items
+  without one are greyed out. Assets must be at `http` or `https` URLs; `s3://` links
+  are shown but can't be opened yet.
+
+  Both kinds of STAC work: a *static catalog* (JSON files linked to each other, such
+  as on an object store; give the URL of its `catalog.json`, or of the folder it's in)
+  and a *STAC API* (give its landing page). An API's items are fetched 50 at a time:
+  choose **Load more…** at the foot of the list for the next page. A static catalog's
+  item files are fetched 24 at a time in the same way.
+- **Folder sources** list every COPC file (`*.copc.laz`) under a folder, searched on
+  a background thread. Hidden folders (starting with `.`), `target`, `node_modules`
+  and links to folders are skipped, and the search stops at 16 folders deep, 2000
+  files listed (the rest are counted) and 200000 entries looked at.
+- **Workspace**: the folder you start Copcat in (or `COPCAT_WORKSPACE`) is always
+  offered as a folder source named "Workspace: *folder name*", without any settings,
+  unless it's your home folder or a drive or filesystem root, which would take too
+  long to search.
+
+What's been fetched is kept until you close the viewer, so going back is instant;
+choose **Refresh** at the foot of a list to fetch it again. No signing in is
+supported yet: a catalog that needs it shows the server's refusal.
+
+Add and remove sources from the command palette (Ctrl+Shift+P), or from the
+**Open…** menu. These change your user settings file, keeping its other keys (it's
+rewritten as plain JSON, so comments are lost), and take effect at once:
+
+- **Add STAC source…** asks for the catalog's URL, checks it's a STAC catalog, then
+  asks for a name, offering the catalog's title (or the URL's host) as the default.
+- **Add folder source…** asks for a folder, then a name, offering the folder's name.
+- **Remove data source…** lists the sources in the user settings file to remove one.
+  Sources declared in a workspace file are shown but must be removed from that file.
+
+Or write them in a settings file:
+
+```jsonc
+"connectors": {
+  "stac": [
+    { "name": "NatureScan", "url": "https://stacapi.naturescan.earth/" },
+    { "name": "AEO workshop", "url": "https://example.com/stac/catalog.json" }
+  ],
+  "folders": [{ "name": "Surveys", "path": "D:/data/surveys" }]
+}
+```
 
 ## Using it from WSL
 

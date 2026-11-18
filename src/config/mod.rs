@@ -35,7 +35,8 @@ use std::path::{Path, PathBuf};
 use crate::camera::Projection;
 
 pub(crate) use save::{
-    USER_TEMPLATE, WORKSPACE_TEMPLATE, create_if_missing, open_in_editor, save_over,
+    ConnectorList, USER_TEMPLATE, WORKSPACE_TEMPLATE, add_connector, create_if_missing,
+    open_in_editor, remove_connector, save_over,
 };
 
 /// Every settings file's name.
@@ -151,7 +152,7 @@ pub struct Connectors {
     pub folders: Vec<FolderConnector>,
 }
 
-/// A STAC API to search for clouds.
+/// A STAC catalog, static or an API, to browse for clouds.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StacConnector {
     pub name: String,
@@ -333,7 +334,7 @@ fn same_file(a: &Path, b: &Path) -> bool {
 }
 
 /// The home directory, from `USERPROFILE` on Windows or `HOME`.
-fn home_dir() -> Option<PathBuf> {
+pub(crate) fn home_dir() -> Option<PathBuf> {
     let var = |name| std::env::var_os(name).filter(|value| !value.is_empty());
     let home = if cfg!(windows) {
         var("USERPROFILE").or_else(|| var("HOME"))

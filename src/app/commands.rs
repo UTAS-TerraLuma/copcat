@@ -11,9 +11,11 @@
 use eframe::egui::{self, Key, KeyboardShortcut, Modifiers};
 
 use crate::camera::{Projection, ViewPreset};
+use crate::config::ConnectorList;
 use crate::subcloud::ShapeKind;
 
 use super::Mode;
+use super::connectors::NewSource;
 use super::settings::ColorMode;
 
 /// Something the user asked for.
@@ -53,6 +55,25 @@ pub(crate) enum Command {
     QuickOpen,
     /// Open, reload or save the settings files.
     Settings(SettingsCommand),
+    /// Browse, add or remove data sources (connectors).
+    Connector(ConnectorCommand),
+}
+
+/// What to do with data sources (see `super::connectors`).
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum ConnectorCommand {
+    /// Ask for a STAC catalog's URL and a name, then save it.
+    AddStac,
+    /// Choose a folder and ask for a name, then save it.
+    AddFolder,
+    /// Choose a data source to remove from the user settings.
+    Remove,
+    /// Show the data source with this name in the palette.
+    Browse(String),
+    /// Add a data source to the user settings file.
+    Save(NewSource),
+    /// Remove the data source with this name from the user settings file.
+    Delete(ConnectorList, String),
 }
 
 /// What to do with the settings files (see `crate::config`).
@@ -137,6 +158,14 @@ impl Command {
             Self::QuickOpen,
         ]);
         commands.extend(SettingsCommand::ALL.map(Self::Settings));
+        commands.extend(
+            [
+                ConnectorCommand::AddStac,
+                ConnectorCommand::AddFolder,
+                ConnectorCommand::Remove,
+            ]
+            .map(Self::Connector),
+        );
         commands
     }
 
@@ -237,6 +266,16 @@ impl Command {
                     None,
                 ),
             },
+            Self::Connector(command) => match command {
+                ConnectorCommand::AddStac => info("sources.add_stac", "Add STAC source…", None),
+                ConnectorCommand::AddFolder => {
+                    info("sources.add_folder", "Add folder source…", None)
+                }
+                ConnectorCommand::Remove => info("sources.remove", "Remove data source…", None),
+                ConnectorCommand::Browse(_) => info("sources.browse", "Browse data source", None),
+                ConnectorCommand::Save(_) => info("sources.save", "Save data source", None),
+                ConnectorCommand::Delete(..) => info("sources.delete", "Delete data source", None),
+            },
         }
     }
 }
@@ -329,6 +368,17 @@ mod tests {
     fn every_command() -> Vec<Command> {
         let mut commands = Command::all();
         commands.push(Command::OpenSource("site.copc.laz".to_owned()));
+        commands.extend(
+            [
+                ConnectorCommand::Browse("S".to_owned()),
+                ConnectorCommand::Save(NewSource {
+                    name: "S".to_owned(),
+                    kind: super::super::connectors::SourceKind::Stac("https://s/".to_owned()),
+                }),
+                ConnectorCommand::Delete(ConnectorList::Stac, "S".to_owned()),
+            ]
+            .map(Command::Connector),
+        );
         commands
     }
 

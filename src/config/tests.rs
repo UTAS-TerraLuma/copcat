@@ -546,6 +546,89 @@ fn save_over_should_leave_an_invalid_file_alone() {
 }
 
 #[test]
+fn add_connector_should_append_and_keep_other_keys() {
+    let temp = tempfile::tempdir().unwrap();
+    let file = write(
+        temp.path(),
+        FILE_NAME,
+        r#"{"theme": "graphite", "connectors": {"folders": [{"name": "F", "path": "."}],
+            "stac": [{"name": "A", "url": "https://a.example/"}]}}"#,
+    );
+    add_connector(
+        &file,
+        ConnectorList::Stac,
+        json!({"name": "B", "url": "https://b.example/"}),
+    )
+    .unwrap();
+    // The same name replaces the old one, in its place.
+    add_connector(
+        &file,
+        ConnectorList::Stac,
+        json!({"name": "A", "url": "https://a2.example/"}),
+    )
+    .unwrap();
+    let saved: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&file).unwrap()).unwrap();
+    assert_eq!(
+        saved,
+        json!({"theme": "graphite", "connectors": {"folders": [{"name": "F", "path": "."}],
+            "stac": [{"name": "A", "url": "https://a2.example/"}, {"name": "B", "url": "https://b.example/"}]}})
+    );
+}
+
+#[test]
+fn add_connector_should_create_the_file_and_list() {
+    let temp = tempfile::tempdir().unwrap();
+    let file = temp.path().join("home").join(FILE_NAME);
+    add_connector(
+        &file,
+        ConnectorList::Folders,
+        json!({"name": "Data", "path": "D:/data"}),
+    )
+    .unwrap();
+    let (config, warnings) = read_file(&file);
+    assert!(warnings.is_empty(), "{warnings:?}");
+    assert_eq!(config.connectors.folders[0].name, "Data");
+}
+
+#[test]
+fn add_connector_should_refuse_a_connectors_key_of_the_wrong_type() {
+    let temp = tempfile::tempdir().unwrap();
+    let file = write(temp.path(), FILE_NAME, r#"{"connectors": {"stac": "x"}}"#);
+    let entry = json!({"name": "B", "url": "https://b.example/"});
+    assert!(add_connector(&file, ConnectorList::Stac, entry).is_err());
+    assert_eq!(
+        fs::read_to_string(&file).unwrap(),
+        r#"{"connectors": {"stac": "x"}}"#
+    );
+}
+
+#[test]
+fn remove_connector_should_remove_by_name_or_say_it_isnt_there() {
+    let temp = tempfile::tempdir().unwrap();
+    let file = write(
+        temp.path(),
+        FILE_NAME,
+        r#"{"connectors": {"stac": [{"name": "A", "url": "https://a.example/"},
+            {"name": "B", "url": "https://b.example/"}]}}"#,
+    );
+    remove_connector(&file, ConnectorList::Stac, "A").unwrap();
+    let error = remove_connector(&file, ConnectorList::Folders, "B").unwrap_err();
+    assert!(
+        error.contains("no connectors.folders entry named \"B\""),
+        "{error}"
+    );
+    let names: Vec<_> = read_file(&file)
+        .0
+        .connectors
+        .stac
+        .into_iter()
+        .map(|c| c.name)
+        .collect();
+    assert_eq!(names, ["B"]);
+}
+
+#[test]
 fn floats_should_be_written_briefly() {
     let config = Config {
         display: DisplayConfig {

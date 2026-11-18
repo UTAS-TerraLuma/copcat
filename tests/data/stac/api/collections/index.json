@@ -1,0 +1,25 @@
+{
+  "collections": [
+    {
+      "type": "Collection",
+      "id": "fixture-flights",
+      "title": "Fixture flights",
+      "description": "Three flights over two pages.",
+      "stac_version": "1.0.0",
+      "license": "CC0-1.0",
+      "extent": {
+        "spatial": { "bbox": [[0, 0, 1, 1]] },
+        "temporal": { "interval": [["2026-01-01T00:00:00Z", null]] }
+      },
+      "links": [
+        { "rel": "self", "type": "application/json", "href": "{{base}}/stac/api/collections/fixture" },
+        { "rel": "items", "type": "application/geo+json", "href": "{{base}}/stac/api/collections/fixture/items" },
+        { "rel": "root", "type": "application/json", "href": "{{base}}/stac/api/" }
+      ]
+    }
+  ],
+  "links": [
+    { "rel": "root", "href": "{{base}}/stac/api/" },
+    { "rel": "self", "href": "{{base}}/stac/api/collections" }
+  ]
+}

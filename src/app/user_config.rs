@@ -28,8 +28,7 @@ pub(crate) struct UserConfig {
     /// Where the files are. `None` reads and writes none, for tests that
     /// mustn't see the developer's own settings.
     pub(crate) locations: Option<Locations>,
-    /// Places to open clouds from, for a connector browser.
-    #[allow(dead_code, reason = "for the connector browser to come")]
+    /// Places to open clouds from: the data sources in quick open.
     pub(crate) connectors: Connectors,
     /// Shown at the foot of the window until dismissed.
     pub(crate) messages: Vec<Message>,
@@ -50,7 +49,7 @@ impl UserConfig {
         }
     }
 
-    fn warn(&mut self, text: impl Into<String>) {
+    pub(crate) fn warn(&mut self, text: impl Into<String>) {
         let text = text.into();
         eprintln!("copcat settings: {text}");
         self.messages.push(Message {
@@ -59,7 +58,7 @@ impl UserConfig {
         });
     }
 
-    fn inform(&mut self, text: impl Into<String>) {
+    pub(crate) fn inform(&mut self, text: impl Into<String>) {
         self.messages.push(Message {
             text: text.into(),
             is_warning: false,
@@ -265,6 +264,7 @@ impl ViewerApp {
         self.theme.apply(ctx);
         self.keymap = keymap_with(&config.keybindings, &mut warnings);
         self.user_config.connectors = config.connectors;
+        self.refresh_connectors();
 
         for warning in warnings {
             self.user_config.warn(warning.to_string());

@@ -7,6 +7,11 @@
 //! without `Range` gets the whole file with 200. Multi-range requests get 200
 //! and the whole file, which RFC 9110 allows. Every response closes the
 //! connection, which keeps the parsing simple.
+//!
+//! For fake STAC APIs: a request for a directory gets its `index.json`, and
+//! `{{base}}` in a `.json` file is replaced by the server's address (such as
+//! `http://127.0.0.1:50123`), so absolute links can point back at it. The
+//! query is ignored when finding the file, but logged.
 
 use std::io::{BufRead, BufReader, Write};
 use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
@@ -20,6 +25,8 @@ use std::thread::{self, JoinHandle};
 pub struct Logged {
     pub method: String,
     pub path: String,
+    /// What followed `?`, if anything.
+    pub query: Option<String>,
     pub range: Option<String>,
     pub status: u16,
 }
@@ -52,7 +59,7 @@ impl FileServer {
                     let root = root.clone();
                     let log = log.clone();
                     thread::spawn(move || {
-                        if let Some(entry) = handle(stream, &root) {
+                        if let Some(entry) = handle(stream, &root, addr) {
                             log.lock().unwrap().push(entry);
                         }
                     });
@@ -89,7 +96,7 @@ impl Drop for FileServer {
     }
 }
 
-fn handle(stream: TcpStream, root: &Path) -> Option<Logged> {
+fn handle(stream: TcpStream, root: &Path, addr: SocketAddr) -> Option<Logged> {
     let mut reader = BufReader::new(stream.try_clone().ok()?);
     let mut request_line = String::new();
     reader.read_line(&mut request_line).ok()?;
@@ -112,11 +119,17 @@ fn handle(stream: TcpStream, root: &Path) -> Option<Logged> {
             range = Some(value.trim().to_owned());
         }
     }
-    let path = target.split(['?', '#']).next().unwrap_or("").to_owned();
-    let status = respond(stream, root, &method, &path, range.as_deref());
+    let target = target.split('#').next().unwrap_or("");
+    let (path, query) = match target.split_once('?') {
+        Some((path, query)) => (path.to_owned(), Some(query.to_owned())),
+        None => (target.to_owned(), None),
+    };
+    let base = format!("http://{addr}");
+    let status = respond(stream, root, &base, &method, &path, range.as_deref());
     Some(Logged {
         method,
         path,
+        query,
         range,
         status,
     })
@@ -126,6 +139,7 @@ fn handle(stream: TcpStream, root: &Path) -> Option<Logged> {
 fn respond(
     mut stream: TcpStream,
     root: &Path,
+    base: &str,
     method: &str,
     path: &str,
     range: Option<&str>,
@@ -155,9 +169,14 @@ fn respond(
     let Some(file) = resolve(root, path) else {
         return send(404, "Not Found", &[("Content-Length", "0".into())], b"");
     };
-    let Ok(bytes) = std::fs::read(&file) else {
+    let Ok(mut bytes) = std::fs::read(&file) else {
         return send(404, "Not Found", &[("Content-Length", "0".into())], b"");
     };
+    if file.extension().is_some_and(|e| e == "json") {
+        bytes = String::from_utf8_lossy(&bytes)
+            .replace("{{base}}", base)
+            .into_bytes();
+    }
     let total = bytes.len() as u64;
     let content_type = ("Content-Type", content_type(&file).to_owned());
     let accept = ("Accept-Ranges", "bytes".to_owned());
@@ -195,7 +214,8 @@ fn respond(
     }
 }
 
-/// The file `path` names under `root`, refusing anything that climbs out.
+/// The file `path` names under `root`, or a directory's `index.json`,
+/// refusing anything that climbs out.
 fn resolve(root: &Path, path: &str) -> Option<PathBuf> {
     let decoded = percent_decode(path)?;
     let mut file = root.to_path_buf();
@@ -205,6 +225,9 @@ fn resolve(root: &Path, path: &str) -> Option<PathBuf> {
             Component::CurDir => {}
             _ => return None,
         }
+    }
+    if file.is_dir() {
+        file.push("index.json");
     }
     file.is_file().then_some(file)
 }

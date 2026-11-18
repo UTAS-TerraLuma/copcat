@@ -90,6 +90,99 @@ pub(crate) fn open_in_editor(file: &Path) -> io::Result<()> {
 /// Returns whether comments or trailing commas were dropped: the file is
 /// rewritten as plain JSON.
 pub(crate) fn save_over(file: &Path, updates: &Value) -> Result<bool, String> {
+    edit_file(file, |current| {
+        merge_into(current, updates);
+        Ok(())
+    })
+}
+
+/// Which connector list in a settings file.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ConnectorList {
+    Stac,
+    Folders,
+}
+
+impl ConnectorList {
+    fn key(self) -> &'static str {
+        match self {
+            Self::Stac => "stac",
+            Self::Folders => "folders",
+        }
+    }
+}
+
+/// Adds `entry` (an object with a `name`) to `connectors.<list>` in the
+/// settings file `file`, in place of an entry with the same name, keeping
+/// everything else. Returns whether comments were dropped, as
+/// [`save_over`] does.
+pub(crate) fn add_connector(
+    file: &Path,
+    list: ConnectorList,
+    entry: Value,
+) -> Result<bool, String> {
+    let name = entry.get("name").cloned();
+    edit_file(file, |current| {
+        let entries = connector_list(current, list)?;
+        match entries
+            .iter_mut()
+            .find(|old| old.get("name") == name.as_ref())
+        {
+            Some(old) => *old = entry,
+            None => entries.push(entry),
+        }
+        Ok(())
+    })
+}
+
+/// Removes the entry named `name` from `connectors.<list>` in `file`.
+/// Fails, leaving the file alone, if there's no such entry.
+pub(crate) fn remove_connector(
+    file: &Path,
+    list: ConnectorList,
+    name: &str,
+) -> Result<bool, String> {
+    edit_file(file, |current| {
+        let entries = connector_list(current, list)?;
+        let before = entries.len();
+        entries.retain(|entry| entry.get("name").and_then(Value::as_str) != Some(name));
+        if entries.len() == before {
+            return Err(format!(
+                "there's no connectors.{} entry named {name:?} in it",
+                list.key()
+            ));
+        }
+        Ok(())
+    })
+}
+
+/// `connectors.<list>` in `root`, created empty if it's missing.
+fn connector_list(root: &mut Value, list: ConnectorList) -> Result<&mut Vec<Value>, String> {
+    let wrong = |what: &str| format!("{what} isn't what Copcat expects, so it wasn't changed");
+    let connectors = root
+        .as_object_mut()
+        .ok_or_else(|| wrong("the file"))?
+        .entry("connectors")
+        .or_insert_with(|| Value::Object(Map::new()))
+        .as_object_mut()
+        .ok_or_else(|| wrong("its \"connectors\""))?;
+    connectors
+        .entry(list.key())
+        .or_insert_with(|| Value::Array(Vec::new()))
+        .as_array_mut()
+        .ok_or_else(|| wrong(&format!("its \"connectors.{}\"", list.key())))
+}
+
+/// Reads the settings file `file` (a missing one is `{}`), lets `edit`
+/// change it, and writes it back. Refuses (and leaves the file alone) if
+/// what's there isn't a JSON object, or `edit` fails.
+///
+/// Returns whether comments or trailing commas were dropped: the file is
+/// rewritten as plain JSON.
+fn edit_file(
+    file: &Path,
+    edit: impl FnOnce(&mut Value) -> Result<(), String>,
+) -> Result<bool, String> {
     let text = match fs::read_to_string(file) {
         Ok(text) => text,
         Err(error) if error.kind() == io::ErrorKind::NotFound => String::new(),
@@ -106,7 +199,7 @@ pub(crate) fn save_over(file: &Path, updates: &Value) -> Result<bool, String> {
     if !current.is_object() {
         return Err("not a JSON object, so it wasn't changed".to_owned());
     }
-    merge_into(&mut current, updates);
+    edit(&mut current)?;
     let mut out = serde_json::to_string_pretty(&current).map_err(|error| error.to_string())?;
     out.push('\n');
     if let Some(dir) = file.parent() {

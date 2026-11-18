@@ -17,6 +17,17 @@ it, so there are no licensing or privacy concerns.
 The integration tests (`tests/common/mod.rs`, `expected`) assert these
 numbers, and `tests/golden/*.png` are renders of this exact file.
 
+`stac/` holds hand-written STAC catalogs pointing at the fixture, served by
+the test server (`tests/common/server.rs`) for `tests/stac_client.rs` and
+`tests/ui_connectors.rs`:
+
+- `stac/static/`: a static catalog → collection → three items: Site A with one
+  COPC asset (the fixture), Site B with none, Site C with two (the fixture,
+  and an `s3://` link that can't be opened).
+- `stac/api/`: a fake STAC API (landing page, `/collections`, two pages of
+  items). Directories are served as their `index.json`, and the server writes
+  its own address in place of `{{base}}`.
+
 PDAL's COPC writer doesn't lay out the octree identically on every run, so
 regenerating gives a file with the same points but different bytes and node
 contents. That changes renders slightly: after regenerating, update the
