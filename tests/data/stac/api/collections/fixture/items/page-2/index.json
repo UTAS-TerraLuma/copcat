@@ -1,0 +1,22 @@
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "stac_version": "1.0.0",
+      "id": "flight-3",
+      "collection": "fixture-flights",
+      "geometry": null,
+      "properties": { "datetime": "2026-04-22T02:00:00+00:00" },
+      "links": [{ "rel": "self", "href": "{{base}}/stac/api/collections/fixture/items/flight-3" }],
+      "assets": {
+        "pointcloud": { "href": "{{base}}/fixture.copc.laz", "type": "application/vnd.laszip+copc", "title": "Point cloud flight-3" }
+      }
+    }
+  ],
+  "links": [
+    { "rel": "root", "href": "{{base}}/stac/api/" },
+    { "rel": "self", "href": "{{base}}/stac/api/collections/fixture/items/page-2?limit=2", "method": "GET" },
+    { "rel": "prev", "href": "{{base}}/stac/api/collections/fixture/items?limit=2", "method": "GET" }
+  ]
+}

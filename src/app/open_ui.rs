@@ -4,7 +4,8 @@
 
 use eframe::egui;
 
-use super::commands::{Command, Keymap};
+use super::commands::{Command, ConnectorCommand, Keymap};
+use super::connectors::{DataSource, SourceKind};
 
 /// What the file dialog offers. COPC files end `.copc.laz`, which the
 /// dialog can't match as one extension, so it shows every `.laz`.
@@ -23,8 +24,14 @@ pub(crate) fn command_button(
     ui.add(button)
 }
 
-/// The toolbar's Open menu.
-pub(crate) fn open_menu(ui: &mut egui::Ui, keymap: &Keymap, commands: &mut Vec<Command>) {
+/// The toolbar's Open menu: open a file or URL, or browse a data source in
+/// the palette.
+pub(crate) fn open_menu(
+    ui: &mut egui::Ui,
+    keymap: &Keymap,
+    sources: &[DataSource],
+    commands: &mut Vec<Command>,
+) {
     ui.menu_button("Open…", |ui| {
         for command in [Command::OpenFileDialog, Command::OpenUrlDialog] {
             if command_button(ui, keymap, &command).clicked() {
@@ -32,9 +39,30 @@ pub(crate) fn open_menu(ui: &mut egui::Ui, keymap: &Keymap, commands: &mut Vec<C
                 ui.close();
             }
         }
+        ui.separator();
+        ui.label(egui::RichText::new("Data sources").weak());
+        for source in sources {
+            let kind = match source.kind {
+                SourceKind::Stac(_) => "STAC",
+                SourceKind::Folder(_) => "Folder",
+            };
+            let button = egui::Button::new(&source.name).shortcut_text(kind);
+            if ui.add(button).clicked() {
+                commands.push(Command::Connector(ConnectorCommand::Browse(
+                    source.name.clone(),
+                )));
+                ui.close();
+            }
+        }
+        for command in [ConnectorCommand::AddStac, ConnectorCommand::AddFolder] {
+            if command_button(ui, keymap, &Command::Connector(command.clone())).clicked() {
+                commands.push(Command::Connector(command));
+                ui.close();
+            }
+        }
     })
     .response
-    .on_hover_text("Open a COPC file, or stream one from a URL");
+    .on_hover_text("Open a COPC file, stream one from a URL, or browse a data source");
 }
 
 /// What the main area shows before a cloud is open: how to open one.

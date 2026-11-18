@@ -20,6 +20,10 @@ it, and start again from step 1.
      fixture and snapshotted against `tests/snapshots/*.png`.
    - `tests/ui_settings.rs`: the viewer reading settings files from scratch
      directories (never `~/.copcat`): layering, warnings, save and reload.
+   - `tests/stac_client.rs` and `tests/ui_connectors.rs`: the STAC client
+     against fixture catalogs on the local server, and data sources browsed
+     in quick open down to the fixture. `cargo test --test stac_client --
+     --ignored` also browses two real catalogs over the internet.
 4. Read the test output for `SKIPPED:` lines. A skipped GPU test verified
    nothing; say so in your report. `COPCAT_REQUIRE_GPU=1 cargo test --locked`
    turns a missing adapter into a failure.

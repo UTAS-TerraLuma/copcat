@@ -22,19 +22,21 @@
 //! - [`ItemAction::Browse`] drills into a sub-list: it makes a new
 //!   [`Provider`] that's pushed on top of the current one. Esc, or Backspace
 //!   in an empty field, goes back up a level.
+//! - [`ItemAction::Local`] asks the provider showing it to do something to
+//!   its own list ([`Provider::act`]), such as fetching the next page.
 //!
 //! A connector (a STAC catalog's collections, then a collection's items,
 //! then an item's COPC assets; or the files in a folder) is a provider whose
 //! items `Browse` into further providers, ending in items that
 //! `Run(Command::OpenSource(url))`. Providers whose items take a while to
 //! fetch return [`Listing::loading`] until they're ready, polled each frame;
-//! [`LoadingProvider`] does that for a closure run on a thread, and
-//! [`ListProvider`] lists items already in hand. To offer a connector's root
-//! in open mode, add an item that browses into it to
-//! [`SourceProvider::items`].
+//! [`FeedProvider`](super::feed::FeedProvider) does that for loads run on a
+//! thread, with paging and refreshing, and [`ListProvider`] lists items
+//! already in hand. Connectors' roots are offered in open mode through
+//! [`Palette::set_connectors`]; see [`super::connectors`].
 
 use std::path::Path;
-use std::sync::{Arc, mpsc};
+use std::sync::Arc;
 
 use eframe::egui::{self, Key, KeyboardShortcut, Modifiers};
 
@@ -72,8 +74,18 @@ pub(crate) enum ItemAction {
     /// Ask for text in the palette, then run the command it makes.
     Prompt(ArgPrompt),
     /// Show a sub-list.
-    #[allow(dead_code, reason = "for the STAC and folder connectors to come")]
     Browse(Browse),
+    /// Ask the provider showing the item to change its list.
+    Local(LocalAction),
+}
+
+/// What [`ItemAction::Local`] asks of a provider.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LocalAction {
+    /// Fetch the list again.
+    Refresh,
+    /// Fetch the next page.
+    LoadMore,
 }
 
 /// A command that needs text: the palette's field asks for it.
@@ -98,10 +110,9 @@ type ProviderFactory = dyn Fn() -> Box<dyn Provider> + Send + Sync;
 
 /// Makes the provider for a sub-list, when its item is chosen.
 #[derive(Clone)]
-pub(crate) struct Browse(Arc<ProviderFactory>);
+pub(crate) struct Browse(pub(crate) Arc<ProviderFactory>);
 
 impl Browse {
-    #[allow(dead_code, reason = "for the STAC and folder connectors to come")]
     pub(crate) fn new(make: impl Fn() -> Box<dyn Provider> + Send + Sync + 'static) -> Self {
         Self(Arc::new(make))
     }
@@ -170,7 +181,6 @@ impl Listing {
     }
 
     /// Nothing yet: still fetching.
-    #[allow(dead_code, reason = "for the STAC and folder connectors to come")]
     pub(crate) fn loading() -> Self {
         Self {
             loading: true,
@@ -192,6 +202,9 @@ pub(crate) trait Provider: Send {
     /// The items for `query`, called every frame the list shows, so it
     /// should be cheap: poll background work, don't wait for it.
     fn items(&mut self, query: &str, env: &Env<'_>) -> Listing;
+
+    /// Does what one of this provider's [`ItemAction::Local`] items asks.
+    fn act(&mut self, _action: LocalAction) {}
 }
 
 /// Every command, as listed in command mode.
@@ -228,6 +241,8 @@ pub(crate) struct SourceProvider {
     /// The last query checked for being a file, and whether it was one, so
     /// the disk isn't asked again every frame.
     file_check: Option<(String, bool)>,
+    /// An item browsing into each data source (connector).
+    connectors: Vec<PaletteItem>,
 }
 
 impl SourceProvider {
@@ -271,7 +286,8 @@ impl Provider for SourceProvider {
         let more = [Command::OpenFileDialog, Command::OpenUrlDialog]
             .map(|command| PaletteItem::command(command, env));
         let mut items: Vec<_> = typed.map(open_typed_item).into_iter().collect();
-        items.extend(rank(recent.chain(more).collect(), query));
+        let listed = recent.chain(self.connectors.iter().cloned()).chain(more);
+        items.extend(rank(listed.collect(), query));
         Listing {
             items,
             ranked: true,
@@ -311,8 +327,7 @@ fn source_name(source: &str) -> String {
         .to_owned()
 }
 
-/// A fixed list of items, such as a folder's files once read.
-#[allow(dead_code, reason = "for the STAC and folder connectors to come")]
+/// A fixed list of items, such as a STAC item's point clouds.
 pub(crate) struct ListProvider {
     pub(crate) title: String,
     pub(crate) items: Vec<PaletteItem>,
@@ -325,73 +340,6 @@ impl Provider for ListProvider {
 
     fn items(&mut self, _query: &str, _env: &Env<'_>) -> Listing {
         Listing::ready(self.items.clone())
-    }
-}
-
-/// Items fetched in the background, such as a STAC catalog's collections:
-/// loading until they arrive on a channel, then those items.
-#[allow(dead_code, reason = "for the STAC and folder connectors to come")]
-pub(crate) struct LoadingProvider {
-    title: String,
-    receiver: mpsc::Receiver<Result<Vec<PaletteItem>, String>>,
-    /// What arrived, once it has.
-    received: Option<Result<Vec<PaletteItem>, String>>,
-}
-
-#[allow(dead_code, reason = "for the STAC and folder connectors to come")]
-impl LoadingProvider {
-    /// Lists what comes from `receiver`: the items, or why there are none.
-    pub(crate) fn new(
-        title: impl Into<String>,
-        receiver: mpsc::Receiver<Result<Vec<PaletteItem>, String>>,
-    ) -> Self {
-        Self {
-            title: title.into(),
-            receiver,
-            received: None,
-        }
-    }
-
-    /// Runs `load` on a thread and lists what it returns, waking `ctx` when
-    /// it's done.
-    pub(crate) fn spawn(
-        title: impl Into<String>,
-        ctx: &egui::Context,
-        load: impl FnOnce() -> Result<Vec<PaletteItem>, String> + Send + 'static,
-    ) -> Self {
-        let (sender, receiver) = mpsc::channel();
-        let ctx = ctx.clone();
-        std::thread::spawn(move || {
-            let _ = sender.send(load());
-            ctx.request_repaint();
-        });
-        Self::new(title, receiver)
-    }
-}
-
-impl Provider for LoadingProvider {
-    fn title(&self) -> String {
-        self.title.clone()
-    }
-
-    fn items(&mut self, _query: &str, _env: &Env<'_>) -> Listing {
-        if self.received.is_none() {
-            self.received = match self.receiver.try_recv() {
-                Ok(received) => Some(received),
-                Err(mpsc::TryRecvError::Empty) => None,
-                Err(mpsc::TryRecvError::Disconnected) => {
-                    Some(Err("the loader stopped without an answer".to_owned()))
-                }
-            };
-        }
-        match &self.received {
-            None => Listing::loading(),
-            Some(Ok(items)) => Listing::ready(items.clone()),
-            Some(Err(error)) => Listing {
-                error: Some(error.clone()),
-                ..Listing::default()
-            },
-        }
     }
 }
 
@@ -535,6 +483,9 @@ pub(crate) struct Palette {
     sources: SourceProvider,
     /// Scroll to the selection next frame: it was moved by key.
     scroll_to_selected: bool,
+    /// Put the field's cursor at the end of its text next frame: the text
+    /// was set by the palette, not typed, so the cursor may be anywhere.
+    cursor_to_end: bool,
 }
 
 impl Palette {
@@ -551,6 +502,7 @@ impl Palette {
             PaletteMode::Open => String::new(),
         };
         self.selected_for = None;
+        self.cursor_to_end = true;
     }
 
     pub(crate) fn close(&mut self) {
@@ -563,6 +515,21 @@ impl Palette {
     /// Offers `source` first among the recent sources.
     pub(crate) fn remember(&mut self, source: &str) {
         self.sources.remember(source);
+    }
+
+    /// Lists `items`, each browsing into a data source, in open mode.
+    pub(crate) fn set_connectors(&mut self, items: Vec<PaletteItem>) {
+        self.sources.connectors = items;
+    }
+
+    /// Shows `provider`'s list above the current level, as choosing an item
+    /// that browses into it would.
+    pub(crate) fn browse(&mut self, provider: Box<dyn Provider>) {
+        self.open = true;
+        self.levels
+            .push((Level::Browse(provider), std::mem::take(&mut self.query)));
+        self.selected_for = None;
+        self.cursor_to_end = true;
     }
 
     /// Whether a sub-list or prompt is showing.
@@ -647,9 +614,16 @@ impl Palette {
             }
             ItemAction::Prompt(prompt) => Level::Prompt(prompt),
             ItemAction::Browse(Browse(make)) => Level::Browse(make()),
+            ItemAction::Local(action) => {
+                if let Some((Level::Browse(provider), _)) = self.levels.last_mut() {
+                    provider.act(action);
+                }
+                return None;
+            }
         };
         self.levels.push((level, std::mem::take(&mut self.query)));
         self.selected_for = None;
+        self.cursor_to_end = true;
         None
     }
 
@@ -659,6 +633,7 @@ impl Palette {
             Some((_, query)) => {
                 self.query = query;
                 self.selected_for = None;
+                self.cursor_to_end = true;
             }
             None => self.close(),
         }
@@ -769,13 +744,20 @@ impl Palette {
                         ui.label(egui::RichText::new(breadcrumb).color(colors.text_secondary));
                     }
                     let hint = self.hint();
-                    let field = ui.add(
-                        egui::TextEdit::singleline(&mut self.query)
-                            .id(egui::Id::new("command_palette_input"))
-                            .hint_text(hint)
-                            .desired_width(f32::INFINITY),
-                    );
-                    field.request_focus();
+                    let mut output = egui::TextEdit::singleline(&mut self.query)
+                        .id(egui::Id::new("command_palette_input"))
+                        .hint_text(hint)
+                        .desired_width(f32::INFINITY)
+                        .show(ui);
+                    if std::mem::take(&mut self.cursor_to_end) {
+                        let end = egui::text::CCursor::new(self.query.chars().count());
+                        output
+                            .state
+                            .cursor
+                            .set_char_range(Some(egui::text_selection::CCursorRange::one(end)));
+                        output.state.store(ui.ctx(), output.response.id);
+                    }
+                    output.response.request_focus();
 
                     // After the field, so the list follows what was just typed.
                     view = self.view(env);
@@ -1274,31 +1256,58 @@ mod tests {
         );
     }
 
-    #[test]
-    fn loading_provider_should_load_until_its_items_arrive() {
-        let (sender, receiver) = mpsc::channel();
-        let mut provider = LoadingProvider::new("Catalog", receiver);
-        let keymap = Keymap::default();
-        let env = env_with(&|_| true, &keymap);
-        assert!(provider.items("", &env).loading);
+    /// Counts the items it's asked to add, listing one item per request.
+    struct Growing(usize);
 
-        sender.send(Ok(vec![item("collection")])).unwrap();
-        let listing = provider.items("", &env);
-        assert!(!listing.loading);
-        assert_eq!(titles(&listing.items), ["collection"]);
-        // Kept once received.
-        drop(sender);
-        assert_eq!(provider.items("", &env).items.len(), 1);
+    impl Provider for Growing {
+        fn title(&self) -> String {
+            "Growing".to_owned()
+        }
+
+        fn items(&mut self, _query: &str, _env: &Env<'_>) -> Listing {
+            let mut items: Vec<_> = (0..self.0).map(|at| item(&at.to_string())).collect();
+            items.push(PaletteItem::new(
+                "Load more",
+                ItemAction::Local(LocalAction::LoadMore),
+            ));
+            Listing::ready(items)
+        }
+
+        fn act(&mut self, action: LocalAction) {
+            if action == LocalAction::LoadMore {
+                self.0 += 1;
+            }
+        }
     }
 
     #[test]
-    fn loading_provider_should_show_why_loading_failed() {
-        let (sender, receiver) = mpsc::channel();
-        let mut provider = LoadingProvider::new("Catalog", receiver);
-        sender.send(Err("403 Forbidden".to_owned())).unwrap();
-        let keymap = Keymap::default();
-        let listing = provider.items("", &env_with(&|_| true, &keymap));
-        assert_eq!(listing.error.as_deref(), Some("403 Forbidden"));
+    fn local_items_should_act_on_their_provider_and_stay_open() {
+        let mut palette = Palette::default();
+        palette.open(PaletteMode::Open);
+        palette.browse(Box::new(Growing(1)));
+        assert_eq!(palette.breadcrumb().as_deref(), Some("Growing"));
+        let view = type_text(&mut palette, "load");
+        palette.choose(view.items[0].clone());
+        assert!(palette.is_open());
+        assert_eq!(palette.query, "load", "the filter stays");
+        palette.query.clear();
+        assert_eq!(
+            titles(&view_of(&mut palette).items),
+            ["0", "1", "Load more"]
+        );
+    }
+
+    #[test]
+    fn open_mode_should_list_connectors_by_name() {
+        let mut palette = Palette::default();
+        palette.set_connectors(vec![
+            folder("Survey data", &["a.copc.laz"]).with_detail("Folder source"),
+        ]);
+        palette.open(PaletteMode::Open);
+        let view = type_text(&mut palette, "survey");
+        assert_eq!(titles(&view.items), ["Survey data"]);
+        assert_eq!(enter(&mut palette), None);
+        assert_eq!(palette.breadcrumb().as_deref(), Some("Survey data"));
     }
 
     #[test]

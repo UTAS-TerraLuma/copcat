@@ -1,0 +1,20 @@
+{
+  "type": "Feature",
+  "stac_version": "1.1.0",
+  "id": "site-a-20260414",
+  "geometry": null,
+  "properties": { "title": "Site A", "datetime": "2026-04-14T02:00:00Z" },
+  "links": [
+    { "rel": "root", "href": "../catalog.json" },
+    { "rel": "collection", "href": "../survey/collection.json" }
+  ],
+  "assets": {
+    "thumbnail": { "href": "./site-a-thumbnail.png", "type": "image/png", "roles": ["thumbnail"] },
+    "pointcloud": {
+      "href": "../../../fixture.copc.laz",
+      "type": "application/vnd.laszip+copc",
+      "title": "Classified point cloud",
+      "roles": ["data"]
+    }
+  }
+}

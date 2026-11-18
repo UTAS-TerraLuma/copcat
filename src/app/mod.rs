@@ -12,13 +12,17 @@
 //! - [`subcloud_tool`]: drawing a subcloud on the explore view.
 //! - [`export_ui`]: the Save image section and its job.
 //! - [`open_ui`]: the Open menu and the Open URL dialog.
+//! - [`connectors`]: data sources (STAC catalogs and folders) to browse to
+//!   clouds in, and [`feed`], their listings fetched in the background.
 //! - [`palette`]: the command palette (Ctrl+Shift+P) and quick open (Ctrl+P).
 //! - [`panels`]: the settings panel's sections and the status indicator.
 //! - [`user_config`]: the settings files applied, and the settings commands.
 
 mod camera_input;
 mod commands;
+mod connectors;
 mod export_ui;
+mod feed;
 mod open_ui;
 mod palette;
 mod panels;
@@ -46,6 +50,7 @@ use crate::subcloud::{self, Footprint, ShapeKind, Subcloud};
 use crate::theme::Theme;
 
 use commands::{Command, Keymap};
+use connectors::ConnectorHub;
 use export_ui::{ExportContext, ExportJob, ImageExport, export_ui};
 use palette::{Palette, PaletteMode};
 use panels::{
@@ -90,6 +95,10 @@ pub struct ViewerApp {
     url_dialog: Option<String>,
     /// The command palette, and the sources opened this session.
     palette: Palette,
+    /// Makes the data sources' listings, and keeps them for the session.
+    connector_hub: ConnectorHub,
+    /// The data sources, as of the last time the settings were read.
+    sources: Vec<connectors::DataSource>,
     /// The 3D view's size in physical pixels, as of the last frame with a
     /// cloud open.
     view_size_px: [u32; 2],
@@ -162,6 +171,8 @@ impl ViewerApp {
             pending: Vec::new(),
             url_dialog: None,
             palette: Palette::default(),
+            connector_hub: ConnectorHub::new(cc.egui_ctx.clone()),
+            sources: Vec::new(),
             view_size_px: [1, 1],
         };
         app.load_user_config(&cc.egui_ctx);
@@ -275,7 +286,7 @@ impl ViewerApp {
                 }
             });
             ui.separator();
-            open_ui::open_menu(ui, &self.keymap, &mut self.pending);
+            open_ui::open_menu(ui, &self.keymap, &self.sources, &mut self.pending);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 status_indicator(ui, &self.state);
             });
@@ -328,7 +339,8 @@ impl ViewerApp {
             | Command::ToggleDiagnostics
             | Command::Settings(_)
             | Command::ShowCommands
-            | Command::QuickOpen => true,
+            | Command::QuickOpen
+            | Command::Connector(_) => true,
             Command::SaveImage => is_open && !self.export.is_busy(),
             // There's nothing to return to until a subcloud has been drawn.
             Command::SetMode(Mode::Subcloud) => is_open && self.subcloud.is_some(),
@@ -400,6 +412,7 @@ impl ViewerApp {
             Command::Settings(command) => self.run_settings_command(ctx, command),
             Command::ShowCommands => self.palette.open(PaletteMode::Commands),
             Command::QuickOpen => self.palette.open(PaletteMode::Open),
+            Command::Connector(command) => self.run_connector_command(command),
         }
         // The change shows next frame.
         ctx.request_repaint();

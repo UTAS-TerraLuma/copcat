@@ -1,0 +1,19 @@
+{
+  "type": "Collection",
+  "id": "fixture-survey",
+  "stac_version": "1.1.0",
+  "title": "Fixture survey",
+  "description": "Three survey items: one with a point cloud, one with none, one with two.",
+  "license": "CC0-1.0",
+  "extent": {
+    "spatial": { "bbox": [[0, 0, 1, 1]] },
+    "temporal": { "interval": [["2026-01-01T00:00:00Z", null]] }
+  },
+  "links": [
+    { "rel": "root", "href": "../catalog.json", "type": "application/json" },
+    { "rel": "parent", "href": "../catalog.json", "type": "application/json" },
+    { "rel": "item", "href": "../site-a/site-a.json", "type": "application/geo+json" },
+    { "rel": "item", "href": "../site-b/site-b.json", "type": "application/geo+json" },
+    { "rel": "item", "href": "../site-c/site-c.json", "type": "application/geo+json" }
+  ]
+}
