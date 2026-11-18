@@ -17,6 +17,7 @@
   "links": [
     { "rel": "root", "href": "{{base}}/stac/api/" },
     { "rel": "self", "href": "{{base}}/stac/api/collections/fixture/items/page-2?limit=2", "method": "GET" },
-    { "rel": "prev", "href": "{{base}}/stac/api/collections/fixture/items?limit=2", "method": "GET" }
+    { "rel": "prev", "href": "{{base}}/stac/api/collections/fixture/items?limit=2", "method": "GET" },
+    { "rel": "next", "href": "{{base}}/stac/api/collections/fixture/items/page-3?limit=2", "method": "GET" }
   ]
 }

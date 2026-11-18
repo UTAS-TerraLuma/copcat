@@ -203,8 +203,21 @@ pub(crate) trait Provider: Send {
     /// should be cheap: poll background work, don't wait for it.
     fn items(&mut self, query: &str, env: &Env<'_>) -> Listing;
 
-    /// Does what one of this provider's [`ItemAction::Local`] items asks.
+    /// Does what one of this provider's [`ItemAction::Local`] items asks,
+    /// or the refresh button.
     fn act(&mut self, _action: LocalAction) {}
+
+    /// Whether the palette shows a refresh button for this list, which
+    /// calls [`Provider::act`] with [`LocalAction::Refresh`].
+    fn can_refresh(&self) -> bool {
+        false
+    }
+
+    /// While more items are still being fetched in the background, how many
+    /// have arrived.
+    fn fetching(&self) -> Option<usize> {
+        None
+    }
 }
 
 /// Every command, as listed in command mode.
@@ -546,6 +559,21 @@ impl Palette {
         })
     }
 
+    /// The sub-list showing, if one is.
+    fn browsing(&self) -> Option<&dyn Provider> {
+        match self.levels.last() {
+            Some((Level::Browse(provider), _)) => Some(provider.as_ref()),
+            _ => None,
+        }
+    }
+
+    /// Fetches the sub-list showing again, as its refresh button does.
+    pub(crate) fn refresh(&mut self) {
+        if let Some((Level::Browse(provider), _)) = self.levels.last_mut() {
+            provider.act(LocalAction::Refresh);
+        }
+    }
+
     /// The field's placeholder.
     pub(crate) fn hint(&self) -> String {
         match self.levels.last() {
@@ -733,6 +761,7 @@ impl Palette {
             .stroke(egui::Stroke::new(1.0, colors.strong_stroke))
             .shadow(theme.shape.popup_shadow);
         let mut clicked = None;
+        let mut refresh = false;
         let mut view = View::default();
         let area = egui::Area::new(egui::Id::new("command_palette"))
             .order(egui::Order::Foreground)
@@ -741,7 +770,7 @@ impl Palette {
                 frame.show(ui, |ui| {
                     ui.set_width(width);
                     if let Some(breadcrumb) = self.breadcrumb() {
-                        ui.label(egui::RichText::new(breadcrumb).color(colors.text_secondary));
+                        refresh = self.header_ui(ui, theme, breadcrumb);
                     }
                     let hint = self.hint();
                     let mut output = egui::TextEdit::singleline(&mut self.query)
@@ -788,6 +817,10 @@ impl Palette {
                     .interact_pos()
                     .is_some_and(|pos| !area.response.rect.contains(pos))
         });
+        if refresh {
+            self.refresh();
+            ctx.request_repaint();
+        }
         let chosen = clicked.or(self.selected.filter(|_| keys.enter));
         let command = match chosen {
             Some(at) if at < view.items.len() => self.choose(view.items.swap_remove(at)),
@@ -803,12 +836,56 @@ impl Palette {
         command
     }
 
+    /// The line above the field: where the palette has browsed to, and for a
+    /// list fetched in the background, how far it's got and a refresh
+    /// button. Returns whether the button was clicked.
+    fn header_ui(&self, ui: &mut egui::Ui, theme: &Theme, breadcrumb: String) -> bool {
+        let colors = &theme.colors;
+        let provider = self.browsing();
+        let can_refresh = provider.is_some_and(|provider| provider.can_refresh());
+        let fetched = provider
+            .and_then(|provider| provider.fetching())
+            .filter(|&count| count > 0);
+        let label = ui.label(egui::RichText::new(breadcrumb).color(colors.text_secondary));
+        if !can_refresh && fetched.is_none() {
+            return false;
+        }
+        // On the label's line, at the right, without making it taller.
+        let line = egui::Rect::from_x_y_ranges(ui.max_rect().x_range(), label.rect.y_range());
+        let mut right = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(line)
+                .layout(egui::Layout::right_to_left(egui::Align::Center)),
+        );
+        let small = |text: &str| {
+            egui::RichText::new(text)
+                .small()
+                .color(colors.text_secondary)
+        };
+        let mut clicked = false;
+        if can_refresh {
+            let button = egui::Button::new(small("Refresh")).frame(false).small();
+            clicked = right
+                .add(button)
+                .on_hover_text("Fetch this list again")
+                .clicked();
+        }
+        if let Some(count) = fetched {
+            right.label(small(&format!("Loading… {count} so far")));
+            let size = right.text_style_height(&egui::TextStyle::Small);
+            right.add(egui::Spinner::new().size(size));
+        }
+        clicked
+    }
+
     /// The rows, returning the one clicked.
     fn list_ui(&mut self, ui: &mut egui::Ui, theme: &Theme, view: &View) -> Option<usize> {
         let colors = &theme.colors;
         let mut clicked = None;
         let scroll_to_selected = std::mem::take(&mut self.scroll_to_selected);
-        if view.loading {
+        // Once some items are in, the header says more are coming, so the
+        // rows don't move down for a spinner here.
+        if view.loading && view.items.is_empty() {
             ui.horizontal(|ui| {
                 ui.spinner();
                 ui.label(egui::RichText::new("Loading…").color(colors.text_secondary));

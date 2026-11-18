@@ -1,0 +1,23 @@
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "stac_version": "1.0.0",
+      "id": "flight-4",
+      "collection": "fixture-flights",
+      "geometry": null,
+      "properties": { "datetime": "2026-04-23T02:00:00+00:00", "title": "Late flight" },
+      "links": [{ "rel": "self", "href": "{{base}}/stac/api/collections/fixture/items/flight-4" }],
+      "assets": {
+        "thumbnail": { "href": "{{base}}/stac/static/site-a/site-a-thumbnail.png", "type": "image/png", "roles": ["thumbnail"] },
+        "pointcloud": { "href": "{{base}}/fixture.copc.laz", "type": "application/vnd.laszip+copc", "title": "Point cloud flight-4" }
+      }
+    }
+  ],
+  "links": [
+    { "rel": "root", "href": "{{base}}/stac/api/" },
+    { "rel": "self", "href": "{{base}}/stac/api/collections/fixture/items/page-3?limit=2", "method": "GET" },
+    { "rel": "prev", "href": "{{base}}/stac/api/collections/fixture/items/page-2?limit=2", "method": "GET" }
+  ]
+}

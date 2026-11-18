@@ -90,23 +90,56 @@ fn a_stac_api_should_page_through_items_on_request() {
         [Href::Openable(server.url("fixture.copc.laz"))]
     );
     // The first page was asked for with a limit; the next isn't fetched
-    // until asked for.
+    // until asked for (the viewer asks by itself, up to a limit).
     let items_requests: Vec<_> = server
         .requests()
         .into_iter()
         .filter(|request| request.path.contains("/items"))
         .collect();
     assert_eq!(items_requests.len(), 1, "{items_requests:?}");
-    assert_eq!(items_requests[0].query.as_deref(), Some("limit=50"));
+    assert_eq!(items_requests[0].query.as_deref(), Some("limit=250"));
 
     let more = flights.more.as_ref().expect("a next page");
     let page_2 = client.more(more).unwrap();
     assert_eq!(titles(&page_2), ["flight-3"]);
-    assert_eq!(page_2.more, None);
+    let page_3 = client
+        .more(page_2.more.as_ref().expect("a third page"))
+        .unwrap();
+    assert_eq!(titles(&page_3), ["Late flight"]);
+    assert_eq!(page_3.more, None);
 
     let info = client.describe(&server.url("stac/api/")).unwrap();
     assert_eq!(info.title.as_deref(), Some("Fixture STAC API"));
     assert!(info.is_api);
+}
+
+#[test]
+fn following_more_should_list_a_whole_api_collection_once() {
+    let server = FileServer::serve(common::data_dir());
+    let client = Client::new();
+    let root = client.browse_root(&server.url("stac/api/")).unwrap();
+    let mut page = client.browse(&node_url(&root, "Fixture flights")).unwrap();
+    let mut listed = titles(&page);
+    while let Some(more) = page.more.take() {
+        page = client.more(&more).unwrap();
+        listed.extend(titles(&page));
+    }
+    assert_eq!(listed, ["flight-1", "flight-2", "flight-3", "Late flight"]);
+    // Each page once, following the next links as given.
+    let queries: Vec<_> = server
+        .requests()
+        .into_iter()
+        .filter(|request| request.path.contains("/items"))
+        .map(|request| format!("{}?{}", request.path, request.query.unwrap_or_default()))
+        .collect();
+    assert_eq!(
+        queries,
+        [
+            "/stac/api/collections/fixture/items?limit=250",
+            "/stac/api/collections/fixture/items/page-2?limit=2",
+            "/stac/api/collections/fixture/items/page-3?limit=2",
+        ]
+    );
 }
 
 #[test]

@@ -14,9 +14,10 @@
 //!
 //! Either way, browsing a URL gives a [`Page`] of [`Entry`]s: nodes to
 //! browse into (catalogs, collections), items with their assets, and items
-//! that couldn't be read. A page may have [`More`], fetched only when asked:
-//! the next page of an API's items, or the next batch of a static catalog's
-//! item files.
+//! that couldn't be read. A page may have [`More`], fetched with
+//! [`Client::more`]: the next page of an API's items, or the next batch of a
+//! static catalog's item files. (The viewer fetches those by itself up to a
+//! limit; see `app::feed`.)
 
 mod client;
 mod parse;

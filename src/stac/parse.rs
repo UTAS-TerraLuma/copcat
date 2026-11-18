@@ -428,7 +428,7 @@ mod tests {
             [
                 (
                     "Lidar surveys",
-                    "https://example.com/collections/lidar/items?limit=50"
+                    "https://example.com/collections/lidar/items?limit=250"
                 ),
                 ("bare", "https://example.com/collections/bare"),
             ]

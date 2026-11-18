@@ -284,11 +284,20 @@ fn a_static_stac_catalog_should_browse_down_to_a_cloud_and_open_it() {
     harness.snapshot("connector_static_stac_fixture");
 }
 
+/// How many times the server was asked for the fixture API's first page.
+fn first_page_requests(server: &FileServer) -> usize {
+    server
+        .requests()
+        .iter()
+        .filter(|request| request.path == "/stac/api/collections/fixture/items")
+        .count()
+}
+
 #[test]
-fn a_stac_api_should_page_on_request_and_open_a_cloud() {
+fn a_stac_api_should_list_every_page_by_itself_and_open_a_cloud() {
     let Some(_gpu) = lock_gpu() else { return };
     let server = FileServer::serve(common::data_dir());
-    let scratch = common::scratch_dir("a_stac_api_should_page_on_request");
+    let scratch = common::scratch_dir("a_stac_api_should_list_every_page");
     let user_dir = user_settings(
         &scratch,
         serde_json::json!({ "stac": [{ "name": "Fixture API", "url": server.url("stac/api/") }] }),
@@ -300,20 +309,38 @@ fn a_stac_api_should_page_on_request_and_open_a_cloud() {
     enter(&mut harness);
     wait_for_row(&mut harness, &woken, "Fixture flights");
     enter(&mut harness);
-    wait_for_row(&mut harness, &woken, "flight-2");
+    // All three pages, without choosing "Load more…".
+    wait_for_row(&mut harness, &woken, "Late flight");
     assert_eq!(
         row_enabled(&harness, "flight-1"),
         Some(false),
         "no point cloud"
     );
-    assert_eq!(row_enabled(&harness, "flight-3"), None, "on the next page");
+    for title in ["flight-2", "flight-3"] {
+        assert_eq!(row_enabled(&harness, title), Some(true), "{title}");
+    }
+    assert_eq!(row_enabled(&harness, "Load more…"), None, "nothing left");
 
-    // flight-2 is selected; the row after it fetches the next page.
-    press(&mut harness, Modifiers::NONE, Key::ArrowDown);
-    enter(&mut harness);
-    wait_for_row(&mut harness, &woken, "flight-3");
-    assert_eq!(row_enabled(&harness, "Load more…"), None, "the last page");
-    type_text(&mut harness, "flight-3");
+    // The refresh button is on the breadcrumb line, above the field, not a
+    // row below it; it fetches it all again.
+    let field = harness
+        .query_all_by_role(Role::TextInput)
+        .find(|node| node.is_focused())
+        .expect("the palette's field")
+        .rect();
+    let refresh = harness.get_by_label("Refresh").rect();
+    let breadcrumb = harness.get_by_label("Fixture flights").rect();
+    assert!(refresh.bottom() <= field.top(), "{refresh:?} {field:?}");
+    assert!(refresh.center().y > breadcrumb.top() && refresh.center().y < breadcrumb.bottom());
+    assert_eq!(first_page_requests(&server), 1);
+    harness.get_by_label("Refresh").click();
+    harness.run_ok();
+    wait_for_row(&mut harness, &woken, "Late flight");
+    assert_eq!(first_page_requests(&server), 2);
+
+    // Filtering finds an item from the last page.
+    type_text(&mut harness, "late");
+    assert_eq!(row_enabled(&harness, "flight-2"), None);
     enter(&mut harness);
 
     wait_until_drawn(&mut harness, &woken);

@@ -9,8 +9,10 @@ use url::Url;
 use super::parse::{self, Parsed};
 use super::{Entry, More, Page, SourceInfo, StacError};
 
-/// How many items an API is asked for per page.
-pub const PAGE_LIMIT: usize = 50;
+/// How many items an API is asked for per page: big pages, as the viewer
+/// fetches a small catalog's every page anyway. An API with a lower maximum
+/// sends fewer, with a `next` link for the rest.
+pub const PAGE_LIMIT: usize = 250;
 /// How many of a static catalog's item files are fetched per batch.
 pub const ITEM_BATCH: usize = 24;
 /// How many item files are fetched at once.

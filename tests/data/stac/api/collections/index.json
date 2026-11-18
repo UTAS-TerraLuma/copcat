@@ -4,7 +4,7 @@
       "type": "Collection",
       "id": "fixture-flights",
       "title": "Fixture flights",
-      "description": "Three flights over two pages.",
+      "description": "Four flights over three pages.",
       "stac_version": "1.0.0",
       "license": "CC0-1.0",
       "extent": {
