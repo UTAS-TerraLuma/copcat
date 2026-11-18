@@ -150,8 +150,16 @@ fn assert_matches_golden(name: &str, actual: &Rgb) {
         "golden {name} is a different size"
     );
 
-    let (want, got) = (downsample(&golden), downsample(actual));
+    // The clear colour is the same on every GPU, so it must match closely:
+    // a block tolerance would let a changed background through.
     let clear = background(&golden);
+    let actual_clear = background(actual);
+    assert!(
+        (0..3).all(|c| clear[c].abs_diff(actual_clear[c]) <= 2),
+        "{name}: background is {actual_clear:?}, golden has {clear:?}"
+    );
+
+    let (want, got) = (downsample(&golden), downsample(actual));
     let drawn_blocks = want
         .iter()
         .zip(&got)

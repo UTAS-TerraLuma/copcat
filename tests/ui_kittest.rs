@@ -113,8 +113,13 @@ fn viewer_should_load_the_fixture_and_draw_it() {
         Some("100.0 × 60.0 × 25.0")
     );
     // Drive the UI through AccessKit: colour by class, then look straight down.
-    harness.get_by_label("Class").click();
-    harness.get_by_label("Top").click();
+    // The settings panel scrolls, so bring each control into view first.
+    for label in ["Class", "Top"] {
+        harness.get_by_label(label).scroll_to_me();
+        harness.run_ok();
+        harness.get_by_label(label).click();
+        harness.run_ok();
+    }
     harness.remove_cursor();
     harness.run_ok();
     assert_eq!(
