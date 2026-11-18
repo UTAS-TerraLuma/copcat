@@ -117,6 +117,9 @@ impl ViewArea {
     pub(crate) fn allocate(ui: &mut egui::Ui) -> Self {
         let (rect, response) =
             ui.allocate_exact_size(ui.available_size(), egui::Sense::click_and_drag());
+        // Named for screen readers and UI tests.
+        response
+            .widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Other, true, "3D view"));
         let pixels_per_point = ui.ctx().pixels_per_point();
         Self {
             rect,

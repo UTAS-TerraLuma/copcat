@@ -4,7 +4,11 @@ use eframe::egui;
 
 use crate::camera::{OrbitCamera, Projection, ViewPreset};
 
-pub(crate) fn view_ui(ui: &mut egui::Ui, camera: &mut OrbitCamera) {
+use crate::app::commands::Command;
+
+/// The View section, for `camera`, the 3D view's. Its buttons ask for
+/// commands.
+pub(crate) fn view_ui(ui: &mut egui::Ui, camera: &mut OrbitCamera, commands: &mut Vec<Command>) {
     ui.horizontal_wrapped(|ui| {
         ui.label("Projection:");
         // Not `radio_value`: the camera needs to hear about the click, even on
@@ -14,7 +18,7 @@ pub(crate) fn view_ui(ui: &mut egui::Ui, camera: &mut OrbitCamera) {
             (Projection::Orthographic, "Orthographic"),
         ] {
             if ui.radio(camera.projection() == projection, label).clicked() {
-                camera.set_projection(projection);
+                commands.push(Command::SetProjection(projection));
             }
         }
     });
@@ -31,8 +35,18 @@ pub(crate) fn view_ui(ui: &mut egui::Ui, camera: &mut OrbitCamera) {
                 .on_hover_text(preset.description(camera.axes))
                 .clicked()
             {
-                camera.set_view(preset);
+                commands.push(Command::SetView(preset));
             }
+        }
+        if ui
+            .button("Reset")
+            .on_hover_text(
+                "Look at the whole cloud again, or side-on at the subcloud (or double-click \
+                 the view)",
+            )
+            .clicked()
+        {
+            commands.push(Command::ResetView);
         }
     });
 }

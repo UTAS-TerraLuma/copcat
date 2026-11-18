@@ -81,7 +81,7 @@ impl SubcloudMode {
              forward."
         );
         ui.horizontal(|ui| {
-            ui.label("Step");
+            let label = ui.label("Step");
             ui.add(
                 egui::DragValue::new(&mut self.sweep_step_percent)
                     .range(1.0..=500.0)
@@ -89,6 +89,7 @@ impl SubcloudMode {
                     .max_decimals(0)
                     .suffix(" %"),
             )
+            .labelled_by(label.id)
             .on_hover_text(
                 "How far one Ctrl+scroll notch slides the subcloud, as a percentage of \
                  its size that way: its width (or diameter, or side) forward and back, \
@@ -145,24 +146,28 @@ impl SubcloudMode {
         ui.horizontal(|ui| {
             match self.subcloud.shape {
                 ShapeKind::Line => {
-                    ui.label("Width");
-                    ui.add(size(&mut self.subcloud.line.width));
+                    let label = ui.label("Width");
+                    ui.add(size(&mut self.subcloud.line.width))
+                        .labelled_by(label.id);
                 }
                 ShapeKind::Circle => {
-                    ui.label("Radius");
-                    ui.add(size(&mut self.subcloud.circle.radius));
+                    let label = ui.label("Radius");
+                    ui.add(size(&mut self.subcloud.circle.radius))
+                        .labelled_by(label.id);
                 }
                 ShapeKind::Square => {
-                    ui.label("Side");
-                    ui.add(size(&mut self.subcloud.square.side));
+                    let label = ui.label("Side");
+                    ui.add(size(&mut self.subcloud.square.side))
+                        .labelled_by(label.id);
                 }
             }
-            ui.label("Rotation");
+            let label = ui.label("Rotation");
             // A copy, because a line stores its rotation in its ends. Shown
             // in degrees, stored in radians, and kept in 0..360°.
             let mut rotation = self.subcloud.rotation().rem_euclid(std::f32::consts::TAU);
             if ui
                 .drag_angle(&mut rotation)
+                .labelled_by(label.id)
                 .on_hover_text(
                     "Anticlockwise turn. At 0° the round handle (forward) points north, \
                      and a line runs from A in the west to B in the east.",

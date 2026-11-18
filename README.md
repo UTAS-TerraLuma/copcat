@@ -44,7 +44,8 @@ copcat open path/to/cloud.copc.laz
 copcat open https://example.com/cloud.copc.laz
 ```
 
-You can also start `copcat-viewer` on its own and paste a path or URL into it.
+You can also start `copcat-viewer` on its own and use **Open…** in its toolbar to
+choose a file (Ctrl+O) or type a URL (Ctrl+L).
 
 ## Elevation and height above ground
 

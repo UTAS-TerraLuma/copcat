@@ -1,16 +1,9 @@
-//! Mouse and keyboard control of a 3D view's camera.
+//! Mouse control of a 3D view's camera. Keyboard shortcuts are commands,
+//! in [`commands`](super::commands).
 
 use eframe::egui;
 
-use crate::camera::{OrbitCamera, ViewPreset};
-
-/// Numpad-style view keys, as in Blender: `(key, view, view with Ctrl)`.
-const VIEW_SHORTCUTS: [(egui::Key, ViewPreset, ViewPreset); 3] = [
-    (egui::Key::Num7, ViewPreset::Top, ViewPreset::Bottom),
-    (egui::Key::Num1, ViewPreset::Front, ViewPreset::Back),
-    (egui::Key::Num3, ViewPreset::Right, ViewPreset::Left),
-];
-const PROJECTION_SHORTCUT: egui::Key = egui::Key::Num5;
+use crate::camera::OrbitCamera;
 
 /// Input over a 3D view that the caller acts on, beyond moving the camera.
 pub(crate) struct ViewInput {
@@ -25,7 +18,7 @@ pub(crate) struct ViewInput {
     pub(crate) sideways: bool,
 }
 
-/// Mouse and keyboard control of a 3D view's camera.
+/// Mouse control of a 3D view's camera.
 pub(crate) fn camera_controls(
     ui: &egui::Ui,
     response: &egui::Response,
@@ -53,23 +46,6 @@ pub(crate) fn camera_controls(
         // egui turned these pixels into a zoom factor of exp(px × speed).
         let zoom_speed = ui.ctx().options(|o| o.input_options.scroll_zoom_speed);
         input.pinch_px = zoom_delta.ln() / zoom_speed;
-    }
-
-    // Digits typed into text fields aren't shortcuts.
-    if !ui.ctx().text_edit_focused() {
-        ui.input_mut(|input| {
-            for (key, preset, opposite) in VIEW_SHORTCUTS {
-                // Ctrl first: a plain-key check would also match Ctrl+key.
-                if input.consume_key(egui::Modifiers::COMMAND, key) {
-                    camera.set_view(opposite);
-                } else if input.consume_key(egui::Modifiers::NONE, key) {
-                    camera.set_view(preset);
-                }
-            }
-            if input.consume_key(egui::Modifiers::NONE, PROJECTION_SHORTCUT) {
-                camera.set_projection(camera.projection().toggled());
-            }
-        });
     }
     input
 }

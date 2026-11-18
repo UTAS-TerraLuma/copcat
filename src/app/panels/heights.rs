@@ -47,14 +47,14 @@ pub(crate) fn heights_ui(
                 .num_columns(2)
                 .show(ui, |ui| {
                     for kind in HeightKind::ALL {
-                        ui.weak(kind.label());
+                        let label = ui.weak(kind.label());
                         // What it's set to, then where it was read from this
                         // time.
                         ui.horizontal_wrapped(|ui| {
                             let setting = draft.get_mut(kind);
                             // Narrower than usual if that's all there's room for.
                             let width = ui.available_width().min(ui.spacing().combo_width);
-                            egui::ComboBox::from_id_salt(("height_source", kind))
+                            let combo = egui::ComboBox::from_id_salt(("height_source", kind))
                                 .selected_text(setting_label(setting))
                                 .width(width)
                                 .show_ui(ui, |ui| {
@@ -72,6 +72,7 @@ pub(crate) fn heights_ui(
                                         ui.selectable_value(setting, option, label);
                                     }
                                 });
+                            let _ = combo.response.labelled_by(label.id);
                             let now = match &info.heights[kind] {
                                 Some(source) => format!("now {source}"),
                                 None => "now missing".to_owned(),

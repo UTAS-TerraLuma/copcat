@@ -1,26 +1,43 @@
-//! The display settings: colour, point size, eye-dome lighting and level of
-//! detail, plus the debug bounds.
+//! How points look: colour, point size and eye-dome lighting, and the
+//! Performance section's level of detail settings.
 
 use eframe::egui;
 
 use crate::classification;
 use crate::format::format_count;
+use crate::lod::LodSettings;
 
 use super::widgets::{fitted_slider, legend_color, settings_grid, text_width};
-use crate::app::session::{FAILED_COLOR, FETCHING_COLOR, LOADED_COLOR, QUEUED_COLOR, Session};
-use crate::app::settings::{ColorMode, DiagnosticsSettings, ViewSettings};
+use crate::app::commands::Command;
+use crate::app::session::Session;
+use crate::app::settings::{ColorMode, ViewSettings};
 
-pub(crate) fn settings_ui(
+/// The width of the widest label, so grids given it line their controls up.
+fn label_width(ui: &egui::Ui, labels: &[&str]) -> f32 {
+    labels
+        .iter()
+        .map(|label| text_width(ui, *label, egui::TextStyle::Body))
+        .fold(0.0, f32::max)
+}
+
+/// A settings row: `label` in secondary text, then a slider labelled by it.
+fn slider_row(ui: &mut egui::Ui, label: &str, slider: egui::Slider<'_>) -> egui::Response {
+    let label = ui.weak(label);
+    let slider = fitted_slider(ui, slider).labelled_by(label.id);
+    ui.end_row();
+    slider
+}
+
+/// The Display section. Colour mode and eye-dome lighting ask for commands;
+/// the sliders change `settings` directly.
+pub(crate) fn display_ui(
     ui: &mut egui::Ui,
     settings: &mut ViewSettings,
-    diagnostics: &mut DiagnosticsSettings,
     session: &Session,
+    commands: &mut Vec<Command>,
 ) {
     // One label column for every grid here, so their controls line up.
-    let label_width = ["Colour", "Point size", "Point budget", "Spacing (px)"]
-        .map(|label| text_width(ui, label, egui::TextStyle::Body))
-        .into_iter()
-        .fold(0.0, f32::max);
+    let label_width = label_width(ui, &["Colour", "Point size"]);
 
     settings_grid(ui, "display_settings", label_width, |ui| {
         ui.weak("Colour");
@@ -28,8 +45,12 @@ pub(crate) fn settings_ui(
             for mode in ColorMode::ALL {
                 let available = mode != ColorMode::Rgb || session.info.has_rgb;
                 ui.add_enabled_ui(available, |ui| {
-                    ui.radio_value(&mut settings.color_mode, mode, mode.label())
+                    let radio = ui
+                        .radio(settings.color_mode == mode, mode.label())
                         .on_disabled_hover_text("This file has no colour");
+                    if radio.clicked() {
+                        commands.push(Command::SetColorMode(mode));
+                    }
                 });
             }
         });
@@ -39,73 +60,72 @@ pub(crate) fn settings_ui(
         class_legend_ui(ui, &session.classes_seen);
     }
     settings_grid(ui, "point_settings", label_width, |ui| {
-        ui.weak("Point size");
-        fitted_slider(ui, egui::Slider::new(&mut settings.point_size, 1.0..=10.0));
-        ui.end_row();
+        slider_row(
+            ui,
+            "Point size",
+            egui::Slider::new(&mut settings.point_size, 1.0..=10.0),
+        );
     });
 
-    ui.checkbox(&mut settings.edl_enabled, "Eye-dome lighting")
-        .on_hover_text("Shades points by how much nearer their neighbours are, to show depth.");
+    let mut edl_enabled = settings.edl_enabled;
+    if ui
+        .checkbox(&mut edl_enabled, "Eye-dome lighting")
+        .on_hover_text("Shades points by how much nearer their neighbours are, to show depth.")
+        .changed()
+    {
+        commands.push(Command::ToggleEdl);
+    }
     if settings.edl_enabled {
         // Narrower by the indent, so these sliders line up with the others.
         let indented_width = label_width - ui.spacing().indent;
         ui.indent("edl_options", |ui| {
             settings_grid(ui, "edl_settings", indented_width, |ui| {
-                ui.weak("Strength");
-                fitted_slider(ui, egui::Slider::new(&mut settings.edl.strength, 0.1..=5.0));
-                ui.end_row();
-                ui.weak("Radius (px)");
-                fitted_slider(
+                slider_row(
                     ui,
+                    "Strength",
+                    egui::Slider::new(&mut settings.edl.strength, 0.1..=5.0),
+                );
+                slider_row(
+                    ui,
+                    "Radius (px)",
                     egui::Slider::new(&mut settings.edl.radius_px, 1.0..=4.0),
                 );
-                ui.end_row();
-            });
-        });
-    }
-
-    ui.separator();
-    settings_grid(ui, "lod_settings", label_width, |ui| {
-        ui.weak("Point budget");
-        fitted_slider(
-            ui,
-            egui::Slider::new(&mut settings.lod.point_budget, 500_000..=30_000_000)
-                .logarithmic(true)
-                .custom_formatter(|value, _| format_count(value as u64)),
-        );
-        ui.end_row();
-        let spacing_hint = "The target spacing: nodes are refined until their points are at \
-                            most this far apart on screen. Lower means more detail, up to the \
-                            point budget.";
-        ui.weak("Spacing (px)").on_hover_text(spacing_hint);
-        fitted_slider(
-            ui,
-            egui::Slider::new(&mut settings.lod.target_spacing_px, 0.5..=20.0).logarithmic(true),
-        )
-        .on_hover_text(spacing_hint);
-        ui.end_row();
-    });
-
-    ui.checkbox(&mut diagnostics.show_bounds, "Show node bounds");
-    if diagnostics.show_bounds {
-        ui.indent("bounds_options", |ui| {
-            ui.checkbox(&mut diagnostics.show_loaded_bounds, "Include loaded nodes");
-            ui.horizontal_wrapped(|ui| {
-                for (label, color) in [
-                    ("downloading", FETCHING_COLOR),
-                    ("queued", QUEUED_COLOR),
-                    ("loaded", LOADED_COLOR),
-                    ("failed", FAILED_COLOR),
-                ] {
-                    ui.colored_label(legend_color(color), format!("■ {label}"));
-                }
             });
         });
     }
 }
 
+/// The Performance section, collapsed at first: how many points to draw and
+/// how much detail to load.
+pub(crate) fn performance_ui(ui: &mut egui::Ui, lod: &mut LodSettings) {
+    egui::CollapsingHeader::new("Performance")
+        .id_salt("performance")
+        .show(ui, |ui| {
+            let label_width = label_width(ui, &["Point budget", "Spacing (px)"]);
+            settings_grid(ui, "lod_settings", label_width, |ui| {
+                slider_row(
+                    ui,
+                    "Point budget",
+                    egui::Slider::new(&mut lod.point_budget, 500_000..=30_000_000)
+                        .logarithmic(true)
+                        .custom_formatter(|value, _| format_count(value as u64)),
+                )
+                .on_hover_text("The most points to draw at once");
+                let spacing_hint = "The target spacing: nodes are refined until their points \
+                                    are at most this far apart on screen. Lower means more \
+                                    detail, up to the point budget.";
+                slider_row(
+                    ui,
+                    "Spacing (px)",
+                    egui::Slider::new(&mut lod.target_spacing_px, 0.5..=20.0).logarithmic(true),
+                )
+                .on_hover_text(spacing_hint);
+            });
+        });
+}
+
 /// A swatch and name for each class seen so far.
-pub(crate) fn class_legend_ui(ui: &mut egui::Ui, classes_seen: &[bool; 256]) {
+fn class_legend_ui(ui: &mut egui::Ui, classes_seen: &[bool; 256]) {
     ui.indent("class_legend", |ui| {
         for class in (0..=u8::MAX).filter(|&class| classes_seen[usize::from(class)]) {
             let [r, g, b] = classification::color(class);

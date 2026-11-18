@@ -116,6 +116,9 @@ impl SubcloudMap {
     /// Lays out the map in the rest of `ui` and handles its input.
     pub fn show(&mut self, ui: &mut egui::Ui, subcloud: &mut Subcloud) -> MapFrame {
         let (rect, response) = ui.allocate_exact_size(ui.available_size(), Sense::click_and_drag());
+        response.widget_info(|| {
+            egui::WidgetInfo::labeled(egui::WidgetType::Other, true, "Subcloud map")
+        });
         if self.needs_fit || response.double_clicked() {
             self.fit(rect.aspect_ratio());
         }

@@ -13,10 +13,11 @@ use crate::heights::HeightSettings;
 use crate::lod;
 use crate::subcloud::Footprint;
 
+use super::commands::{Command, Keymap};
 use super::scene::point_style;
 use super::session::Session;
 use super::settings::{ColorMode, ExportSettings, ViewSettings};
-use super::{LoadState, ViewerApp};
+use super::{LoadState, Mode, ViewerApp};
 
 /// The image being saved. Its size is in [`ExportSettings`].
 #[derive(Default)]
@@ -28,6 +29,13 @@ pub(crate) struct ImageExport {
     pub(crate) writing: Option<JoinHandle<Result<PathBuf, String>>>,
     /// What the last click did, to show under the buttons.
     pub(crate) status: Option<Result<String, String>>,
+}
+
+impl ImageExport {
+    /// Waiting for detail, or writing the PNG: another can't start yet.
+    pub(crate) fn is_busy(&self) -> bool {
+        self.job.is_some() || self.writing.is_some()
+    }
 }
 
 /// An image to render once the detail for it has loaded. The view is copied
@@ -52,13 +60,64 @@ impl ExportJob {
     }
 }
 
-/// A button clicked in the Save image section.
-pub(crate) enum ExportAction {
-    Save,
-    CopyCommand,
-}
-
 impl ViewerApp {
+    /// Asks where to save the 3D view as a PNG, then waits for its detail to
+    /// load. Blocks until the dialog closes, which is fine: nothing else can
+    /// be clicked meanwhile anyway.
+    pub(crate) fn save_image(&mut self, ctx: &egui::Context) {
+        if !matches!(self.state, LoadState::Open(_)) {
+            return;
+        }
+        let path = rfd::FileDialog::new()
+            .add_filter("PNG image", &["png"])
+            .set_file_name("copcat.png")
+            .save_file();
+        let Some(mut path) = path else { return };
+        if path.extension().is_none() {
+            path.set_extension("png");
+        }
+        let size = self.settings.export.size;
+        let view_size_px = self.view_size_px;
+        let clip = self.clip();
+        let camera = framed_camera(self.active_camera(), view_size_px, size);
+        self.export.job = Some(ExportJob {
+            path,
+            size,
+            camera,
+            clip,
+            pixels_per_point: ctx.pixels_per_point(),
+        });
+        self.export.status = None;
+    }
+
+    /// Copies a `copcat render` command for the 3D view to the clipboard.
+    pub(crate) fn copy_render_command(&mut self, ctx: &egui::Context) {
+        let size = self.settings.export.size;
+        let view_size_px = self.view_size_px;
+        let camera = framed_camera(self.active_camera(), view_size_px, size);
+        let LoadState::Open(session) = &self.state else {
+            return;
+        };
+        let args = render_args(
+            session,
+            &self.settings.view,
+            &self.heights,
+            &camera,
+            size,
+            ctx.pixels_per_point(),
+        );
+        ctx.copy_text(args.command_line());
+        self.export.status = Some(Ok("Copied a copcat render command".to_owned()));
+    }
+
+    /// The subcloud's outline, in Subcloud mode.
+    fn clip(&self) -> Option<Footprint> {
+        match (self.mode, &self.subcloud) {
+            (Mode::Subcloud, Some(subcloud_mode)) => Some(subcloud_mode.subcloud.footprint()),
+            _ => None,
+        }
+    }
+
     /// Renders the image being saved once its nodes have loaded, and
     /// reports when the PNG has been written.
     pub(crate) fn finish_export(&mut self, ctx: &egui::Context) {
@@ -118,23 +177,26 @@ pub(crate) struct ExportContext {
     pub(crate) in_subcloud: bool,
 }
 
-/// The Save image section. Returns the button clicked, if any.
+/// The Save image section. Its buttons ask for commands.
 pub(crate) fn export_ui(
     ui: &mut egui::Ui,
-    export: &mut ImageExport,
+    export: &ImageExport,
     settings: &mut ExportSettings,
     context: ExportContext,
-) -> Option<ExportAction> {
+    keymap: &Keymap,
+    commands: &mut Vec<Command>,
+) {
     ui.strong("Save image");
     ui.horizontal_wrapped(|ui| {
-        ui.label("Size");
         ui.add_enabled_ui(!settings.match_view, |ui| {
-            for side in &mut settings.size {
+            for (side, label) in settings.size.iter_mut().zip(["Width", "Height"]) {
+                let label = ui.weak(label);
                 ui.add(
                     egui::DragValue::new(side)
                         .range(1..=context.max_size)
                         .suffix(" px"),
-                );
+                )
+                .labelled_by(label.id);
             }
         });
         ui.checkbox(&mut settings.match_view, "Match view")
@@ -145,17 +207,19 @@ pub(crate) fn export_ui(
             );
     });
 
-    let busy = export.job.is_some() || export.writing.is_some();
-    let mut action = None;
     ui.horizontal_wrapped(|ui| {
+        let save_hint = with_shortcut(
+            ui,
+            keymap,
+            &Command::SaveImage,
+            "Render the 3D view at this size, once the detail for it has loaded. A \
+             bigger image than the view gets more detail, not stretched pixels.",
+        );
         let save = ui
-            .add_enabled(!busy, egui::Button::new("Save PNG…"))
-            .on_hover_text(
-                "Render the 3D view at this size, once the detail for it has loaded. A \
-                 bigger image than the view gets more detail, not stretched pixels.",
-            );
+            .add_enabled(!export.is_busy(), egui::Button::new("Save PNG…"))
+            .on_hover_text(save_hint);
         if save.clicked() {
-            action = Some(ExportAction::Save);
+            commands.push(Command::SaveImage);
         }
         let copy_hint = if context.in_subcloud {
             "Copy a command that renders this view from the command line. It shows the \
@@ -168,7 +232,7 @@ pub(crate) fn export_ui(
             .on_hover_text(copy_hint)
             .clicked()
         {
-            action = Some(ExportAction::CopyCommand);
+            commands.push(Command::CopyCommandLine);
         }
     });
 
@@ -177,7 +241,7 @@ pub(crate) fn export_ui(
             ui.spinner();
             ui.add(egui::Label::new(format!("Loading detail: {done} of {total} nodes")).wrap());
         });
-    } else if export.job.is_some() || export.writing.is_some() {
+    } else if export.is_busy() {
         ui.horizontal(|ui| {
             ui.spinner();
             ui.label("Saving");
@@ -193,7 +257,14 @@ pub(crate) fn export_ui(
             None => {}
         }
     }
-    action
+}
+
+/// `hint`, followed by the shortcut for `command` if it has one.
+fn with_shortcut(ui: &egui::Ui, keymap: &Keymap, command: &Command, hint: &str) -> String {
+    match keymap.shortcut(command.id()) {
+        Some(shortcut) => format!("{hint} ({})", ui.ctx().format_shortcut(&shortcut)),
+        None => hint.to_owned(),
+    }
 }
 
 /// `camera` narrowed to show just the frame the view draws for an image of

@@ -77,6 +77,7 @@ struct Placed {
 pub fn show(ui: &mut egui::Ui, rect: Rect, camera: &mut OrbitCamera, axis_colors: [Color32; 3]) {
     // Registered after the 3D view, so it's on top and gets the pointer first.
     let response = ui.interact(rect, ui.id().with("axis_gizmo"), Sense::click_and_drag());
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Other, true, "View gizmo"));
     if response.dragged_by(egui::PointerButton::Primary) {
         let drag = response.drag_delta();
         camera.orbit(glam::vec2(drag.x, drag.y));

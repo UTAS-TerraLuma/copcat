@@ -1,16 +1,22 @@
-//! The viewer window: the app's state machine and per-frame layout.
+//! The viewer window: the app's state machine, the per-frame layout and the
+//! command dispatcher.
 //!
 //! The pieces live in submodules:
+//! - [`commands`]: every [`Command`] the user can give, with ids, titles and
+//!   shortcuts, and the [`Keymap`](commands::Keymap).
+//! - [`settings`]: what the user can tweak, as plain data.
 //! - [`session`]: an open cloud, its loader and per-frame LOD.
 //! - [`scene`]: drawing the 3D views, Explore mode's included.
-//! - [`camera_input`]: mouse and keyboard control of a 3D view's camera.
+//! - [`camera_input`]: mouse control of a 3D view's camera.
 //! - [`subcloud_mode`]: Subcloud mode's map panel and 3D view.
 //! - [`export_ui`]: the Save image section and its job.
-//! - [`settings`]: what the user can tweak, as plain data.
-//! - [`panels`]: the settings panel's sections.
+//! - [`open_ui`]: the Open menu and the Open URL dialog.
+//! - [`panels`]: the settings panel's sections and the status indicator.
 
 mod camera_input;
+mod commands;
 mod export_ui;
+mod open_ui;
 mod panels;
 mod scene;
 mod session;
@@ -32,19 +38,18 @@ use crate::renderer::PointRenderer;
 use crate::subcloud::Footprint;
 use crate::theme::Theme;
 
-use export_ui::{
-    ExportAction, ExportContext, ExportJob, ImageExport, export_ui, framed_camera, render_args,
-};
+use commands::{Command, Keymap};
+use export_ui::{ExportContext, ExportJob, ImageExport, export_ui};
 use panels::{
-    HeightsAction, cloud_summary, heights_ui, section, settings_ui, streaming_stats, view_ui,
+    HeightsAction, cloud_summary, diagnostics_ui, display_ui, heights_ui, performance_ui, section,
+    status_indicator, view_ui,
 };
 use scene::{Scene, Viewports, explore_view};
 use session::Session;
 use settings::Settings;
-use subcloud_mode::SubcloudMode;
+use subcloud_mode::{Reframe, SubcloudMode};
 
 pub struct ViewerApp {
-    url_input: String,
     state: LoadState,
     renderer: PointRenderer,
     viewports: Viewports,
@@ -62,11 +67,21 @@ pub struct ViewerApp {
     heights_draft: HeightSettings,
     /// The UI's colours, fonts and spacing, as applied to the egui context.
     theme: Theme,
+    /// Which shortcut runs which command.
+    keymap: Keymap,
+    /// Commands asked for this frame, by buttons and shortcuts. They run
+    /// together once the frame is laid out, when the 3D view's size is known.
+    pending: Vec<Command>,
+    /// The Open URL dialog's text, while it's showing.
+    url_dialog: Option<String>,
+    /// The 3D view's size in physical pixels, as of the last frame with a
+    /// cloud open.
+    view_size_px: [u32; 2],
 }
 
 /// What the main area shows. Switched from the top bar.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-enum Mode {
+pub(crate) enum Mode {
     /// The whole cloud in one 3D view.
     Explore,
     /// A map to draw a line, circle or square on, and a 3D view of just
@@ -112,7 +127,6 @@ impl ViewerApp {
             map: renderer.create_viewport(),
         };
         let mut app = Self {
-            url_input: initial_source.unwrap_or_default(),
             state: LoadState::Idle,
             renderer,
             viewports,
@@ -124,15 +138,18 @@ impl ViewerApp {
             heights_draft: heights.clone(),
             heights,
             theme,
+            keymap: Keymap::default(),
+            pending: Vec::new(),
+            url_dialog: None,
+            view_size_px: [1, 1],
         };
-        if !app.url_input.trim().is_empty() {
-            app.start_loading(&cc.egui_ctx);
+        if let Some(source) = initial_source.as_deref().and_then(open_ui::clean_source) {
+            app.start_loading(&cc.egui_ctx, source);
         }
         Ok(app)
     }
 
-    fn start_loading(&mut self, ctx: &egui::Context) {
-        let source = self.url_input.trim().to_owned();
+    fn start_loading(&mut self, ctx: &egui::Context, source: String) {
         self.heights_draft = self.heights.clone();
         let loader = Loader::spawn(source.clone(), self.heights.clone(), ctx.clone());
         // Replacing the state drops any previous loader, which stops its thread.
@@ -200,36 +217,211 @@ impl ViewerApp {
         }
     }
 
-    fn url_bar(&mut self, ui: &mut egui::Ui) {
+    /// The toolbar: the modes, the Open menu, and how loading is going.
+    fn top_bar(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             let is_open = matches!(self.state, LoadState::Open(_));
             ui.add_enabled_ui(is_open, |ui| {
-                ui.selectable_value(&mut self.mode, Mode::Explore, "Explore")
-                    .on_hover_text("Look around the whole cloud");
-                ui.selectable_value(&mut self.mode, Mode::Subcloud, "Subcloud")
-                    .on_hover_text(
+                for (mode, label, hint) in [
+                    (Mode::Explore, "Explore", "Look around the whole cloud"),
+                    (
+                        Mode::Subcloud,
+                        "Subcloud",
                         "Draw a line, circle or square on a map and view just the points \
                          above it",
-                    );
+                    ),
+                ] {
+                    if ui
+                        .selectable_label(self.mode == mode, label)
+                        .on_hover_text(hint)
+                        .clicked()
+                    {
+                        self.pending.push(Command::SetMode(mode));
+                    }
+                }
             });
             ui.separator();
-            ui.label("COPC URL:");
-            let is_loading = matches!(self.state, LoadState::Opening { .. });
-            let load_button_width = 60.0;
-            let response = ui.add(
-                egui::TextEdit::singleline(&mut self.url_input)
-                    .hint_text("https://… or C:\\path\\to\\file.copc.laz")
-                    .desired_width(ui.available_width() - load_button_width),
-            );
-            let enter_pressed =
-                response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-            let clicked = ui
-                .add_enabled(!is_loading, egui::Button::new("Load"))
-                .clicked();
-            if (clicked || enter_pressed) && !is_loading {
-                self.start_loading(ui.ctx());
-            }
+            open_ui::open_menu(ui, &self.keymap, &mut self.pending);
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                status_indicator(ui, &self.state);
+            });
         });
+    }
+
+    /// The 3D view's camera: Subcloud mode's while it's showing, else
+    /// Explore's.
+    fn active_camera(&mut self) -> &mut OrbitCamera {
+        match (self.mode, &mut self.subcloud) {
+            (Mode::Subcloud, Some(subcloud_mode)) => &mut subcloud_mode.camera,
+            _ => &mut self.camera,
+        }
+    }
+
+    /// Whether `command` can do anything right now. A command palette can
+    /// grey out the rest.
+    pub(crate) fn can_run(&self, command: &Command) -> bool {
+        let is_open = matches!(self.state, LoadState::Open(_));
+        match command {
+            Command::OpenSource(_)
+            | Command::OpenFileDialog
+            | Command::OpenUrlDialog
+            | Command::ToggleDiagnostics => true,
+            Command::SaveImage => is_open && !self.export.is_busy(),
+            Command::SetMode(_)
+            | Command::SetView(_)
+            | Command::SetProjection(_)
+            | Command::ToggleProjection
+            | Command::ResetView
+            | Command::ToggleEdl
+            | Command::SetColorMode(_)
+            | Command::CopyCommandLine => is_open,
+        }
+    }
+
+    /// Does what `command` asks, if it can be done now. Every button,
+    /// menu item and shortcut goes through here.
+    pub(crate) fn run(&mut self, ctx: &egui::Context, command: Command) {
+        if !self.can_run(&command) {
+            return;
+        }
+        match command {
+            Command::OpenSource(source) => {
+                if let Some(source) = open_ui::clean_source(&source) {
+                    self.start_loading(ctx, source);
+                }
+            }
+            Command::OpenFileDialog => {
+                if let Some(source) = open_ui::pick_file() {
+                    self.run(ctx, Command::OpenSource(source));
+                }
+            }
+            Command::OpenUrlDialog => self.url_dialog = Some(String::new()),
+            Command::SetMode(mode) => self.mode = mode,
+            Command::SetView(preset) => self.active_camera().set_view(preset),
+            Command::SetProjection(projection) => {
+                self.active_camera().set_projection(projection);
+            }
+            Command::ToggleProjection => {
+                let camera = self.active_camera();
+                camera.set_projection(camera.projection().toggled());
+            }
+            Command::ResetView => self.reset_view(),
+            Command::ToggleEdl => {
+                let view = &mut self.settings.view;
+                view.edl_enabled = !view.edl_enabled;
+            }
+            Command::SetColorMode(mode) => self.settings.view.color_mode = mode,
+            Command::SaveImage => self.save_image(ctx),
+            Command::CopyCommandLine => self.copy_render_command(ctx),
+            Command::ToggleDiagnostics => {
+                let diagnostics = &mut self.settings.diagnostics;
+                diagnostics.visible = !diagnostics.visible;
+            }
+        }
+        // The change shows next frame.
+        ctx.request_repaint();
+    }
+
+    /// Points the 3D view at the whole cloud, or side-on at the subcloud,
+    /// as a double-click on it does.
+    fn reset_view(&mut self) {
+        match (self.mode, &mut self.subcloud, &self.state) {
+            (Mode::Subcloud, Some(subcloud_mode), _) => {
+                subcloud_mode.reframe = Some(Reframe::Aim);
+            }
+            (_, _, LoadState::Open(session)) => {
+                let (min, max) = session.octree.bounds();
+                self.camera.frame_bounds(min, max);
+            }
+            _ => {}
+        }
+    }
+
+    /// The cloud's settings, docked on the right like an inspector.
+    fn settings_panel(&mut self, ui: &mut egui::Ui) -> Option<HeightsAction> {
+        let LoadState::Open(session) = &self.state else {
+            return None;
+        };
+        let in_subcloud = self.mode == Mode::Subcloud;
+        // The view controls act on whichever 3D view is showing.
+        let camera = match (self.mode, &mut self.subcloud) {
+            (Mode::Subcloud, Some(subcloud_mode)) => &mut subcloud_mode.camera,
+            _ => &mut self.camera,
+        };
+        let export_context = ExportContext {
+            max_size: self.renderer.max_image_size(),
+            progress: session.export_progress(&self.renderer),
+            in_subcloud,
+        };
+        let theme = &self.theme;
+        let settings = &mut self.settings;
+        let commands = &mut self.pending;
+        let keymap = &self.keymap;
+        let mut heights_action = None;
+        // Side panels are laid out before the central panel, so a size that
+        // follows the view shows the last frame's, which is the same unless
+        // the window is being resized.
+        egui::Panel::right("point_cloud")
+            .frame(theme.panel_frame())
+            .show_separator_line(false)
+            .resizable(true)
+            .default_size(340.0)
+            .min_size(240.0)
+            .show(ui, |ui| {
+                ui.heading("Point cloud");
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        section(ui, theme, |ui| cloud_summary(ui, &session.info));
+                        section(ui, theme, |ui| {
+                            display_ui(ui, &mut settings.view, session, commands);
+                        });
+                        section(ui, theme, |ui| view_ui(ui, camera, commands));
+                        heights_action = section(ui, theme, |ui| {
+                            heights_ui(ui, session, &mut self.heights_draft, &self.heights)
+                        });
+                        section(ui, theme, |ui| {
+                            export_ui(
+                                ui,
+                                &self.export,
+                                &mut settings.export,
+                                export_context,
+                                keymap,
+                                commands,
+                            );
+                        });
+                        section(ui, theme, |ui| performance_ui(ui, &mut settings.view.lod));
+                        section(ui, theme, |ui| {
+                            diagnostics_ui(
+                                ui,
+                                session,
+                                &self.renderer,
+                                &mut settings.diagnostics,
+                                commands,
+                            );
+                        });
+                        controls_help(ui, theme, in_subcloud);
+                    });
+            });
+        heights_action
+    }
+}
+
+/// How to drive the 3D view, in the faintest text at the foot of the panel.
+fn controls_help(ui: &mut egui::Ui, theme: &Theme, in_subcloud: bool) {
+    // On the panel rather than in a box, so it can be the faintest text.
+    let help = |text: &str| egui::RichText::new(text).color(theme.colors.text_tertiary);
+    ui.label(help(
+        "Drag: orbit\nRight-drag: pan\nScroll: zoom\nDouble-click: reset view\n\
+         Gizmo: click an axis to look along it\n\
+         7 / 1 / 3: top / front / right (Ctrl: opposite)\n\
+         5: perspective / orthographic",
+    ));
+    if in_subcloud {
+        ui.label(help(
+            "Ctrl+scroll: slide the subcloud forward (towards its round handle) or back\n\
+             Ctrl+Shift+scroll: slide it right or left",
+        ));
     }
 }
 
@@ -242,11 +434,17 @@ impl eframe::App for ViewerApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.poll_loader();
 
+        // Digits typed into text fields aren't shortcuts.
+        if !ui.ctx().text_edit_focused() && self.url_dialog.is_none() {
+            let pressed = ui.input_mut(|input| self.keymap.consume(input));
+            self.pending.extend(pressed);
+        }
+
         // Panels are separated by gaps, not lines.
-        egui::Panel::top("url_bar")
+        egui::Panel::top("top_bar")
             .frame(self.theme.header_frame())
             .show_separator_line(false)
-            .show(ui, |ui| self.url_bar(ui));
+            .show(ui, |ui| self.top_bar(ui));
 
         // Subcloud mode's map. Side panels have to be laid out before the
         // central panel, but the map is only drawn after it, once the nodes
@@ -269,71 +467,7 @@ impl eframe::App for ViewerApp {
             _ => None,
         };
 
-        // The cloud's settings, docked on the right like an inspector. Side
-        // panels are laid out before the central panel, so a size that
-        // follows the view shows the last frame's, which is the same unless
-        // the window is being resized.
-        let mut heights_action = None;
-        let mut export_action = None;
-        if let LoadState::Open(session) = &self.state {
-            let in_subcloud = self.mode == Mode::Subcloud;
-            // The view controls act on whichever 3D view is showing.
-            let camera = match (self.mode, &mut self.subcloud) {
-                (Mode::Subcloud, Some(subcloud_mode)) => &mut subcloud_mode.camera,
-                _ => &mut self.camera,
-            };
-            let max_image_size = self.renderer.max_image_size();
-            let export_progress = session.export_progress(&self.renderer);
-            let theme = &self.theme;
-            egui::Panel::right("point_cloud")
-                .frame(theme.panel_frame())
-                .show_separator_line(false)
-                .resizable(true)
-                .default_size(340.0)
-                .min_size(240.0)
-                .show(ui, |ui| {
-                    ui.heading("Point cloud");
-                    egui::ScrollArea::vertical()
-                        .auto_shrink([false, false])
-                        .show(ui, |ui| {
-                            section(ui, theme, |ui| cloud_summary(ui, &session.info));
-                            section(ui, theme, |ui| streaming_stats(ui, session, &self.renderer));
-                            section(ui, theme, |ui| view_ui(ui, camera));
-                            heights_action = section(ui, theme, |ui| {
-                                heights_ui(ui, session, &mut self.heights_draft, &self.heights)
-                            });
-                            section(ui, theme, |ui| settings_ui(ui, &mut self.settings.view, &mut self.settings.diagnostics, session));
-                            export_action = section(ui, theme, |ui| {
-                                export_ui(
-                                    ui,
-                                    &mut self.export,
-                                    &mut self.settings.export,
-                                    ExportContext {
-                                        max_size: max_image_size,
-                                        progress: export_progress,
-                                        in_subcloud,
-                                    },
-                                )
-                            });
-                            // On the panel rather than in a box, so it can be the faintest text.
-                            let help =
-                                |text: &str| egui::RichText::new(text).color(theme.colors.text_tertiary);
-                            ui.label(help(
-                                "Drag: orbit\nRight-drag: pan\nScroll: zoom\nDouble-click: reset view\n\
-                                 Gizmo: click an axis to look along it\n\
-                                 7 / 1 / 3: top / front / right (Ctrl: opposite)\n\
-                                 5: perspective / orthographic",
-                            ));
-                            if in_subcloud {
-                                ui.label(help(
-                                    "Ctrl+scroll: slide the subcloud forward (towards its round \
-                                     handle) or back\n\
-                                     Ctrl+Shift+scroll: slide it right or left",
-                                ));
-                            }
-                        });
-                });
-        }
+        let heights_action = self.settings_panel(ui);
 
         let export_view = self.export.job.as_ref().map(ExportJob::view);
         let image_aspect = (!self.settings.export.match_view).then(|| {
@@ -352,9 +486,7 @@ impl eframe::App for ViewerApp {
             egui::CentralPanel::default()
                 .frame(frame)
                 .show(ui, |ui| match &mut self.state {
-                    LoadState::Idle => {
-                        ui.label("Paste a COPC URL or file path above and press Load.");
-                    }
+                    LoadState::Idle => open_ui::idle_ui(ui, &self.keymap, &mut self.pending),
                     LoadState::Opening { source, .. } => {
                         ui.horizontal(|ui| {
                             ui.spinner();
@@ -396,64 +528,19 @@ impl eframe::App for ViewerApp {
                 });
         if let Some(source) = retry_with_auto_heights {
             self.heights = HeightSettings::default();
-            self.url_input = source;
-            self.start_loading(ui.ctx());
+            self.start_loading(ui.ctx(), source);
         }
 
-        if let LoadState::Open(session) = &self.state {
-            let clip = match (self.mode, &self.subcloud) {
-                (Mode::Subcloud, Some(subcloud_mode)) => Some(subcloud_mode.subcloud.footprint()),
-                _ => None,
-            };
-            let camera = match (self.mode, &mut self.subcloud) {
-                (Mode::Subcloud, Some(subcloud_mode)) => &mut subcloud_mode.camera,
-                _ => &mut self.camera,
-            };
+        if matches!(self.state, LoadState::Open(_)) {
             let pixels_per_point = ui.ctx().pixels_per_point();
             // The panel's rect includes the gap kept around the view.
             let view_rect = central.response.rect - self.theme.panel_outer_margin();
             let view_size = view_rect.size() * pixels_per_point;
-            let view_size_px = [view_size.x, view_size.y].map(|side| side.round() as u32);
+            self.view_size_px = [view_size.x, view_size.y].map(|side| side.round() as u32);
             if self.settings.export.match_view {
                 let max_image_size = self.renderer.max_image_size();
-                self.settings.export.size = view_size_px.map(|side| side.clamp(1, max_image_size));
-            }
-
-            match export_action {
-                Some(ExportAction::Save) => {
-                    // Blocks this frame until the dialog closes, which is fine:
-                    // nothing else can be clicked meanwhile anyway.
-                    let path = rfd::FileDialog::new()
-                        .add_filter("PNG image", &["png"])
-                        .set_file_name("copcat.png")
-                        .save_file();
-                    if let Some(mut path) = path {
-                        if path.extension().is_none() {
-                            path.set_extension("png");
-                        }
-                        self.export.job = Some(ExportJob {
-                            path,
-                            size: self.settings.export.size,
-                            camera: framed_camera(camera, view_size_px, self.settings.export.size),
-                            clip,
-                            pixels_per_point,
-                        });
-                        self.export.status = None;
-                    }
-                }
-                Some(ExportAction::CopyCommand) => {
-                    let args = render_args(
-                        session,
-                        &self.settings.view,
-                        &self.heights,
-                        &framed_camera(camera, view_size_px, self.settings.export.size),
-                        self.settings.export.size,
-                        pixels_per_point,
-                    );
-                    ui.ctx().copy_text(args.command_line());
-                    self.export.status = Some(Ok("Copied a copcat render command".to_owned()));
-                }
-                None => {}
+                self.settings.export.size =
+                    self.view_size_px.map(|side| side.clamp(1, max_image_size));
             }
         }
 
@@ -461,12 +548,19 @@ impl eframe::App for ViewerApp {
             Some(HeightsAction::Show(kind)) => self.show_height(kind),
             Some(HeightsAction::Reload) => {
                 if let LoadState::Open(session) = &self.state {
-                    self.url_input = session.info.source.clone();
+                    let source = session.info.source.clone();
+                    self.heights = self.heights_draft.clone();
+                    self.start_loading(ui.ctx(), source);
                 }
-                self.heights = self.heights_draft.clone();
-                self.start_loading(ui.ctx());
             }
             None => {}
+        }
+
+        if let Some(command) = open_ui::url_dialog(ui.ctx(), &mut self.url_dialog) {
+            self.pending.push(command);
+        }
+        for command in mem::take(&mut self.pending) {
+            self.run(ui.ctx(), command);
         }
 
         self.finish_export(ui.ctx());
