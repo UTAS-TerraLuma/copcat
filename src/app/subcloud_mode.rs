@@ -29,6 +29,9 @@ pub(crate) struct SubcloudMode {
     /// How far one Ctrl+scroll (or Ctrl+Shift+scroll) notch slides the
     /// subcloud, as a percentage of its size that way.
     pub(crate) sweep_step_percent: f32,
+    /// Where the local origin is in the file's coordinates, for showing
+    /// where the subcloud is.
+    origin: [f64; 3],
 }
 
 /// Ways to point the subcloud camera at the subcloud.
@@ -41,9 +44,14 @@ pub(crate) enum Reframe {
 }
 
 impl SubcloudMode {
-    pub(crate) fn new(bounds: (glam::Vec3, glam::Vec3)) -> Self {
-        let (min, max) = bounds;
-        let subcloud = Subcloud::new(min, max);
+    /// Starts with `subcloud`, as drawn in Explore mode, seen side-on.
+    /// `bounds` are the cloud's local bounds, for the map, and `origin`
+    /// where local coordinates start in the file's.
+    pub(crate) fn new(
+        subcloud: Subcloud,
+        bounds: (glam::Vec3, glam::Vec3),
+        origin: [f64; 3],
+    ) -> Self {
         Self {
             subcloud,
             camera: OrbitCamera::default(),
@@ -51,7 +59,16 @@ impl SubcloudMode {
             reframe: Some(Reframe::Aim),
             followed_centre: subcloud.centre(),
             sweep_step_percent: subcloud::DEFAULT_SWEEP_STEP_PERCENT,
+            origin,
         }
+    }
+
+    /// Replaces the subcloud with a newly drawn one and looks at it
+    /// side-on, keeping the map where it was.
+    pub(crate) fn replace(&mut self, subcloud: Subcloud) {
+        self.subcloud = subcloud;
+        self.followed_centre = subcloud.centre();
+        self.reframe = Some(Reframe::Aim);
     }
 
     /// The left panel: subcloud settings above the map.
@@ -180,6 +197,10 @@ impl SubcloudMode {
         if self.subcloud.shape == ShapeKind::Line {
             ui.label(format!("Length {:.1} m", self.subcloud.line.length()));
         }
+        let centre = self.subcloud.centre();
+        let [east, north] = [0, 1].map(|axis| self.origin[axis] + f64::from(centre[axis]));
+        ui.label(format!("Centre {east:.1} E, {north:.1} N"))
+            .on_hover_text("Where the middle of the shape is, in the file's coordinates");
     }
 
     /// The 3D view of just the subcloud, then the map, which needs this
@@ -191,7 +212,7 @@ impl SubcloudMode {
         map_frame: Option<MapFrame>,
     ) {
         let area = ViewArea::allocate(ui);
-        let input = camera_controls(ui, &area.response, &mut self.camera);
+        let input = camera_controls(ui, &area.response, &mut self.camera, true);
         if input.reset {
             self.reframe = Some(Reframe::Aim);
         }
@@ -240,7 +261,7 @@ impl SubcloudMode {
         area.paint(ui, texture_id, scene.image_aspect, scene.theme);
 
         if let Some(frame) = map_frame {
-            let style = scene.style(area.pixels_per_point, None);
+            let style = scene.map_style(area.pixels_per_point);
             let texture_id = scene.renderer.render(
                 &mut scene.viewports.map,
                 frame.size_px,

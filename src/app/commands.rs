@@ -11,6 +11,7 @@
 use eframe::egui::{self, Key, KeyboardShortcut, Modifiers};
 
 use crate::camera::{Projection, ViewPreset};
+use crate::subcloud::ShapeKind;
 
 use super::Mode;
 use super::settings::ColorMode;
@@ -24,7 +25,13 @@ pub(crate) enum Command {
     OpenFileDialog,
     /// Type a URL or path to open.
     OpenUrlDialog,
+    /// Switch modes. Subcloud mode returns to the last subcloud drawn.
     SetMode(Mode),
+    /// Pick a subcloud tool: the next drag on the explore view draws this
+    /// shape, then shows just the points inside it.
+    SubcloudTool(ShapeKind),
+    /// Put the subcloud tool down without drawing.
+    CancelSubcloudTool,
     /// Look along one of the 3D view camera's axes.
     SetView(ViewPreset),
     SetProjection(Projection),
@@ -83,6 +90,8 @@ impl Command {
             Self::SetMode(Mode::Explore),
             Self::SetMode(Mode::Subcloud),
         ];
+        commands.extend(ShapeKind::ALL.map(Self::SubcloudTool));
+        commands.push(Self::CancelSubcloudTool);
         commands.extend(ViewPreset::ALL.map(Self::SetView));
         commands.extend([
             Self::SetProjection(Projection::Perspective),
@@ -124,7 +133,20 @@ impl Command {
             Self::OpenFileDialog => info("file.open", "Open file…", command_key(Key::O)),
             Self::OpenUrlDialog => info("file.open_url", "Open URL…", command_key(Key::L)),
             Self::SetMode(Mode::Explore) => info("mode.explore", "Explore mode", None),
-            Self::SetMode(Mode::Subcloud) => info("mode.subcloud", "Subcloud mode", None),
+            Self::SetMode(Mode::Subcloud) => info("mode.subcloud", "Return to the subcloud", None),
+            Self::SubcloudTool(ShapeKind::Line) => {
+                info("subcloud.tool_line", "Draw a line subcloud", None)
+            }
+            Self::SubcloudTool(ShapeKind::Circle) => {
+                info("subcloud.tool_circle", "Draw a circle subcloud", None)
+            }
+            Self::SubcloudTool(ShapeKind::Square) => {
+                info("subcloud.tool_square", "Draw a square subcloud", None)
+            }
+            // Esc also cancels, while a tool is picked.
+            Self::CancelSubcloudTool => {
+                info("subcloud.cancel_tool", "Cancel the subcloud tool", None)
+            }
             // Numpad-style view keys, as in Blender, with Ctrl for the
             // opposite view.
             Self::SetView(preset) => match preset {

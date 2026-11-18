@@ -12,6 +12,7 @@ pub(crate) use crate::renderer::EdlSettings;
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct Settings {
     pub(crate) view: ViewSettings,
+    pub(crate) map: MapStyleSettings,
     pub(crate) export: ExportSettings,
     pub(crate) diagnostics: DiagnosticsSettings,
 }
@@ -36,6 +37,31 @@ impl Default for ViewSettings {
             edl_enabled: true,
             edl: EdlSettings::default(),
             lod: LodSettings::default(),
+        }
+    }
+}
+
+/// How points are drawn on the subcloud map: a small top-down overview, so
+/// its own small points and light shading rather than the 3D view's. The
+/// colouring follows the 3D view's.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct MapStyleSettings {
+    /// Point diameter in logical pixels.
+    pub(crate) point_size: f32,
+    pub(crate) edl_enabled: bool,
+    pub(crate) edl: EdlSettings,
+}
+
+impl Default for MapStyleSettings {
+    fn default() -> Self {
+        Self {
+            point_size: 1.5,
+            edl_enabled: true,
+            // Enough to pick out roofs and tree crowns from above.
+            edl: EdlSettings {
+                strength: 0.5,
+                radius_px: 1.0,
+            },
         }
     }
 }

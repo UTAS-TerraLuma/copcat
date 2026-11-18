@@ -18,14 +18,16 @@ pub(crate) struct ViewInput {
     pub(crate) sideways: bool,
 }
 
-/// Mouse control of a 3D view's camera.
+/// Mouse control of a 3D view's camera. A left-drag orbits only if
+/// `orbit`; otherwise something else (a subcloud tool) has it.
 pub(crate) fn camera_controls(
     ui: &egui::Ui,
     response: &egui::Response,
     camera: &mut OrbitCamera,
+    orbit: bool,
 ) -> ViewInput {
     let drag = glam::vec2(response.drag_delta().x, response.drag_delta().y);
-    if response.dragged_by(egui::PointerButton::Primary) {
+    if orbit && response.dragged_by(egui::PointerButton::Primary) {
         camera.orbit(drag);
     }
     if response.dragged_by(egui::PointerButton::Secondary)

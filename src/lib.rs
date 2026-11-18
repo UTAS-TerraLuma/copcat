@@ -12,6 +12,7 @@ mod heights;
 mod http_source;
 mod loader;
 mod lod;
+mod pick;
 mod renderer;
 mod subcloud;
 mod subcloud_map;

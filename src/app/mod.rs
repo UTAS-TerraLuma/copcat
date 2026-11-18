@@ -9,6 +9,7 @@
 //! - [`scene`]: drawing the 3D views, Explore mode's included.
 //! - [`camera_input`]: mouse control of a 3D view's camera.
 //! - [`subcloud_mode`]: Subcloud mode's map panel and 3D view.
+//! - [`subcloud_tool`]: drawing a subcloud on the explore view.
 //! - [`export_ui`]: the Save image section and its job.
 //! - [`open_ui`]: the Open menu and the Open URL dialog.
 //! - [`panels`]: the settings panel's sections and the status indicator.
@@ -22,6 +23,7 @@ mod scene;
 mod session;
 mod settings;
 mod subcloud_mode;
+mod subcloud_tool;
 
 use std::mem;
 use std::sync::mpsc::TryRecvError;
@@ -35,7 +37,7 @@ use crate::heights::{HeightKind, HeightSettings};
 use crate::loader::{Event, Loader};
 use crate::lod::{self, Octree};
 use crate::renderer::PointRenderer;
-use crate::subcloud::Footprint;
+use crate::subcloud::{self, Footprint, ShapeKind, Subcloud};
 use crate::theme::Theme;
 
 use commands::{Command, Keymap};
@@ -48,6 +50,7 @@ use scene::{Scene, Viewports, explore_view};
 use session::Session;
 use settings::Settings;
 use subcloud_mode::{Reframe, SubcloudMode};
+use subcloud_tool::SubcloudTool;
 
 pub struct ViewerApp {
     state: LoadState,
@@ -58,8 +61,10 @@ pub struct ViewerApp {
     settings: Settings,
     mode: Mode,
     /// Kept while in Explore mode, so switching back returns to the same
-    /// subcloud. Created the first time Subcloud mode is shown for a cloud.
+    /// subcloud. Created when the first subcloud is drawn on a cloud.
     subcloud: Option<SubcloudMode>,
+    /// The subcloud tool picked in Explore mode, if any.
+    tool: SubcloudTool,
     export: ImageExport,
     /// Where the open cloud's heights were read from, as asked.
     heights: HeightSettings,
@@ -84,8 +89,8 @@ pub struct ViewerApp {
 pub(crate) enum Mode {
     /// The whole cloud in one 3D view.
     Explore,
-    /// A map to draw a line, circle or square on, and a 3D view of just
-    /// the points above it.
+    /// A subcloud drawn in Explore mode: a map to edit its line, circle or
+    /// square on, and a 3D view of just the points above it.
     Subcloud,
 }
 
@@ -132,6 +137,7 @@ impl ViewerApp {
             viewports,
             mode: Mode::Explore,
             subcloud: None,
+            tool: SubcloudTool::default(),
             camera: OrbitCamera::default(),
             settings: Settings::default(),
             export: ImageExport::default(),
@@ -157,6 +163,8 @@ impl ViewerApp {
         self.renderer.clear_nodes();
         // A subcloud, or an image's view, is in the old cloud's coordinates.
         self.subcloud = None;
+        self.tool.cancel();
+        self.mode = Mode::Explore;
         self.export.job = None;
     }
 
@@ -217,27 +225,35 @@ impl ViewerApp {
         }
     }
 
-    /// The toolbar: the modes, the Open menu, and how loading is going.
+    /// The toolbar: the modes, the subcloud tools, the Open menu, and how
+    /// loading is going.
     fn top_bar(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             let is_open = matches!(self.state, LoadState::Open(_));
             ui.add_enabled_ui(is_open, |ui| {
-                for (mode, label, hint) in [
-                    (Mode::Explore, "Explore", "Look around the whole cloud"),
-                    (
-                        Mode::Subcloud,
-                        "Subcloud",
-                        "Draw a line, circle or square on a map and view just the points \
-                         above it",
-                    ),
-                ] {
-                    if ui
-                        .selectable_label(self.mode == mode, label)
-                        .on_hover_text(hint)
-                        .clicked()
-                    {
-                        self.pending.push(Command::SetMode(mode));
-                    }
+                let explore = ui
+                    .selectable_label(self.mode == Mode::Explore, "Explore")
+                    .on_hover_text("Look around the whole cloud");
+                if explore.clicked() {
+                    self.pending.push(Command::SetMode(Mode::Explore));
+                }
+                let subcloud = ui
+                    .add_enabled(
+                        self.subcloud.is_some(),
+                        egui::Button::selectable(self.mode == Mode::Subcloud, "Subcloud"),
+                    )
+                    .on_hover_text("Back to the subcloud you drew last")
+                    .on_disabled_hover_text(
+                        "Draw a subcloud first: pick Line, Circle or Square, then drag on \
+                         the cloud",
+                    );
+                if subcloud.clicked() {
+                    self.pending.push(Command::SetMode(Mode::Subcloud));
+                }
+                // Subcloud mode has its own shape buttons on the map.
+                if self.mode == Mode::Explore {
+                    ui.separator();
+                    self.tool_buttons(ui);
                 }
             });
             ui.separator();
@@ -246,6 +262,32 @@ impl ViewerApp {
                 status_indicator(ui, &self.state);
             });
         });
+    }
+
+    /// Line, Circle and Square: pick one, then drag on the explore view to
+    /// draw that subcloud. Clicking the picked one again puts it down.
+    fn tool_buttons(&mut self, ui: &mut egui::Ui) {
+        ui.label("Draw subcloud");
+        for shape in ShapeKind::ALL {
+            let picked = self.tool.picked() == Some(shape);
+            let how = match shape {
+                ShapeKind::Line => "from one end to the other",
+                ShapeKind::Circle | ShapeKind::Square => "from its centre to its edge",
+            };
+            let response = ui
+                .selectable_label(picked, shape.label())
+                .on_hover_text(format!(
+                    "{}. Then drag on the cloud to draw it, {how}. Esc cancels.",
+                    shape.description()
+                ));
+            if response.clicked() {
+                self.pending.push(if picked {
+                    Command::CancelSubcloudTool
+                } else {
+                    Command::SubcloudTool(shape)
+                });
+            }
+        }
     }
 
     /// The 3D view's camera: Subcloud mode's while it's showing, else
@@ -267,7 +309,11 @@ impl ViewerApp {
             | Command::OpenUrlDialog
             | Command::ToggleDiagnostics => true,
             Command::SaveImage => is_open && !self.export.is_busy(),
-            Command::SetMode(_)
+            // There's nothing to return to until a subcloud has been drawn.
+            Command::SetMode(Mode::Subcloud) => is_open && self.subcloud.is_some(),
+            Command::CancelSubcloudTool => self.tool.is_active(),
+            Command::SetMode(Mode::Explore)
+            | Command::SubcloudTool(_)
             | Command::SetView(_)
             | Command::SetProjection(_)
             | Command::ToggleProjection
@@ -296,7 +342,20 @@ impl ViewerApp {
                 }
             }
             Command::OpenUrlDialog => self.url_dialog = Some(String::new()),
-            Command::SetMode(mode) => self.mode = mode,
+            Command::SetMode(mode) => {
+                self.mode = mode;
+                self.tool.cancel();
+            }
+            Command::SubcloudTool(shape) => {
+                // Drawn on the explore view, so go back to it.
+                self.mode = Mode::Explore;
+                let line_width = self
+                    .subcloud
+                    .as_ref()
+                    .map_or(subcloud::DEFAULT_WIDTH, |mode| mode.subcloud.line.width);
+                self.tool.pick(shape, line_width);
+            }
+            Command::CancelSubcloudTool => self.tool.cancel(),
             Command::SetView(preset) => self.active_camera().set_view(preset),
             Command::SetProjection(projection) => {
                 self.active_camera().set_projection(projection);
@@ -449,12 +508,8 @@ impl eframe::App for ViewerApp {
         // Subcloud mode's map. Side panels have to be laid out before the
         // central panel, but the map is only drawn after it, once the nodes
         // for both views have been chosen.
-        let map_frame = match (&self.state, self.mode) {
-            (LoadState::Open(session), Mode::Subcloud) => {
-                let bounds = session.octree.bounds();
-                let subcloud_mode = self
-                    .subcloud
-                    .get_or_insert_with(|| SubcloudMode::new(bounds));
+        let map_frame = match (&self.state, self.mode, &mut self.subcloud) {
+            (LoadState::Open(_), Mode::Subcloud, Some(subcloud_mode)) => {
                 let panel = egui::Panel::left("subcloud_map")
                     .frame(self.theme.panel_frame())
                     .show_separator_line(false)
@@ -476,6 +531,7 @@ impl eframe::App for ViewerApp {
         });
 
         let mut retry_with_auto_heights = None;
+        let mut drawn = None;
         // The 3D view fills its panel edge to edge, keeping only the gap
         // between panels; the text states are padded.
         let frame = match self.state {
@@ -499,6 +555,7 @@ impl eframe::App for ViewerApp {
                             viewports: &mut self.viewports,
                             session,
                             settings: &self.settings.view,
+                            map_style: &self.settings.map,
                             diagnostics: &self.settings.diagnostics,
                             export_view: export_view.as_ref(),
                             image_aspect,
@@ -508,7 +565,10 @@ impl eframe::App for ViewerApp {
                             (Mode::Subcloud, Some(subcloud_mode)) => {
                                 subcloud_mode.view(ui, &mut scene, map_frame);
                             }
-                            _ => explore_view(ui, &mut scene, &mut self.camera),
+                            _ => {
+                                drawn =
+                                    explore_view(ui, &mut scene, &mut self.camera, &mut self.tool);
+                            }
                         }
                     }
                     LoadState::Failed {
@@ -526,6 +586,9 @@ impl eframe::App for ViewerApp {
                         }
                     }
                 });
+        if let Some(subcloud) = drawn {
+            self.open_subcloud(subcloud);
+        }
         if let Some(source) = retry_with_auto_heights {
             self.heights = HeightSettings::default();
             self.start_loading(ui.ctx(), source);
@@ -568,6 +631,25 @@ impl eframe::App for ViewerApp {
 }
 
 impl ViewerApp {
+    /// Shows just the points inside a newly drawn `subcloud`, in Subcloud
+    /// mode. The Explore camera stays where it was, for coming back.
+    fn open_subcloud(&mut self, subcloud: Subcloud) {
+        let LoadState::Open(session) = &self.state else {
+            return;
+        };
+        match &mut self.subcloud {
+            Some(subcloud_mode) => subcloud_mode.replace(subcloud),
+            None => {
+                self.subcloud = Some(SubcloudMode::new(
+                    subcloud,
+                    session.octree.bounds(),
+                    session.info.origin,
+                ));
+            }
+        }
+        self.mode = Mode::Subcloud;
+    }
+
     /// Switches the points to `kind` heights, moving each camera to follow.
     fn show_height(&mut self, kind: HeightKind) {
         let LoadState::Open(session) = &mut self.state else {

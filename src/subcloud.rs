@@ -8,8 +8,11 @@ use glam::{Vec2, Vec3, Vec4};
 use crate::camera::{Axes, OrbitCamera, ViewPreset};
 use crate::lod;
 
+/// A line's width until the user changes it.
 pub const DEFAULT_WIDTH: f32 = 2.0;
+#[cfg(test)]
 pub const DEFAULT_RADIUS: f32 = 10.0;
+#[cfg(test)]
 pub const DEFAULT_SIDE: f32 = 20.0;
 /// Thinner or smaller than this and a subcloud holds too few points to be useful.
 pub const MIN_SIZE: f32 = 0.05;
@@ -223,7 +226,10 @@ pub struct Subcloud {
 
 impl Subcloud {
     /// Each shape in the middle of the data: the line west to east over 80%
-    /// of its width, the circle and square at their default sizes.
+    /// of its width, the circle and square at their default sizes. For
+    /// tests: the viewer only makes subclouds the user draws
+    /// ([`Subcloud::drawn`]).
+    #[cfg(test)]
     pub fn new(min: Vec3, max: Vec3) -> Self {
         let centre = (min + max).truncate() * 0.5;
         let half_length = (max.x - min.x) * 0.4;
@@ -245,6 +251,70 @@ impl Subcloud {
                 rotation: 0.0,
             },
         }
+    }
+
+    /// The subcloud drawn by dragging on the ground from `from` to `to`:
+    /// a line from `from` to `to`, or a circle or square centred on `from`
+    /// with its edge at `to`. A circle or square is turned to `rotation`
+    /// (see [`Subcloud::rotation`]), so forward can be the way the user was
+    /// looking. The other shapes are put in the same place, the same size
+    /// and turned the same way, so switching shape keeps the spot; a line
+    /// keeps `line_width`. `None` for a drag too short to make a shape.
+    pub fn drawn(
+        shape: ShapeKind,
+        from: Vec2,
+        to: Vec2,
+        rotation: f32,
+        line_width: f32,
+    ) -> Option<Self> {
+        // 0..360° reads better in the rotation field than -180..180°.
+        let rotation = rotation.rem_euclid(std::f32::consts::TAU);
+        let (centre, rotation, half_size) = match shape {
+            ShapeKind::Line => {
+                let length = from.distance(to);
+                if length < MIN_SIZE {
+                    return None;
+                }
+                let heading = (to - from).to_angle().rem_euclid(std::f32::consts::TAU);
+                ((from + to) * 0.5, heading, length * 0.5)
+            }
+            ShapeKind::Circle => (from, rotation, from.distance(to)),
+            ShapeKind::Square => {
+                let square = Square {
+                    centre: from,
+                    side: 0.0,
+                    rotation,
+                };
+                (from, rotation, square.side_through(to) * 0.5)
+            }
+        };
+        if half_size * 2.0 < MIN_SIZE {
+            return None;
+        }
+        let half_line = Vec2::from_angle(rotation) * half_size;
+        // A line is kept exactly as drawn, not rebuilt from its angle.
+        let (start, end) = match shape {
+            ShapeKind::Line => (from, to),
+            _ => (centre - half_line, centre + half_line),
+        };
+        Some(Self {
+            shape,
+            line: Line {
+                start,
+                end,
+                width: line_width.max(MIN_SIZE),
+            },
+            circle: Circle {
+                centre,
+                radius: half_size,
+                rotation,
+            },
+            square: Square {
+                centre,
+                side: half_size * 2.0,
+                rotation,
+            },
+        })
     }
 
     /// Which way the current shape is turned: anticlockwise from east, in
@@ -396,6 +466,69 @@ mod tests {
 
     fn footprint(line: Line) -> Footprint {
         Footprint::Planes(line.clip_planes())
+    }
+
+    #[test]
+    fn drawn_line_should_run_from_where_the_drag_started_to_where_it_ended() {
+        let from = Vec2::new(1.0, 2.0);
+        let to = Vec2::new(4.0, 6.0);
+        let drawn = Subcloud::drawn(ShapeKind::Line, from, to, 0.0, 3.0).unwrap();
+        assert_eq!(drawn.shape, ShapeKind::Line);
+        assert_eq!(
+            drawn.line,
+            Line {
+                start: from,
+                end: to,
+                width: 3.0
+            }
+        );
+        // The other shapes cover the same ground: 5 m across, at the middle.
+        assert_eq!(drawn.circle.centre, Vec2::new(2.5, 4.0));
+        assert!((drawn.circle.radius - 2.5).abs() < 1e-6);
+        assert!((drawn.square.side - 5.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn drawn_circle_should_be_centred_where_the_drag_started() {
+        let drawn = Subcloud::drawn(
+            ShapeKind::Circle,
+            Vec2::new(10.0, 10.0),
+            Vec2::new(13.0, 14.0),
+            1.0,
+            2.0,
+        )
+        .unwrap();
+        assert_eq!(drawn.shape, ShapeKind::Circle);
+        assert_eq!(drawn.centre(), Vec2::new(10.0, 10.0));
+        assert_eq!(drawn.circle.radius, 5.0);
+        assert_eq!(drawn.rotation(), 1.0);
+    }
+
+    #[test]
+    fn drawn_square_should_put_the_pointer_on_its_edge() {
+        // Unturned, 3 m east and 1 m north of the centre: the east edge.
+        let drawn =
+            Subcloud::drawn(ShapeKind::Square, Vec2::ZERO, Vec2::new(3.0, 1.0), 0.0, 2.0).unwrap();
+        assert_eq!(drawn.square.side, 6.0);
+        assert!(drawn.footprint().contains(Vec2::new(2.9, -2.9)));
+        assert!(!drawn.footprint().contains(Vec2::new(3.1, 0.0)));
+    }
+
+    #[test]
+    fn drawn_rotation_should_read_from_0_to_360_degrees() {
+        let drawn = Subcloud::drawn(ShapeKind::Circle, Vec2::ZERO, Vec2::X, -1.0, 2.0).unwrap();
+        assert!((drawn.rotation() - (std::f32::consts::TAU - 1.0)).abs() < 1e-5);
+    }
+
+    #[test]
+    fn drawn_should_refuse_a_click_without_a_drag() {
+        for shape in ShapeKind::ALL {
+            assert_eq!(
+                Subcloud::drawn(shape, Vec2::ONE, Vec2::ONE, 0.0, 2.0),
+                None,
+                "{shape:?}"
+            );
+        }
     }
 
     #[test]

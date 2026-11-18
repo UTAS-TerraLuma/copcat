@@ -5,14 +5,16 @@ use eframe::egui;
 
 use crate::camera::OrbitCamera;
 use crate::gizmo;
+use crate::heights::HeightKind;
 use crate::lod;
-use crate::renderer::{EdlSettings, PointRenderer, PointStyle, Viewport};
-use crate::subcloud::Footprint;
+use crate::renderer::{EdlSettings, PointColor, PointRenderer, PointStyle, Viewport};
+use crate::subcloud::{Footprint, Subcloud};
 use crate::theme::Theme;
 
 use super::camera_input::camera_controls;
 use super::session::{Session, Views};
-use super::settings::{DiagnosticsSettings, ViewSettings};
+use super::settings::{DiagnosticsSettings, MapStyleSettings, ViewSettings};
+use super::subcloud_tool::SubcloudTool;
 
 /// Gap between the 3D view's edges and the gizmo, in logical pixels.
 const OVERLAY_MARGIN: f32 = 10.0;
@@ -31,6 +33,8 @@ pub(crate) struct Scene<'a> {
     pub(crate) viewports: &'a mut Viewports,
     pub(crate) session: &'a mut Session,
     pub(crate) settings: &'a ViewSettings,
+    /// How the subcloud map draws its points.
+    pub(crate) map_style: &'a MapStyleSettings,
     pub(crate) diagnostics: &'a DiagnosticsSettings,
     /// The view of the image being saved, if any, whose nodes load too.
     pub(crate) export_view: Option<&'a lod::View>,
@@ -62,7 +66,41 @@ pub(crate) fn point_style(
     }
 }
 
+/// Point style for the subcloud map: its own size and shading from `map`,
+/// whatever the 3D view's are, coloured like the 3D view. Nothing is
+/// clipped: the map shows the whole cloud around the subcloud.
+pub(crate) fn map_point_style(
+    map: &MapStyleSettings,
+    color: PointColor,
+    height: HeightKind,
+    pixels_per_point: f32,
+    theme: &Theme,
+) -> PointStyle {
+    PointStyle {
+        size_px: map.point_size * pixels_per_point,
+        color,
+        height,
+        edl: map.edl_enabled.then_some(EdlSettings {
+            radius_px: map.edl.radius_px * pixels_per_point,
+            ..map.edl
+        }),
+        clip: None,
+        background: theme.viewport_background(),
+    }
+}
+
 impl Scene<'_> {
+    /// The subcloud map's point style (see [`map_point_style`]).
+    pub(crate) fn map_style(&self, pixels_per_point: f32) -> PointStyle {
+        map_point_style(
+            self.map_style,
+            self.session.point_color(self.settings.color_mode),
+            self.session.shown,
+            pixels_per_point,
+            self.theme,
+        )
+    }
+
     pub(crate) fn style(&self, pixels_per_point: f32, clip: Option<Footprint>) -> PointStyle {
         point_style(
             self.settings,
@@ -176,10 +214,19 @@ impl ViewArea {
     }
 }
 
-/// Explore mode: the whole cloud in one 3D view.
-pub(crate) fn explore_view(ui: &mut egui::Ui, scene: &mut Scene<'_>, camera: &mut OrbitCamera) {
+/// Explore mode: the whole cloud in one 3D view. With a subcloud tool
+/// picked, dragging draws a subcloud instead of orbiting; returns it once
+/// the drag ends.
+pub(crate) fn explore_view(
+    ui: &mut egui::Ui,
+    scene: &mut Scene<'_>,
+    camera: &mut OrbitCamera,
+    tool: &mut SubcloudTool,
+) -> Option<Subcloud> {
     let area = ViewArea::allocate(ui);
-    let input = camera_controls(ui, &area.response, camera);
+    let drawing = tool.is_active();
+    let drawn = tool.interact(ui, &area, camera, scene.session);
+    let input = camera_controls(ui, &area.response, camera, !drawing);
     if input.reset {
         let (min, max) = scene.session.octree.bounds();
         camera.frame_bounds(min, max);
@@ -200,6 +247,8 @@ pub(crate) fn explore_view(ui: &mut egui::Ui, scene: &mut Scene<'_>, camera: &mu
         .update(scene.renderer, views, &scene.settings.lod);
     let texture_id = scene.render_main(&area, camera, None);
     area.paint(ui, texture_id, scene.image_aspect, scene.theme);
+    tool.paint(ui, &area, camera, scene.theme);
+    drawn
 }
 
 pub(crate) fn show_gizmo(
@@ -232,6 +281,38 @@ pub(crate) fn image_frame(rect: egui::Rect, aspect: f32) -> egui::Rect {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::settings::Settings;
+
+    /// The map's style for `settings`, as the app builds it.
+    fn map_style(settings: &Settings) -> PointStyle {
+        map_point_style(
+            &settings.map,
+            PointColor::Classification,
+            HeightKind::Elevation,
+            2.0,
+            &Theme::default(),
+        )
+    }
+
+    #[test]
+    fn map_style_should_ignore_the_3d_views_point_size_and_shading() {
+        let before = Settings::default();
+        let mut after = before.clone();
+        after.view.point_size = 9.0;
+        after.view.edl_enabled = !after.view.edl_enabled;
+        after.view.edl.strength = 3.0;
+        let (before, after) = (map_style(&before), map_style(&after));
+        assert_eq!(before.size_px, after.size_px);
+        assert_eq!(before.edl, after.edl);
+    }
+
+    #[test]
+    fn map_style_should_use_the_map_settings_in_physical_pixels() {
+        let settings = Settings::default();
+        let style = map_style(&settings);
+        assert_eq!(style.size_px, settings.map.point_size * 2.0);
+        assert_eq!(style.clip, None);
+    }
 
     #[test]
     fn image_frame_should_fill_the_width_for_a_wide_image() {
