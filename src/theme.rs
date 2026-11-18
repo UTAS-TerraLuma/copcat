@@ -393,6 +393,19 @@ impl Theme {
         self.panel_frame().fill(self.colors.header)
     }
 
+    /// The status bar along the foot of the window: unfilled, so it reads as
+    /// part of the gutter, and lined up with the panels' contents.
+    pub fn status_bar_frame(&self) -> egui::Frame {
+        let side = self.spacing.panel_gap / 2.0 + self.spacing.panel_padding;
+        egui::Frame::new().inner_margin(Margin::symmetric(side.round() as i8, 0))
+    }
+
+    /// The status bar's height, fixed so the panels above don't jump as its
+    /// text comes and goes.
+    pub fn status_bar_height(&self) -> f32 {
+        (self.fonts.small_size * 1.6).round()
+    }
+
     /// Half the gap between panels, kept around each one.
     pub fn panel_outer_margin(&self) -> Margin {
         margin(self.spacing.panel_gap / 2.0)

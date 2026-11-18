@@ -187,6 +187,7 @@ commands are:
 | `view.perspective`, `view.orthographic` | Set the projection | |
 | `view.toggle_projection` | Toggle perspective / orthographic | 5 |
 | `view.reset` | Reset view | |
+| `view.retry_failed_nodes` | Retry failed nodes | |
 | `view.toggle_diagnostics` | Toggle diagnostics | Ctrl+Shift+D |
 | `palette.commands` | Show all commands (the command palette) | Ctrl+Shift+P |
 | `palette.open` | Quick open a source | Ctrl+P |
