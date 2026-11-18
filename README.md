@@ -242,9 +242,12 @@ cloud to open it. Esc, or Backspace in an empty field, goes back up a level. The
 
   Both kinds of STAC work: a *static catalog* (JSON files linked to each other, such
   as on an object store; give the URL of its `catalog.json`, or of the folder it's in)
-  and a *STAC API* (give its landing page). An API's items are fetched 50 at a time:
-  choose **Load more…** at the foot of the list for the next page. A static catalog's
-  item files are fetched 24 at a time in the same way.
+  and a *STAC API* (give its landing page). A list keeps fetching in the background,
+  page after page (250 items a page from an API, 24 item files at a time from a static
+  catalog), until it has 1000 items, so typing filters a small catalog in full; the
+  count so far shows at the top while it does. Past 1000, choose **Load more…** at the
+  foot of the list for each further page. Items with a PNG or JPEG thumbnail show it,
+  small, at the left of their row.
 - **Folder sources** list every COPC file (`*.copc.laz`) under a folder, searched on
   a background thread. Hidden folders (starting with `.`), `target`, `node_modules`
   and links to folders are skipped, and the search stops at 16 folders deep, 2000
@@ -255,7 +258,7 @@ cloud to open it. Esc, or Backspace in an empty field, goes back up a level. The
   long to search.
 
 What's been fetched is kept until you close the viewer, so going back is instant;
-choose **Refresh** at the foot of a list to fetch it again. No signing in is
+choose **Refresh** at the top right of a list to fetch it again. No signing in is
 supported yet: a catalog that needs it shows the server's refusal.
 
 Add and remove sources from the command palette (Ctrl+Shift+P), or from the

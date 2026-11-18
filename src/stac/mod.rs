@@ -14,9 +14,10 @@
 //!
 //! Either way, browsing a URL gives a [`Page`] of [`Entry`]s: nodes to
 //! browse into (catalogs, collections), items with their assets, and items
-//! that couldn't be read. A page may have [`More`], fetched only when asked:
-//! the next page of an API's items, or the next batch of a static catalog's
-//! item files.
+//! that couldn't be read. A page may have [`More`], fetched with
+//! [`Client::more`]: the next page of an API's items, or the next batch of a
+//! static catalog's item files. (The viewer fetches those by itself up to a
+//! limit; see `app::feed`.)
 
 mod client;
 mod parse;
@@ -87,6 +88,10 @@ pub struct Item {
     /// as written.
     pub datetime: Option<String>,
     pub assets: Vec<Asset>,
+    /// A small PNG or JPEG picture of it, if it has one that can be fetched:
+    /// the asset with the `thumbnail` role, or failing that the `thumbnail`
+    /// key.
+    pub thumbnail: Option<String>,
 }
 
 impl Item {

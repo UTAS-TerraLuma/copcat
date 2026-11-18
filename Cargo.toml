@@ -12,6 +12,8 @@ clap = { version = "4.6.7", features = ["derive"] }
 copc-streaming = "0.2.0"
 eframe = "0.36.2"
 glam = { version = "0.34.1", features = ["bytemuck"] }
+# Already in the tree through eframe; decodes STAC thumbnails (src/app/thumbnails.rs).
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 png = "0.18"
 pollster = "0.4"
 raw-window-handle = "0.6"

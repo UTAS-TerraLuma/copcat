@@ -24,8 +24,8 @@ the test server (`tests/common/server.rs`) for `tests/stac_client.rs` and
 - `stac/static/`: a static catalog → collection → three items: Site A with one
   COPC asset (the fixture), Site B with none, Site C with two (the fixture,
   and an `s3://` link that can't be opened).
-- `stac/api/`: a fake STAC API (landing page, `/collections`, two pages of
-  items). Directories are served as their `index.json`, and the server writes
+- `stac/api/`: a fake STAC API (landing page, `/collections`, three pages of
+  items; the last item, "Late flight", has a PNG thumbnail). Directories are served as their `index.json`, and the server writes
   its own address in place of `{{base}}`.
 
 PDAL's COPC writer doesn't lay out the octree identically on every run, so

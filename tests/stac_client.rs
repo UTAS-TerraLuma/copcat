@@ -90,23 +90,56 @@ fn a_stac_api_should_page_through_items_on_request() {
         [Href::Openable(server.url("fixture.copc.laz"))]
     );
     // The first page was asked for with a limit; the next isn't fetched
-    // until asked for.
+    // until asked for (the viewer asks by itself, up to a limit).
     let items_requests: Vec<_> = server
         .requests()
         .into_iter()
         .filter(|request| request.path.contains("/items"))
         .collect();
     assert_eq!(items_requests.len(), 1, "{items_requests:?}");
-    assert_eq!(items_requests[0].query.as_deref(), Some("limit=50"));
+    assert_eq!(items_requests[0].query.as_deref(), Some("limit=250"));
 
     let more = flights.more.as_ref().expect("a next page");
     let page_2 = client.more(more).unwrap();
     assert_eq!(titles(&page_2), ["flight-3"]);
-    assert_eq!(page_2.more, None);
+    let page_3 = client
+        .more(page_2.more.as_ref().expect("a third page"))
+        .unwrap();
+    assert_eq!(titles(&page_3), ["Late flight"]);
+    assert_eq!(page_3.more, None);
 
     let info = client.describe(&server.url("stac/api/")).unwrap();
     assert_eq!(info.title.as_deref(), Some("Fixture STAC API"));
     assert!(info.is_api);
+}
+
+#[test]
+fn following_more_should_list_a_whole_api_collection_once() {
+    let server = FileServer::serve(common::data_dir());
+    let client = Client::new();
+    let root = client.browse_root(&server.url("stac/api/")).unwrap();
+    let mut page = client.browse(&node_url(&root, "Fixture flights")).unwrap();
+    let mut listed = titles(&page);
+    while let Some(more) = page.more.take() {
+        page = client.more(&more).unwrap();
+        listed.extend(titles(&page));
+    }
+    assert_eq!(listed, ["flight-1", "flight-2", "flight-3", "Late flight"]);
+    // Each page once, following the next links as given.
+    let queries: Vec<_> = server
+        .requests()
+        .into_iter()
+        .filter(|request| request.path.contains("/items"))
+        .map(|request| format!("{}?{}", request.path, request.query.unwrap_or_default()))
+        .collect();
+    assert_eq!(
+        queries,
+        [
+            "/stac/api/collections/fixture/items?limit=250",
+            "/stac/api/collections/fixture/items/page-2?limit=2",
+            "/stac/api/collections/fixture/items/page-3?limit=2",
+        ]
+    );
 }
 
 #[test]
@@ -159,7 +192,7 @@ fn the_aeo_workshop_static_catalog_should_have_point_clouds() {
 
 #[test]
 #[ignore = "fetches a real STAC API over the internet"]
-fn the_naturescan_api_should_have_point_clouds_and_pages() {
+fn the_naturescan_api_should_list_in_full_with_point_clouds() {
     let client = Client::new();
     let root = client
         .browse_root("https://stacapi.naturescan.earth/")
@@ -167,11 +200,20 @@ fn the_naturescan_api_should_have_point_clouds_and_pages() {
     let Some(Entry::Node(collection)) = root.entries.first() else {
         panic!("no collections: {:?}", titles(&root));
     };
-    let items = client.browse(&collection.url).unwrap();
-    assert!(items.more.is_some(), "it has more than one page of items");
-    let url = find_point_cloud(&client, &items, 0).expect("a COPC asset");
+    let mut page = client.browse(&collection.url).unwrap();
+    let url = find_point_cloud(&client, &page, 0).expect("a COPC asset");
     println!("found {url}");
-    let next = client.more(items.more.as_ref().unwrap()).unwrap();
-    assert!(!next.entries.is_empty());
-    assert_ne!(titles(&next), titles(&items));
+    let mut listed = titles(&page);
+    let mut pages = 1;
+    while let Some(more) = page.more.take() {
+        page = client.more(&more).unwrap();
+        listed.extend(titles(&page));
+        pages += 1;
+        assert!(pages < 50, "too many pages");
+    }
+    println!("{} items in {pages} pages", listed.len());
+    let mut unique = listed.clone();
+    unique.sort();
+    unique.dedup();
+    assert_eq!(unique.len(), listed.len(), "no item twice");
 }

@@ -858,6 +858,7 @@ dependencies = [
  "eframe",
  "egui_kittest",
  "glam",
+ "image",
  "png",
  "pollster 0.4.0",
  "proptest",
@@ -1875,6 +1876,8 @@ dependencies = [
  "num-traits",
  "png",
  "tiff",
+ "zune-core",
+ "zune-jpeg",
 ]
 
 [[package]]

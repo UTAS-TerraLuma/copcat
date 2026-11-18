@@ -43,6 +43,7 @@ use eframe::egui::{self, Key, KeyboardShortcut, Modifiers};
 use super::ViewerApp;
 use super::commands::{Command, Keymap};
 use super::open_ui::clean_source;
+use super::thumbnails::{self, Thumbnails};
 use crate::theme::Theme;
 
 /// What a provider gets to know about the app, to build its items.
@@ -64,6 +65,8 @@ pub(crate) struct PaletteItem {
     /// Greyed out and skipped by the selection when false.
     pub(crate) enabled: bool,
     pub(crate) action: ItemAction,
+    /// The URL of a small picture to show at the left of the row.
+    pub(crate) thumbnail: Option<String>,
 }
 
 /// What choosing an item does.
@@ -133,11 +136,17 @@ impl PaletteItem {
             shortcut: None,
             enabled: true,
             action,
+            thumbnail: None,
         }
     }
 
     pub(crate) fn with_detail(mut self, detail: impl Into<String>) -> Self {
         self.detail = detail.into();
+        self
+    }
+
+    pub(crate) fn with_thumbnail(mut self, url: Option<String>) -> Self {
+        self.thumbnail = url;
         self
     }
 
@@ -154,6 +163,7 @@ impl PaletteItem {
             shortcut: env.keymap.shortcut(command.id()),
             enabled: (env.can_run)(&command),
             action,
+            thumbnail: None,
         }
     }
 }
@@ -203,8 +213,21 @@ pub(crate) trait Provider: Send {
     /// should be cheap: poll background work, don't wait for it.
     fn items(&mut self, query: &str, env: &Env<'_>) -> Listing;
 
-    /// Does what one of this provider's [`ItemAction::Local`] items asks.
+    /// Does what one of this provider's [`ItemAction::Local`] items asks,
+    /// or the refresh button.
     fn act(&mut self, _action: LocalAction) {}
+
+    /// Whether the palette shows a refresh button for this list, which
+    /// calls [`Provider::act`] with [`LocalAction::Refresh`].
+    fn can_refresh(&self) -> bool {
+        false
+    }
+
+    /// While more items are still being fetched in the background, how many
+    /// have arrived.
+    fn fetching(&self) -> Option<usize> {
+        None
+    }
 }
 
 /// Every command, as listed in command mode.
@@ -486,6 +509,7 @@ pub(crate) struct Palette {
     /// Put the field's cursor at the end of its text next frame: the text
     /// was set by the palette, not typed, so the cursor may be anywhere.
     cursor_to_end: bool,
+    thumbnails: Thumbnails,
 }
 
 impl Palette {
@@ -544,6 +568,21 @@ impl Palette {
             Level::Browse(provider) => provider.title(),
             Level::Prompt(prompt) => prompt.title.to_owned(),
         })
+    }
+
+    /// The sub-list showing, if one is.
+    fn browsing(&self) -> Option<&dyn Provider> {
+        match self.levels.last() {
+            Some((Level::Browse(provider), _)) => Some(provider.as_ref()),
+            _ => None,
+        }
+    }
+
+    /// Fetches the sub-list showing again, as its refresh button does.
+    pub(crate) fn refresh(&mut self) {
+        if let Some((Level::Browse(provider), _)) = self.levels.last_mut() {
+            provider.act(LocalAction::Refresh);
+        }
     }
 
     /// The field's placeholder.
@@ -733,6 +772,7 @@ impl Palette {
             .stroke(egui::Stroke::new(1.0, colors.strong_stroke))
             .shadow(theme.shape.popup_shadow);
         let mut clicked = None;
+        let mut refresh = false;
         let mut view = View::default();
         let area = egui::Area::new(egui::Id::new("command_palette"))
             .order(egui::Order::Foreground)
@@ -741,7 +781,7 @@ impl Palette {
                 frame.show(ui, |ui| {
                     ui.set_width(width);
                     if let Some(breadcrumb) = self.breadcrumb() {
-                        ui.label(egui::RichText::new(breadcrumb).color(colors.text_secondary));
+                        refresh = self.header_ui(ui, theme, breadcrumb);
                     }
                     let hint = self.hint();
                     let mut output = egui::TextEdit::singleline(&mut self.query)
@@ -788,6 +828,10 @@ impl Palette {
                     .interact_pos()
                     .is_some_and(|pos| !area.response.rect.contains(pos))
         });
+        if refresh {
+            self.refresh();
+            ctx.request_repaint();
+        }
         let chosen = clicked.or(self.selected.filter(|_| keys.enter));
         let command = match chosen {
             Some(at) if at < view.items.len() => self.choose(view.items.swap_remove(at)),
@@ -803,12 +847,56 @@ impl Palette {
         command
     }
 
+    /// The line above the field: where the palette has browsed to, and for a
+    /// list fetched in the background, how far it's got and a refresh
+    /// button. Returns whether the button was clicked.
+    fn header_ui(&self, ui: &mut egui::Ui, theme: &Theme, breadcrumb: String) -> bool {
+        let colors = &theme.colors;
+        let provider = self.browsing();
+        let can_refresh = provider.is_some_and(|provider| provider.can_refresh());
+        let fetched = provider
+            .and_then(|provider| provider.fetching())
+            .filter(|&count| count > 0);
+        let label = ui.label(egui::RichText::new(breadcrumb).color(colors.text_secondary));
+        if !can_refresh && fetched.is_none() {
+            return false;
+        }
+        // On the label's line, at the right, without making it taller.
+        let line = egui::Rect::from_x_y_ranges(ui.max_rect().x_range(), label.rect.y_range());
+        let mut right = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(line)
+                .layout(egui::Layout::right_to_left(egui::Align::Center)),
+        );
+        let small = |text: &str| {
+            egui::RichText::new(text)
+                .small()
+                .color(colors.text_secondary)
+        };
+        let mut clicked = false;
+        if can_refresh {
+            let button = egui::Button::new(small("Refresh")).frame(false).small();
+            clicked = right
+                .add(button)
+                .on_hover_text("Fetch this list again")
+                .clicked();
+        }
+        if let Some(count) = fetched {
+            right.label(small(&format!("Loading… {count} so far")));
+            let size = right.text_style_height(&egui::TextStyle::Small);
+            right.add(egui::Spinner::new().size(size));
+        }
+        clicked
+    }
+
     /// The rows, returning the one clicked.
     fn list_ui(&mut self, ui: &mut egui::Ui, theme: &Theme, view: &View) -> Option<usize> {
         let colors = &theme.colors;
         let mut clicked = None;
         let scroll_to_selected = std::mem::take(&mut self.scroll_to_selected);
-        if view.loading {
+        // Once some items are in, the header says more are coming, so the
+        // rows don't move down for a spinner here.
+        if view.loading && view.items.is_empty() {
             ui.horizontal(|ui| {
                 ui.spinner();
                 ui.label(egui::RichText::new("Loading…").color(colors.text_secondary));
@@ -832,6 +920,15 @@ impl Palette {
             .auto_shrink([false, true])
             .show(ui, |ui| {
                 ui.spacing_mut().item_spacing.y = 2.0;
+                same_size_rows(ui);
+                // Every row gets a thumbnail's slot if any has one, so the
+                // titles line up.
+                let thumbnail_slot = (thumbnails::ENABLED
+                    && view.items.iter().any(|item| item.thumbnail.is_some()))
+                .then(|| thumbnails::slot_size(ui));
+                if thumbnail_slot.is_some() {
+                    self.thumbnails.poll(ui.ctx());
+                }
                 for (at, item) in view.items.iter().enumerate() {
                     let selected = self.selected == Some(at);
                     // One line, the detail fainter after the title, cut short
@@ -844,13 +941,36 @@ impl Palette {
                         text.append(" ", 0.0, format(colors.text));
                         text.append(&item.detail, 8.0, format(colors.text_secondary));
                     }
-                    let mut button = egui::Button::selectable(selected, text)
+                    // Always framed (see `same_size_rows`); the selected row
+                    // keeps the outline it had at rest.
+                    let slot_id = ui.id().with(("thumbnail", at));
+                    let mut atoms = egui::Atoms::new(text);
+                    if let Some(size) = thumbnail_slot {
+                        atoms.push_left(egui::Atom::custom(slot_id, size));
+                    }
+                    let mut button = egui::Button::new(atoms)
+                        .selected(selected)
+                        .frame(true)
+                        .frame_when_inactive(true)
                         .truncate()
                         .min_size(egui::vec2(ui.available_width(), 0.0));
+                    if selected {
+                        button = button.stroke(egui::Stroke::new(ROW_STROKE, colors.strong_stroke));
+                    }
                     if let Some(shortcut) = &item.shortcut {
                         button = button.shortcut_text(ui.ctx().format_shortcut(shortcut));
                     }
-                    let row = ui.add_enabled(item.enabled, button);
+                    let drawn = ui
+                        .add_enabled_ui(item.enabled, |ui| button.atom_ui(ui))
+                        .inner;
+                    // Fetched only for rows on screen: the slot has a rect
+                    // only when the row is visible.
+                    if let (Some(url), Some(slot)) = (&item.thumbnail, drawn.rect(slot_id))
+                        && let Some(texture) = self.thumbnails.get(ui.ctx(), url)
+                    {
+                        thumbnails::paint(ui, slot, texture);
+                    }
+                    let row = drawn.response;
                     if selected && scroll_to_selected {
                         row.scroll_to_me(None);
                     }
@@ -861,6 +981,31 @@ impl Palette {
             });
         clicked
     }
+}
+
+/// The outline width of every palette row, highlighted or not.
+const ROW_STROKE: f32 = 1.0;
+
+/// Makes every row in `ui` the same size in every state. egui frames a
+/// button only once it's hovered, pressed or selected, and its padding
+/// allows for the outline only when it's framed, so a plain row was smaller
+/// by its outline width on each side and the rows below moved as the
+/// highlight did. Here every state has the same outline width and no
+/// expansion, and plain rows are framed in transparent colours. The padding
+/// gives back the outline's height, so rows stay the height plain ones were.
+fn same_size_rows(ui: &mut egui::Ui) {
+    ui.spacing_mut().button_padding.y -= ROW_STROKE;
+    let widgets = &mut ui.visuals_mut().widgets;
+    for state in [
+        &mut widgets.inactive,
+        &mut widgets.hovered,
+        &mut widgets.active,
+    ] {
+        state.expansion = 0.0;
+        state.bg_stroke.width = ROW_STROKE;
+    }
+    widgets.inactive.bg_stroke.color = egui::Color32::TRANSPARENT;
+    widgets.inactive.weak_bg_fill = egui::Color32::TRANSPARENT;
 }
 
 #[cfg(test)]
@@ -1313,6 +1458,52 @@ mod tests {
         assert_eq!(titles(&view.items), ["Survey data"]);
         assert_eq!(enter(&mut palette), None);
         assert_eq!(palette.breadcrumb().as_deref(), Some("Survey data"));
+    }
+
+    /// The rows' rects as `list_ui` lays them out with `theme`, with `selected`
+    /// selected and the pointer at `hover`.
+    fn row_rects(theme: &Theme, selected: usize, hover: Option<egui::Pos2>) -> Vec<egui::Rect> {
+        use egui_kittest::kittest::Queryable;
+        let mut palette = Palette::default();
+        palette.open(PaletteMode::Commands);
+        let view = view_of(&mut palette);
+        palette.selected = Some(selected);
+        let theme = theme.clone();
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(600.0, 800.0))
+            .build_ui(move |ui| {
+                theme.apply(ui.ctx());
+                palette.list_ui(ui, &theme, &view);
+            });
+        harness.run();
+        if let Some(pos) = hover {
+            harness.hover_at(pos);
+            harness.run();
+        }
+        harness
+            .query_all_by_role(egui::accesskit::Role::Button)
+            .map(|node| node.rect())
+            .collect()
+    }
+
+    #[test]
+    fn rows_should_stay_put_as_the_selection_and_hover_move() {
+        // Large enough text that rows are taller than the minimum height,
+        // where a border on highlighted rows only once made them bigger.
+        for button_size in [Theme::default().fonts.button_size, 20.0] {
+            let mut theme = Theme::default();
+            theme.fonts.button_size = button_size;
+            let first = row_rects(&theme, 0, None);
+            assert!(first.len() > 3);
+            let height = first[0].height();
+            assert!(
+                first.iter().all(|rect| rect.height() == height),
+                "rows of different heights at {button_size} pt: {first:?}"
+            );
+            assert_eq!(row_rects(&theme, 2, None), first, "{button_size} pt");
+            let hover = Some(first[1].center());
+            assert_eq!(row_rects(&theme, 2, hover), first, "{button_size} pt");
+        }
     }
 
     #[test]

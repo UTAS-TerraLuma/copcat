@@ -31,6 +31,7 @@ use super::open_ui::clean_source;
 use super::palette::{
     Browse, Env, ItemAction, ListProvider, Listing, PaletteItem, PaletteMode, Provider,
 };
+use super::thumbnails;
 
 /// What a data source browses.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -183,6 +184,7 @@ pub(crate) fn item_row(item: &Item) -> PaletteItem {
         }
     };
     row.with_detail(detail.join(" · "))
+        .with_thumbnail(item.thumbnail.clone().filter(|_| thumbnails::ENABLED))
 }
 
 /// A greyed-out row: a note, or something that can't be opened.
@@ -728,6 +730,7 @@ mod tests {
             title: None,
             datetime: Some("2026-04-14T02:00:00Z".to_owned()),
             assets,
+            thumbnail: None,
         }
     }
 
