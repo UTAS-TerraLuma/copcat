@@ -31,6 +31,7 @@ mod session;
 mod settings;
 mod subcloud_mode;
 mod subcloud_tool;
+mod thumbnails;
 mod user_config;
 
 use std::mem;

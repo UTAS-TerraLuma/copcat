@@ -275,6 +275,10 @@ pub(crate) fn parse_item(url: &Url, feature: &Value) -> Item {
     let datetime = string(properties, "datetime")
         .or_else(|| string(properties, "start_datetime"))
         .map(str::to_owned);
+    let thumbnail = feature
+        .get("assets")
+        .and_then(Value::as_object)
+        .and_then(|assets| thumbnail(&base, assets));
     let assets = feature
         .get("assets")
         .and_then(Value::as_object)
@@ -300,6 +304,43 @@ pub(crate) fn parse_item(url: &Url, feature: &Value) -> Item {
         title,
         datetime,
         assets,
+        thumbnail,
+    }
+}
+
+/// The URL of an item's thumbnail: the asset with the `thumbnail` role, else
+/// the one keyed `thumbnail`, if it's a PNG or JPEG (by media type, or by
+/// name when it has none) at an http or https URL.
+pub(crate) fn thumbnail(base: &Url, assets: &serde_json::Map<String, Value>) -> Option<String> {
+    let has_role = |asset: &Value| {
+        asset
+            .get("roles")
+            .and_then(Value::as_array)
+            .is_some_and(|roles| roles.iter().any(|role| role.as_str() == Some("thumbnail")))
+    };
+    let asset = assets
+        .values()
+        .find(|asset| has_role(asset))
+        .or_else(|| assets.get("thumbnail"))?;
+    let href = string(asset, "href")?;
+    let picture = match string(asset, "type") {
+        Some(media_type) => {
+            let essence = media_type.split(';').next().unwrap_or("").trim();
+            ["image/png", "image/jpeg", "image/jpg"]
+                .iter()
+                .any(|known| essence.eq_ignore_ascii_case(known))
+        }
+        None => {
+            let path = href.split(['?', '#']).next().unwrap_or(href);
+            let path = path.to_ascii_lowercase();
+            [".png", ".jpg", ".jpeg"]
+                .iter()
+                .any(|extension| path.ends_with(extension))
+        }
+    };
+    match resolve_href(base, href) {
+        Href::Openable(url) if picture => Some(url),
+        _ => None,
     }
 }
 
@@ -569,6 +610,68 @@ mod tests {
         assert!(
             reason.starts_with("s3:// links can't be opened"),
             "{reason}"
+        );
+    }
+
+    fn thumbnail_of(assets: Value) -> Option<String> {
+        thumbnail(
+            &url("https://example.com/stac/a/a.json"),
+            assets.as_object().unwrap(),
+        )
+    }
+
+    #[test]
+    fn a_thumbnail_should_be_found_by_role_then_key() {
+        let by_role = json!({
+            "preview": {"href": "preview.png", "type": "image/png", "roles": ["thumbnail"]},
+            "thumbnail": {"href": "other.png", "type": "image/png"}
+        });
+        assert_eq!(
+            thumbnail_of(by_role).as_deref(),
+            Some("https://example.com/stac/a/preview.png")
+        );
+        let by_key = json!({"thumbnail": {"href": "https://x.example/t.JPG?sig=1"}});
+        assert_eq!(
+            thumbnail_of(by_key).as_deref(),
+            Some("https://x.example/t.JPG?sig=1")
+        );
+        assert_eq!(
+            thumbnail_of(json!({"pc": {"href": "a.copc.laz", "roles": ["data"]}})),
+            None
+        );
+    }
+
+    #[test]
+    fn a_thumbnail_should_be_a_png_or_jpeg_at_an_http_url() {
+        let typed = |media_type: &str| {
+            thumbnail_of(json!({"thumbnail": {"href": "t", "type": media_type}}))
+        };
+        assert!(typed("image/jpeg").is_some());
+        assert!(typed("IMAGE/PNG; charset=binary").is_some());
+        assert_eq!(typed("image/webp"), None);
+        assert_eq!(typed("image/tiff; application=geotiff"), None);
+        assert_eq!(
+            thumbnail_of(json!({"thumbnail": {"href": "t.gif"}})),
+            None,
+            "an untyped picture that isn't PNG or JPEG by name"
+        );
+        assert_eq!(
+            thumbnail_of(json!({"thumbnail": {"href": "s3://b/t.png", "type": "image/png"}})),
+            None
+        );
+    }
+
+    #[test]
+    fn the_fixture_static_item_should_have_a_thumbnail() {
+        let text = include_str!("../../tests/data/stac/static/site-a/site-a.json");
+        let doc: Value = serde_json::from_str(text).unwrap();
+        let item = parse_item(
+            &url("http://127.0.0.1:1/stac/static/site-a/site-a.json"),
+            &doc,
+        );
+        assert_eq!(
+            item.thumbnail.as_deref(),
+            Some("http://127.0.0.1:1/stac/static/site-a/site-a-thumbnail.png")
         );
     }
 

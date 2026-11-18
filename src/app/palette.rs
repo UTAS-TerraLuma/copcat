@@ -43,6 +43,7 @@ use eframe::egui::{self, Key, KeyboardShortcut, Modifiers};
 use super::ViewerApp;
 use super::commands::{Command, Keymap};
 use super::open_ui::clean_source;
+use super::thumbnails::{self, Thumbnails};
 use crate::theme::Theme;
 
 /// What a provider gets to know about the app, to build its items.
@@ -64,6 +65,8 @@ pub(crate) struct PaletteItem {
     /// Greyed out and skipped by the selection when false.
     pub(crate) enabled: bool,
     pub(crate) action: ItemAction,
+    /// The URL of a small picture to show at the left of the row.
+    pub(crate) thumbnail: Option<String>,
 }
 
 /// What choosing an item does.
@@ -133,11 +136,17 @@ impl PaletteItem {
             shortcut: None,
             enabled: true,
             action,
+            thumbnail: None,
         }
     }
 
     pub(crate) fn with_detail(mut self, detail: impl Into<String>) -> Self {
         self.detail = detail.into();
+        self
+    }
+
+    pub(crate) fn with_thumbnail(mut self, url: Option<String>) -> Self {
+        self.thumbnail = url;
         self
     }
 
@@ -154,6 +163,7 @@ impl PaletteItem {
             shortcut: env.keymap.shortcut(command.id()),
             enabled: (env.can_run)(&command),
             action,
+            thumbnail: None,
         }
     }
 }
@@ -499,6 +509,7 @@ pub(crate) struct Palette {
     /// Put the field's cursor at the end of its text next frame: the text
     /// was set by the palette, not typed, so the cursor may be anywhere.
     cursor_to_end: bool,
+    thumbnails: Thumbnails,
 }
 
 impl Palette {
@@ -910,6 +921,14 @@ impl Palette {
             .show(ui, |ui| {
                 ui.spacing_mut().item_spacing.y = 2.0;
                 same_size_rows(ui);
+                // Every row gets a thumbnail's slot if any has one, so the
+                // titles line up.
+                let thumbnail_slot = (thumbnails::ENABLED
+                    && view.items.iter().any(|item| item.thumbnail.is_some()))
+                .then(|| thumbnails::slot_size(ui));
+                if thumbnail_slot.is_some() {
+                    self.thumbnails.poll(ui.ctx());
+                }
                 for (at, item) in view.items.iter().enumerate() {
                     let selected = self.selected == Some(at);
                     // One line, the detail fainter after the title, cut short
@@ -924,7 +943,12 @@ impl Palette {
                     }
                     // Always framed (see `same_size_rows`); the selected row
                     // keeps the outline it had at rest.
-                    let mut button = egui::Button::new(text)
+                    let slot_id = ui.id().with(("thumbnail", at));
+                    let mut atoms = egui::Atoms::new(text);
+                    if let Some(size) = thumbnail_slot {
+                        atoms.push_left(egui::Atom::custom(slot_id, size));
+                    }
+                    let mut button = egui::Button::new(atoms)
                         .selected(selected)
                         .frame(true)
                         .frame_when_inactive(true)
@@ -936,7 +960,17 @@ impl Palette {
                     if let Some(shortcut) = &item.shortcut {
                         button = button.shortcut_text(ui.ctx().format_shortcut(shortcut));
                     }
-                    let row = ui.add_enabled(item.enabled, button);
+                    let drawn = ui
+                        .add_enabled_ui(item.enabled, |ui| button.atom_ui(ui))
+                        .inner;
+                    // Fetched only for rows on screen: the slot has a rect
+                    // only when the row is visible.
+                    if let (Some(url), Some(slot)) = (&item.thumbnail, drawn.rect(slot_id))
+                        && let Some(texture) = self.thumbnails.get(ui.ctx(), url)
+                    {
+                        thumbnails::paint(ui, slot, texture);
+                    }
+                    let row = drawn.response;
                     if selected && scroll_to_selected {
                         row.scroll_to_me(None);
                     }

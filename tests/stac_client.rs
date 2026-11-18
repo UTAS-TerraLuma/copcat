@@ -192,7 +192,7 @@ fn the_aeo_workshop_static_catalog_should_have_point_clouds() {
 
 #[test]
 #[ignore = "fetches a real STAC API over the internet"]
-fn the_naturescan_api_should_have_point_clouds_and_pages() {
+fn the_naturescan_api_should_list_in_full_with_point_clouds() {
     let client = Client::new();
     let root = client
         .browse_root("https://stacapi.naturescan.earth/")
@@ -200,11 +200,20 @@ fn the_naturescan_api_should_have_point_clouds_and_pages() {
     let Some(Entry::Node(collection)) = root.entries.first() else {
         panic!("no collections: {:?}", titles(&root));
     };
-    let items = client.browse(&collection.url).unwrap();
-    assert!(items.more.is_some(), "it has more than one page of items");
-    let url = find_point_cloud(&client, &items, 0).expect("a COPC asset");
+    let mut page = client.browse(&collection.url).unwrap();
+    let url = find_point_cloud(&client, &page, 0).expect("a COPC asset");
     println!("found {url}");
-    let next = client.more(items.more.as_ref().unwrap()).unwrap();
-    assert!(!next.entries.is_empty());
-    assert_ne!(titles(&next), titles(&items));
+    let mut listed = titles(&page);
+    let mut pages = 1;
+    while let Some(more) = page.more.take() {
+        page = client.more(&more).unwrap();
+        listed.extend(titles(&page));
+        pages += 1;
+        assert!(pages < 50, "too many pages");
+    }
+    println!("{} items in {pages} pages", listed.len());
+    let mut unique = listed.clone();
+    unique.sort();
+    unique.dedup();
+    assert_eq!(unique.len(), listed.len(), "no item twice");
 }

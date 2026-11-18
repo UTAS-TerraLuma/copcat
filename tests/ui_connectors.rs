@@ -136,6 +136,44 @@ fn wait_for_row(
     }
 }
 
+/// Where the palette row titled `title` is.
+fn row_rect(harness: &Harness<'_, impl eframe::App>, title: &str) -> egui::Rect {
+    harness
+        .get_by(|node| {
+            node.role() == Role::Button
+                && node
+                    .label()
+                    .is_some_and(|label| label == title || label.starts_with(&format!("{title} ")))
+        })
+        .rect()
+}
+
+/// Steps until egui has a texture whose name ends with `name`: a thumbnail
+/// is fetched and decoded on a thread, which asks for a repaint when done.
+fn wait_for_texture(
+    harness: &mut Harness<'_, impl eframe::App>,
+    woken: &mpsc::Receiver<()>,
+    name: &str,
+) {
+    let started = Instant::now();
+    loop {
+        harness.step();
+        let loaded = harness
+            .ctx
+            .tex_manager()
+            .read()
+            .allocated()
+            .any(|(_, meta)| meta.name.ends_with(name));
+        if loaded {
+            harness.run_ok();
+            return;
+        }
+        let left = TIMEOUT.saturating_sub(started.elapsed());
+        assert!(!left.is_zero(), "no texture {name:?}");
+        let _ = woken.recv_timeout(left);
+    }
+}
+
 /// The label in the row after the one labelled `name`, in the side panel's
 /// two-column grids: its text and where it is.
 fn value_after(
@@ -243,8 +281,16 @@ fn a_static_stac_catalog_should_browse_down_to_a_cloud_and_open_it() {
         harness.query_by_label("Fixture catalog").is_some(),
         "the breadcrumb"
     );
+    let plain_row = row_rect(&harness, "Fixture survey");
     enter(&mut harness);
     wait_for_row(&mut harness, &woken, "Site A");
+    // Site A's thumbnail arrives; rows with and without one are as tall as
+    // rows without any, with their titles lined up.
+    wait_for_texture(&mut harness, &woken, "site-a-thumbnail.png");
+    let (site_a, site_b) = (row_rect(&harness, "Site A"), row_rect(&harness, "Site B"));
+    assert_eq!(site_a.height(), plain_row.height());
+    assert_eq!(site_b.height(), plain_row.height());
+    assert_eq!(site_a.left(), site_b.left());
     assert_eq!(
         row_enabled(&harness, "Site B"),
         Some(false),

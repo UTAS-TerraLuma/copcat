@@ -88,6 +88,10 @@ pub struct Item {
     /// as written.
     pub datetime: Option<String>,
     pub assets: Vec<Asset>,
+    /// A small PNG or JPEG picture of it, if it has one that can be fetched:
+    /// the asset with the `thumbnail` role, or failing that the `thumbnail`
+    /// key.
+    pub thumbnail: Option<String>,
 }
 
 impl Item {
