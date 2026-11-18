@@ -147,8 +147,111 @@ impl Octree {
 
     /// Each level adds points between its parent's, halving the spacing.
     fn node_spacing(&self, key: &VoxelKey) -> f32 {
+        self.shape().node_spacing(key)
+    }
+
+    /// The cube and spacing of the octree, without the data.
+    pub fn shape(&self) -> OctreeShape {
+        OctreeShape {
+            halfsize: self.halfsize,
+            spacing: self.spacing,
+        }
+    }
+}
+
+/// The octree's root cube and point spacing: enough to know any node's cube
+/// and spacing from its key. The renderer keeps one to size points by their
+/// spacing (see [`finer_levels`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct OctreeShape {
+    /// Half the side of the root cube, which is centred on the local origin.
+    pub halfsize: f32,
+    /// Average distance between points in the root node, in metres.
+    pub spacing: f32,
+}
+
+impl OctreeShape {
+    /// Average distance between a node's points, in metres. Each level adds
+    /// points between its parent's, halving the spacing.
+    pub fn node_spacing(&self, key: &VoxelKey) -> f32 {
         self.spacing / 2_f32.powi(key.level)
     }
+
+    /// The centre of a node's whole cube (not clipped to the data), in local
+    /// coordinates. Its children split the cube at this point.
+    pub fn node_centre(&self, key: &VoxelKey) -> Vec3 {
+        let side = 2.0 * self.halfsize / 2_f32.powi(key.level);
+        Vec3::splat(-self.halfsize)
+            + (Vec3::new(key.x as f32, key.y as f32, key.z as f32) + 0.5) * side
+    }
+}
+
+/// Which of its parent's eight octants a node fills: bit 0 set for the
+/// upper half in X, bit 1 in Y, bit 2 in Z. `points.wgsl` numbers octants
+/// the same way.
+pub fn octant(key: &VoxelKey) -> usize {
+    ((key.x & 1) | (key.y & 1) << 1 | (key.z & 1) << 2) as usize
+}
+
+/// A node being drawn, as [`finest_spacing`] needs it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DrawnNode {
+    pub key: VoxelKey,
+    /// How far apart its points are where it has them, in metres.
+    pub spacing: f32,
+    /// How far apart its points would be spread over its whole cube: no
+    /// less than `spacing`, and more for a node whose points are bunched
+    /// in one part of it.
+    pub spread_spacing: f32,
+}
+
+impl DrawnNode {
+    /// A node with `count` points `spacing` apart, in an octree of `shape`.
+    pub fn new(shape: &OctreeShape, key: VoxelKey, spacing: f32, count: u32) -> Self {
+        let side = 2.0 * shape.halfsize / 2_f32.powi(key.level);
+        Self {
+            key,
+            spacing,
+            spread_spacing: spacing.max(side / (count.max(1) as f32).sqrt()),
+        }
+    }
+}
+
+/// For each drawn node, the smallest spacing of it and the drawn nodes below
+/// it in each of its octants (see [`octant`]): its own spacing where nothing
+/// finer is drawn there.
+///
+/// The octree is additive: a node stays drawn under its children, and where
+/// several levels are drawn their points add up to about the density of the
+/// finest one. So a point should be sized by the finest node drawn around
+/// it, not by its own node's spacing, or a parent's big points cover its
+/// children's small ones. The renderer gives each node these spacings, and
+/// the vertex shader lets each point shrink to as little as its octant's
+/// (see `AdaptiveSize::diameter_px` in the renderer). Bounding it by what's
+/// drawn, rather than trusting the LOD to have refined, means a parent's
+/// points stay big over a child that hasn't loaded yet, that the point budget
+/// left out, or that holds fewer points than its level should.
+///
+/// Nodes below count with their `spread_spacing`: one that only has points
+/// in a corner of an octant mustn't shrink the points across all of it.
+pub fn finest_spacing(drawn: &[DrawnNode]) -> HashMap<VoxelKey, [f32; 8]> {
+    let mut finest: HashMap<VoxelKey, [f32; 8]> = drawn
+        .iter()
+        .map(|node| (node.key, [node.spacing; 8]))
+        .collect();
+    for node in drawn {
+        // Walk up from the node, telling each drawn ancestor about it in the
+        // octant the path down goes through.
+        let mut child = node.key;
+        while let Some(parent) = child.parent() {
+            if let Some(octants) = finest.get_mut(&parent) {
+                let slot = &mut octants[octant(&child)];
+                *slot = slot.min(node.spread_spacing);
+            }
+            child = parent;
+        }
+    }
+    finest
 }
 
 /// What node selection needs to know about the camera.
@@ -169,16 +272,25 @@ enum PixelScale {
     Orthographic(f32),
 }
 
+/// How many pixels a metre covers on screen: at a depth of 1 m in
+/// perspective (divide by the depth for others), or at any depth in
+/// orthographic. Node selection and the point shader both use this, so
+/// they agree on how far apart points look.
+pub fn pixel_scale(camera: &OrbitCamera, viewport_px: [u32; 2]) -> f32 {
+    let height = viewport_px[1].max(1) as f32;
+    match camera.projection() {
+        Projection::Perspective => height / (2.0 * (camera.fov_y * 0.5).tan()),
+        Projection::Orthographic => height / (2.0 * camera.half_height()),
+    }
+}
+
 impl View {
     pub fn new(camera: &OrbitCamera, viewport_px: [u32; 2]) -> Self {
         let [width, height] = viewport_px.map(|v| v.max(1) as f32);
+        let scale = pixel_scale(camera, viewport_px);
         let pixel_scale = match camera.projection() {
-            Projection::Perspective => {
-                PixelScale::Perspective(height / (2.0 * (camera.fov_y * 0.5).tan()))
-            }
-            Projection::Orthographic => {
-                PixelScale::Orthographic(height / (2.0 * camera.half_height()))
-            }
+            Projection::Perspective => PixelScale::Perspective(scale),
+            Projection::Orthographic => PixelScale::Orthographic(scale),
         };
         Self {
             frustum: Frustum::from_view_projection(camera.view_projection(width / height)),
@@ -226,6 +338,18 @@ impl Default for LodSettings {
         Self {
             point_budget: 5_000_000,
             target_spacing_px: 2.0,
+        }
+    }
+}
+
+impl LodSettings {
+    /// These settings, but loading no detail finer than `finest_px` apart on
+    /// screen: there's no use loading points closer together than they
+    /// can be drawn.
+    pub fn no_finer_than(self, finest_px: f32) -> Self {
+        Self {
+            target_spacing_px: self.target_spacing_px.max(finest_px),
+            ..self
         }
     }
 }
@@ -640,6 +764,108 @@ mod tests {
 
         octree.show_heights(None);
         assert_eq!(octree.node_bounds(&child).0.z, -HALFSIZE);
+    }
+
+    fn key(level: i32, x: i32, y: i32, z: i32) -> VoxelKey {
+        VoxelKey { level, x, y, z }
+    }
+
+    /// A drawn node whose points fill its cube.
+    fn filled(key: VoxelKey, spacing: f32) -> DrawnNode {
+        DrawnNode {
+            key,
+            spacing,
+            spread_spacing: spacing,
+        }
+    }
+
+    #[test]
+    fn finest_spacing_should_find_the_finest_drawn_node_in_each_octant() {
+        let root = VoxelKey::ROOT;
+        // Octant 1 (upper X) is drawn three levels deeper, octant 6 (upper Y
+        // and Z) one; the rest aren't refined.
+        let drawn = [
+            filled(root, 8.0),
+            filled(key(1, 1, 0, 0), 4.0),
+            filled(key(2, 2, 1, 0), 2.0),
+            filled(key(3, 5, 2, 1), 1.0),
+            filled(key(1, 0, 1, 1), 4.0),
+        ];
+        let finest = finest_spacing(&drawn);
+        assert_eq!(finest[&root], [8.0, 1.0, 8.0, 8.0, 8.0, 8.0, 4.0, 8.0]);
+        // The level 2 node is in its parent's octant 2 (upper Y), the level
+        // 3 node in its parent's octant 1 | 4.
+        assert_eq!(
+            finest[&key(1, 1, 0, 0)],
+            [4.0, 4.0, 1.0, 4.0, 4.0, 4.0, 4.0, 4.0]
+        );
+        assert_eq!(finest[&key(2, 2, 1, 0)][5], 1.0);
+        assert_eq!(finest[&key(3, 5, 2, 1)], [1.0; 8]);
+    }
+
+    #[test]
+    fn finest_spacing_should_keep_a_parents_spacing_over_sparser_children() {
+        // A child holding fewer points than its level should (as writers do
+        // in sparse areas) mustn't make its parent's points shrink.
+        let drawn = [filled(VoxelKey::ROOT, 1.0), filled(key(1, 0, 0, 0), 2.0)];
+        assert_eq!(finest_spacing(&drawn)[&VoxelKey::ROOT], [1.0; 8]);
+    }
+
+    #[test]
+    fn finest_spacing_should_not_let_a_bunched_child_shrink_its_whole_octant() {
+        let shape = full_octree(1, 1).shape();
+        // 100 points 0.5 m apart, in one 5 m patch of a 100 m cube: spread
+        // over the cube they'd be 10 m apart.
+        let child = DrawnNode::new(&shape, key(1, 0, 0, 0), 0.5, 100);
+        assert_eq!(child.spread_spacing, 10.0);
+        let drawn = [filled(VoxelKey::ROOT, 2.0), child];
+        assert_eq!(finest_spacing(&drawn)[&VoxelKey::ROOT][0], 2.0);
+    }
+
+    #[test]
+    fn finest_spacing_should_see_through_nodes_that_are_not_drawn() {
+        // The level 1 node is empty or still loading: the root's points
+        // there can still shrink to the level 2 node's spacing.
+        let drawn = [filled(VoxelKey::ROOT, 8.0), filled(key(2, 3, 3, 3), 2.0)];
+        let finest = finest_spacing(&drawn);
+        assert_eq!(finest[&VoxelKey::ROOT][7], 2.0);
+        assert_eq!(finest.len(), 2);
+    }
+
+    #[test]
+    fn octree_shape_should_put_a_childs_centre_in_its_octant() {
+        let octree = full_octree(2, 1);
+        let shape = octree.shape();
+        let parent = key(1, 0, 1, 0);
+        for child in parent.children() {
+            let offset = shape.node_centre(&child) - shape.node_centre(&parent);
+            let bits = usize::from(offset.x > 0.0)
+                | usize::from(offset.y > 0.0) << 1
+                | usize::from(offset.z > 0.0) << 2;
+            assert_eq!(bits, octant(&child), "{child:?}");
+        }
+        assert_eq!(shape.node_centre(&VoxelKey::ROOT), Vec3::ZERO);
+        assert_eq!(shape.node_spacing(&key(2, 0, 0, 0)), 2.5);
+    }
+
+    #[test]
+    fn pixel_scale_should_turn_spacing_into_the_pixels_selection_uses() {
+        let octree = full_octree(0, 1);
+        let mut camera = camera(Vec3::ZERO, 1000.0);
+        camera.set_projection(Projection::Orthographic);
+        let view = View::new(&camera, VIEWPORT);
+        let spacing = octree.node_spacing(&VoxelKey::ROOT);
+        assert_eq!(
+            view.projected_px(spacing, 1.0),
+            spacing * pixel_scale(&camera, VIEWPORT)
+        );
+    }
+
+    #[test]
+    fn no_finer_than_should_only_ever_coarsen_the_target() {
+        let lod = LodSettings::default();
+        assert_eq!(lod.no_finer_than(0.5), lod);
+        assert_eq!(lod.no_finer_than(3.0).target_spacing_px, 3.0);
     }
 
     #[test]

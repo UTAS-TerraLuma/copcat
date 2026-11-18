@@ -306,6 +306,85 @@ fn east_view_should_match_golden() {
     assert_matches_golden("east_height", &image);
 }
 
+/// The colour most pixels have.
+fn most_common(image: &Rgb) -> [u8; 3] {
+    let mut counts = std::collections::HashMap::new();
+    for pixel in &image.pixels {
+        *counts.entry(*pixel).or_insert(0) += 1;
+    }
+    counts
+        .into_iter()
+        .max_by_key(|(_, count)| *count)
+        .map(|(pixel, _)| pixel)
+        .unwrap()
+}
+
+/// The share of pixels in `[x0, y0, x1, y1)` that something is drawn on.
+fn coverage(image: &Rgb, [x0, y0, x1, y1]: [u32; 4], background: [u8; 3]) -> f64 {
+    let drawn = (y0..y1)
+        .flat_map(|y| (x0..x1).map(move |x| (x, y)))
+        .filter(|&(x, y)| is_drawn(image.at(x, y), background))
+        .count();
+    drawn as f64 / f64::from((x1 - x0) * (y1 - y0))
+}
+
+/// Looking straight down at open ground in the south-west, about 7 px
+/// between points: 2 px points leave most of it empty, while adaptive sizes
+/// cover it.
+#[test]
+fn adaptive_points_should_fill_ground_that_fixed_points_leave_gaps_in() {
+    let view = [
+        "--view",
+        "top",
+        "--target",
+        "500025,5400015,100",
+        "--distance",
+        "30",
+        "--no-edl",
+    ];
+    let with = |mode: &str| -> Option<Rgb> {
+        let mut flags = view.to_vec();
+        flags.extend(["--point-size-mode", mode]);
+        render(&format!("ground_close_{mode}"), &flags)
+    };
+    let (Some(adaptive), Some(fixed)) = (with("adaptive"), with("fixed")) else {
+        return;
+    };
+    // Ground fills the adaptive image to its corners, so take the clear
+    // colour from the fixed one, where most pixels are empty.
+    let clear = most_common(&fixed);
+    // The middle of the image, all ground.
+    let middle = [WIDTH / 4, HEIGHT / 4, WIDTH * 3 / 4, HEIGHT * 3 / 4];
+    let (adaptive, fixed) = (
+        coverage(&adaptive, middle, clear),
+        coverage(&fixed, middle, clear),
+    );
+    eprintln!("ground covered: adaptive {adaptive:.3}, fixed {fixed:.3}");
+    assert!(
+        adaptive > 0.85 && fixed < 0.3,
+        "ground covered: adaptive {adaptive:.2}, fixed {fixed:.2}"
+    );
+}
+
+/// From far away the points are much closer together than 2 px, so
+/// adaptive points are smaller and cover no more than fixed ones.
+#[test]
+fn adaptive_points_should_not_cover_more_than_fixed_from_far_away() {
+    let with = |mode: &str| -> Option<Rgb> {
+        let flags = ["--distance", "600", "--no-edl", "--point-size-mode", mode];
+        render(&format!("far_{mode}"), &flags)
+    };
+    let (Some(adaptive), Some(fixed)) = (with("adaptive"), with("fixed")) else {
+        return;
+    };
+    let ((adaptive, _), (fixed, _)) = (drawn(&adaptive), drawn(&fixed));
+    eprintln!("pixels drawn from far away: adaptive {adaptive}, fixed {fixed}");
+    assert!(
+        adaptive > 0 && adaptive <= fixed,
+        "pixels drawn: adaptive {adaptive}, fixed {fixed}"
+    );
+}
+
 /// The same view from a file and over HTTP gives the same pixels.
 #[test]
 fn render_over_http_should_match_render_from_file() {

@@ -8,7 +8,7 @@ use std::time::Duration;
 use eframe::egui;
 
 use crate::camera::OrbitCamera;
-use crate::export::{self, CameraArgs, ColorArg, RenderArgs, StyleArgs};
+use crate::export::{self, CameraArgs, ColorArg, PointSizeArg, RenderArgs, StyleArgs};
 use crate::heights::HeightSettings;
 use crate::lod;
 use crate::subcloud::Footprint;
@@ -16,7 +16,7 @@ use crate::subcloud::Footprint;
 use super::commands::{Command, Keymap};
 use super::scene::point_style;
 use super::session::Session;
-use super::settings::{ColorMode, ExportSettings, ViewSettings};
+use super::settings::{ColorMode, ExportSettings, PointSizeMode, ViewSettings};
 use super::{LoadState, Mode, ViewerApp};
 
 /// The image being saved. Its size is in [`ExportSettings`].
@@ -307,8 +307,15 @@ pub(crate) fn render_args(
                 ColorMode::Classification => ColorArg::Classification,
             },
             z: Some(session.shown),
+            point_size_mode: Some(match settings.point_size_mode {
+                PointSizeMode::Adaptive => PointSizeArg::Adaptive,
+                PointSizeMode::Fixed => PointSizeArg::Fixed,
+            }),
             // The command takes physical pixels, like `point_style` makes.
-            point_size: settings.point_size * pixels_per_point,
+            point_size: Some(settings.point_size * pixels_per_point),
+            fill: settings.adaptive_size.fill,
+            min_point_size: settings.adaptive_size.min_px * pixels_per_point,
+            max_point_size: settings.adaptive_size.max_px * pixels_per_point,
             no_edl: !settings.edl_enabled,
             edl_strength: settings.edl.strength,
             edl_radius: settings.edl.radius_px * pixels_per_point,

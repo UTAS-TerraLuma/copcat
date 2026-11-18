@@ -6,13 +6,13 @@ use eframe::egui;
 use crate::camera::OrbitCamera;
 use crate::gizmo;
 use crate::lod;
-use crate::renderer::{EdlSettings, PointRenderer, PointStyle, Viewport};
+use crate::renderer::{AdaptiveSize, EdlSettings, PointRenderer, PointStyle, Viewport};
 use crate::subcloud::Footprint;
 use crate::theme::Theme;
 
 use super::camera_input::camera_controls;
 use super::session::{Session, Views};
-use super::settings::{DiagnosticsSettings, ViewSettings};
+use super::settings::{DiagnosticsSettings, PointSizeMode, ViewSettings};
 
 /// Gap between the 3D view's edges and the gizmo, in logical pixels.
 const OVERLAY_MARGIN: f32 = 10.0;
@@ -49,8 +49,15 @@ pub(crate) fn point_style(
     clip: Option<Footprint>,
     theme: &Theme,
 ) -> PointStyle {
+    let adaptive = &settings.adaptive_size;
     PointStyle {
         size_px: settings.point_size * pixels_per_point,
+        adaptive: (settings.point_size_mode == PointSizeMode::Adaptive).then(|| AdaptiveSize {
+            fill: adaptive.fill,
+            min_px: adaptive.min_px * pixels_per_point,
+            max_px: adaptive.max_px * pixels_per_point,
+            target_spacing_px: settings.lod_for_view(pixels_per_point).target_spacing_px,
+        }),
         color: session.point_color(settings.color_mode),
         height: session.shown,
         edl: settings.edl_enabled.then_some(EdlSettings {
@@ -195,9 +202,8 @@ pub(crate) fn explore_view(ui: &mut egui::Ui, scene: &mut Scene<'_>, camera: &mu
         map: None,
         export: scene.export_view,
     };
-    scene
-        .session
-        .update(scene.renderer, views, &scene.settings.lod);
+    let lod = scene.settings.lod_for_view(area.pixels_per_point);
+    scene.session.update(scene.renderer, views, &lod);
     let texture_id = scene.render_main(&area, camera, None);
     area.paint(ui, texture_id, scene.image_aspect, scene.theme);
 }

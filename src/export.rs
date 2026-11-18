@@ -17,7 +17,8 @@ use crate::heights::{HeightKind, HeightSettings, HeightSource, SourceSetting};
 use crate::loader::{Event, Loader, OpenedCloud};
 use crate::lod::{self, LodSettings, Octree};
 use crate::renderer::{
-    EdlSettings, Image, PointColor, PointRenderer, PointStyle, uses_16_bit_color,
+    AdaptiveSize, DEFAULT_FILL, DEFAULT_MAX_POINT_PX, DEFAULT_MIN_POINT_PX, EdlSettings, Image,
+    PointColor, PointRenderer, PointStyle, uses_16_bit_color,
 };
 use crate::theme::Theme;
 
@@ -90,9 +91,23 @@ pub struct StyleArgs {
     /// Z is in this height too.
     #[arg(long, value_enum)]
     pub z: Option<HeightKind>,
-    /// Point diameter in pixels.
-    #[arg(long, value_name = "PIXELS", default_value_t = 2.0)]
-    pub point_size: f32,
+    /// Size points by how far apart they are on screen (adaptive), or all
+    /// the same (fixed, at --point-size). Defaults to adaptive, or to fixed
+    /// when --point-size is given.
+    #[arg(long, value_enum)]
+    pub point_size_mode: Option<PointSizeArg>,
+    /// Fixed point diameter in pixels. Defaults to 2.
+    #[arg(long, value_name = "PIXELS")]
+    pub point_size: Option<f32>,
+    /// Adaptive point diameter as a multiple of the points' spacing on screen.
+    #[arg(long, default_value_t = DEFAULT_FILL)]
+    pub fill: f32,
+    /// The smallest adaptive point diameter, in pixels.
+    #[arg(long, value_name = "PIXELS", default_value_t = DEFAULT_MIN_POINT_PX)]
+    pub min_point_size: f32,
+    /// The largest adaptive point diameter, in pixels.
+    #[arg(long, value_name = "PIXELS", default_value_t = DEFAULT_MAX_POINT_PX)]
+    pub max_point_size: f32,
     /// Turn off eye-dome lighting, the shading that shows depth.
     #[arg(long)]
     pub no_edl: bool,
@@ -104,7 +119,8 @@ pub struct StyleArgs {
     #[arg(long, default_value_t = LodSettings::default().point_budget)]
     pub point_budget: u64,
     /// Load detail until points are at most this many pixels apart (or the
-    /// point budget runs out). Lower is more detail.
+    /// point budget runs out). Lower is more detail. Adaptive sizes load no
+    /// finer than 2 × --min-point-size / --fill.
     #[arg(long, value_name = "PIXELS", default_value_t = LodSettings::default().target_spacing_px)]
     pub target_spacing: f32,
 }
@@ -123,6 +139,12 @@ pub enum ViewArg {
 pub enum ProjectionArg {
     Perspective,
     Orthographic,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub enum PointSizeArg {
+    Adaptive,
+    Fixed,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
@@ -211,17 +233,47 @@ impl CameraArgs {
     }
 }
 
+/// The fixed point size when --point-size isn't given.
+const DEFAULT_FIXED_POINT_PX: f32 = 2.0;
+
 impl StyleArgs {
+    /// The point size mode these ask for: --point-size alone means fixed.
+    pub fn size_mode(&self) -> PointSizeArg {
+        self.point_size_mode.unwrap_or(match self.point_size {
+            Some(_) => PointSizeArg::Fixed,
+            None => PointSizeArg::Adaptive,
+        })
+    }
+
+    /// The level of detail to load: in adaptive mode, no finer than points
+    /// can be drawn.
     pub fn lod(&self) -> LodSettings {
-        LodSettings {
+        let lod = LodSettings {
             point_budget: self.point_budget,
             target_spacing_px: self.target_spacing,
+        };
+        match self.size_mode() {
+            PointSizeArg::Fixed => lod,
+            PointSizeArg::Adaptive => lod.no_finer_than(AdaptiveSize::finest_useful_spacing_px(
+                self.fill,
+                self.min_point_size,
+            )),
         }
+    }
+
+    fn adaptive_size(&self) -> Option<AdaptiveSize> {
+        (self.size_mode() == PointSizeArg::Adaptive).then(|| AdaptiveSize {
+            fill: self.fill,
+            min_px: self.min_point_size,
+            max_px: self.max_point_size,
+            target_spacing_px: self.lod().target_spacing_px,
+        })
     }
 
     fn point_style(&self, has_rgb: bool, rgb_is_16_bit: bool, height: HeightKind) -> PointStyle {
         PointStyle {
-            size_px: self.point_size,
+            size_px: self.point_size.unwrap_or(DEFAULT_FIXED_POINT_PX),
+            adaptive: self.adaptive_size(),
             color: match self.color {
                 ColorArg::Rgb if has_rgb => PointColor::rgb(rgb_is_16_bit),
                 ColorArg::Classification => PointColor::Classification,
@@ -284,7 +336,18 @@ impl RenderArgs {
             parts.push(format!("--z {}", value_name(z)));
         }
         parts.push(format!("--color {}", value_name(style.color)));
-        parts.push(format!("--point-size {:.2}", style.point_size));
+        let mode = style.size_mode();
+        parts.push(format!("--point-size-mode {}", value_name(mode)));
+        match mode {
+            PointSizeArg::Fixed => parts.push(format!(
+                "--point-size {:.2}",
+                style.point_size.unwrap_or(DEFAULT_FIXED_POINT_PX)
+            )),
+            PointSizeArg::Adaptive => parts.push(format!(
+                "--fill {:.2} --min-point-size {:.2} --max-point-size {:.2}",
+                style.fill, style.min_point_size, style.max_point_size
+            )),
+        }
         if style.no_edl {
             parts.push("--no-edl".to_owned());
         } else {
@@ -398,6 +461,7 @@ pub fn render(args: &RenderArgs) -> Result<(), String> {
     drop(nodes);
     let (min, max) = octree.bounds();
     renderer.set_z_range([min.z, max.z]);
+    renderer.set_octree_shape(octree.shape());
 
     let style = args.style.point_style(info.has_rgb, rgb_is_16_bit, height);
     let mut viewport = renderer.create_viewport();
@@ -539,7 +603,11 @@ mod tests {
             style: StyleArgs {
                 color: ColorArg::Height,
                 z: Some(HeightKind::AboveGround),
-                point_size: 3.0,
+                point_size_mode: Some(PointSizeArg::Adaptive),
+                point_size: Some(3.0),
+                fill: 1.25,
+                min_point_size: 1.5,
+                max_point_size: 12.0,
                 no_edl: true,
                 edl_strength: 1.0,
                 edl_radius: 1.4,
@@ -575,7 +643,47 @@ mod tests {
         assert_eq!(parsed.camera.projection, Some(ProjectionArg::Orthographic));
         assert!(parsed.style.no_edl && parsed.style.color == ColorArg::Height);
         assert_eq!(parsed.style.z, Some(HeightKind::AboveGround));
+        assert_eq!(parsed.style.size_mode(), PointSizeArg::Adaptive);
+        assert_eq!(
+            (
+                parsed.style.fill,
+                parsed.style.min_point_size,
+                parsed.style.max_point_size
+            ),
+            (1.25, 1.5, 12.0)
+        );
+        assert_eq!(parsed.style.lod(), args.style.lod());
         assert_eq!(parsed.heights, args.heights);
+    }
+
+    fn parse(flags: &[&str]) -> StyleArgs {
+        let argv = ["copcat", "in.copc.laz", "-o", "out.png"];
+        Cli::try_parse_from(argv.iter().chain(flags))
+            .unwrap()
+            .render
+            .style
+    }
+
+    #[test]
+    fn size_mode_should_default_to_adaptive_unless_a_point_size_is_given() {
+        assert_eq!(parse(&[]).size_mode(), PointSizeArg::Adaptive);
+        // Commands written before adaptive sizes keep their fixed size.
+        assert_eq!(
+            parse(&["--point-size", "3"]).size_mode(),
+            PointSizeArg::Fixed
+        );
+        let explicit = parse(&["--point-size", "3", "--point-size-mode", "adaptive"]);
+        assert_eq!(explicit.size_mode(), PointSizeArg::Adaptive);
+    }
+
+    #[test]
+    fn lod_should_load_no_finer_than_adaptive_points_can_show() {
+        // 2 × 3 px / 1.5 = 4 px: closer than that, points would be drawn
+        // bigger than their spacing.
+        let flags = ["--min-point-size", "3", "--target-spacing", "2"];
+        assert_eq!(parse(&flags).lod().target_spacing_px, 4.0);
+        let fixed = [&flags[..], &["--point-size-mode", "fixed"]].concat();
+        assert_eq!(parse(&fixed).lod().target_spacing_px, 2.0);
     }
 
     #[test]
