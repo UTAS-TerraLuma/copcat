@@ -15,6 +15,7 @@ mod lod;
 mod renderer;
 mod subcloud;
 mod subcloud_map;
+mod summary;
 mod theme;
 #[cfg(windows)]
 mod windows_dpi;
@@ -25,6 +26,7 @@ use eframe::{egui, egui_wgpu};
 
 pub use export::{RenderArgs, render};
 pub use heights::HeightSettings;
+pub use summary::{CloudSummary, SummaryPoint, read_cloud};
 
 /// Opens the viewer window and blocks until it's closed. `initial_source` is a
 /// COPC URL or file path to load on startup, reading its heights from where
@@ -53,4 +55,15 @@ pub fn run_viewer(initial_source: Option<String>, heights: HeightSettings) -> ef
         options,
         Box::new(|cc| Ok(Box::new(app::ViewerApp::new(cc, initial_source, heights)?))),
     )
+}
+
+/// The viewer as an [`eframe::App`], for UI tests that drive it without a
+/// window (egui_kittest). `cc` needs a wgpu render state. Not a stable API.
+#[doc(hidden)]
+pub fn viewer_app(
+    cc: &eframe::CreationContext<'_>,
+    initial_source: Option<String>,
+    heights: HeightSettings,
+) -> Result<impl eframe::App + use<>, &'static str> {
+    app::ViewerApp::new(cc, initial_source, heights)
 }

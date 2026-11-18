@@ -1,15 +1,24 @@
 name: CI
 
-# Only on version tags (alongside the release build) or when run by hand from
-# the Actions tab, to keep Actions usage down.
 on:
   push:
+    branches: [main]
     tags:
       - '**[0-9]+.[0-9]+.[0-9]+*'
+  pull_request:
   workflow_dispatch:
+
+# A newer push to the same branch or PR cancels the run in progress.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
+  # The runners have no GPU, so the render and UI tests use a software
+  # rasterizer. Requiring one makes a missing adapter fail those tests
+  # instead of skipping them.
+  COPCAT_REQUIRE_GPU: 1
 
 jobs:
   check:
@@ -17,12 +26,26 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Ubuntu 22.04 matches the release build. No apt packages are needed:
-        # wgpu and winit load Vulkan, GL, X11 and Wayland at runtime.
-        os: [ubuntu-22.04, windows-latest]
+        include:
+          # 24.04 for a recent Mesa lavapipe (Vulkan on the CPU). Release
+          # builds stay on 22.04 (release.yml) for the older glibc.
+          - os: ubuntu-24.04
+            adapter: llvmpipe
+          # WARP, Direct3D 12 on the CPU, ships with Windows.
+          - os: windows-latest
+            adapter: Microsoft Basic Render Driver
     runs-on: ${{ matrix.os }}
+    env:
+      # `copcat render` (and so tests/golden_render.rs) uses the adapter
+      # whose name contains this. egui_kittest picks a CPU adapter itself.
+      WGPU_ADAPTER_NAME: ${{ matrix.adapter }}
     steps:
       - uses: actions/checkout@v6
+      - name: Install lavapipe
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends mesa-vulkan-drivers
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -30,3 +53,13 @@ jobs:
       - run: cargo fmt --check
       - run: cargo clippy --all-targets --locked -- -D warnings
       - run: cargo test --locked
+      - name: Upload golden and snapshot diffs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: render-diffs-${{ matrix.os }}
+          if-no-files-found: ignore
+          path: |
+            target/tmp/golden-failures/
+            tests/snapshots/*.new.png
+            tests/snapshots/*.diff.png

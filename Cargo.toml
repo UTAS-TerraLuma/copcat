@@ -28,6 +28,10 @@ windows-sys = { version = "0.61", features = [
     "Win32_UI_WindowsAndMessaging",
 ] }
 
+[dev-dependencies]
+# Drives the real viewer headlessly in tests/ui_kittest.rs.
+egui_kittest = { version = "0.36.2", features = ["wgpu", "eframe", "snapshot"] }
+
 [profile.dev.package."*"]
 opt-level = 2
 
