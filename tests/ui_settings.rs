@@ -23,7 +23,7 @@ const LOAD_TIMEOUT: Duration = Duration::from_secs(60);
 /// Held by each test while its viewer is alive, so only one at a time has a
 /// GPU device: two egui_kittest wgpu harnesses on parallel test threads
 /// crash now and then (an access violation) on Windows. Seen here in 2 of
-/// 40 runs before this lock. The cause isn't known yet.
+/// 40 runs before this lock. See docs/known-issues.md.
 static ONE_VIEWER_AT_A_TIME: Mutex<()> = Mutex::new(());
 
 fn has_adapter() -> bool {
