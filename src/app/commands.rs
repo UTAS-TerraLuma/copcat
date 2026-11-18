@@ -47,6 +47,30 @@ pub(crate) enum Command {
     CopyCommandLine,
     /// Show or hide the Diagnostics section.
     ToggleDiagnostics,
+    /// Open, reload or save the settings files.
+    Settings(SettingsCommand),
+}
+
+/// What to do with the settings files (see `crate::config`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SettingsCommand {
+    /// Open the user settings file, creating it if it's missing.
+    OpenUser,
+    /// Open the workspace settings file, creating it if it's missing.
+    OpenWorkspace,
+    /// Read the settings files again and apply them.
+    Reload,
+    /// Write the display and performance settings into the user file.
+    SaveDisplayDefaults,
+}
+
+impl SettingsCommand {
+    pub(crate) const ALL: [Self; 4] = [
+        Self::OpenUser,
+        Self::OpenWorkspace,
+        Self::Reload,
+        Self::SaveDisplayDefaults,
+    ];
 }
 
 /// What people and settings files know a command by.
@@ -106,15 +130,12 @@ impl Command {
             Self::CopyCommandLine,
             Self::ToggleDiagnostics,
         ]);
+        commands.extend(SettingsCommand::ALL.map(Self::Settings));
         commands
     }
 
     /// The argument-free command with this id, as a settings file or
     /// palette names it.
-    #[allow(
-        dead_code,
-        reason = "for the command palette and settings file to come"
-    )]
     pub(crate) fn from_id(id: &str) -> Option<Self> {
         Self::all().into_iter().find(|command| command.id() == id)
     }
@@ -189,6 +210,18 @@ impl Command {
                     Key::D,
                 )),
             ),
+            Self::Settings(command) => match command {
+                SettingsCommand::OpenUser => info("settings.open_user", "Open user settings", None),
+                SettingsCommand::OpenWorkspace => {
+                    info("settings.open_workspace", "Open workspace settings", None)
+                }
+                SettingsCommand::Reload => info("settings.reload", "Reload settings", None),
+                SettingsCommand::SaveDisplayDefaults => info(
+                    "settings.save_display_defaults",
+                    "Save current display settings as defaults",
+                    None,
+                ),
+            },
         }
     }
 }
@@ -221,7 +254,6 @@ impl Keymap {
     /// Runs the command with `id` on `shortcut`, or on nothing if `None`,
     /// in place of its old shortcut. A command already on `shortcut` loses
     /// it. Returns false if no argument-free command has that id.
-    #[allow(dead_code, reason = "for the settings file to come")]
     pub(crate) fn bind(&mut self, id: &str, shortcut: Option<KeyboardShortcut>) -> bool {
         let Some(command) = Command::from_id(id) else {
             return false;

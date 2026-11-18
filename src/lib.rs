@@ -5,6 +5,7 @@ mod app;
 mod camera;
 mod classification;
 mod cloud;
+mod config;
 mod export;
 mod format;
 mod gizmo;
@@ -25,6 +26,7 @@ use std::sync::Arc;
 
 use eframe::{egui, egui_wgpu};
 
+pub use config::Locations as ConfigLocations;
 pub use export::{RenderArgs, render};
 pub use heights::HeightSettings;
 pub use summary::{CloudSummary, SummaryPoint, read_cloud};
@@ -32,6 +34,9 @@ pub use summary::{CloudSummary, SummaryPoint, read_cloud};
 /// Opens the viewer window and blocks until it's closed. `initial_source` is a
 /// COPC URL or file path to load on startup, reading its heights from where
 /// `heights` says.
+///
+/// Settings come from the user's and the workspace's settings files (see
+/// [`ConfigLocations::from_env`]).
 pub fn run_viewer(initial_source: Option<String>, heights: HeightSettings) -> eframe::Result {
     let mut options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -54,17 +59,40 @@ pub fn run_viewer(initial_source: Option<String>, heights: HeightSettings) -> ef
     eframe::run_native(
         "Copcat",
         options,
-        Box::new(|cc| Ok(Box::new(app::ViewerApp::new(cc, initial_source, heights)?))),
+        Box::new(|cc| {
+            let app = app::ViewerApp::new(
+                cc,
+                initial_source,
+                heights,
+                Some(ConfigLocations::from_env()),
+            )?;
+            Ok(Box::new(app))
+        }),
     )
 }
 
 /// The viewer as an [`eframe::App`], for UI tests that drive it without a
 /// window (egui_kittest). `cc` needs a wgpu render state. Not a stable API.
+///
+/// Reads no settings files, so tests see the defaults whatever is in the
+/// developer's home directory; see [`viewer_app_with_settings`].
 #[doc(hidden)]
 pub fn viewer_app(
     cc: &eframe::CreationContext<'_>,
     initial_source: Option<String>,
     heights: HeightSettings,
 ) -> Result<impl eframe::App + use<>, &'static str> {
-    app::ViewerApp::new(cc, initial_source, heights)
+    app::ViewerApp::new(cc, initial_source, heights, None)
+}
+
+/// [`viewer_app`], reading settings files from `locations`. Not a stable
+/// API.
+#[doc(hidden)]
+pub fn viewer_app_with_settings(
+    cc: &eframe::CreationContext<'_>,
+    initial_source: Option<String>,
+    heights: HeightSettings,
+    locations: ConfigLocations,
+) -> Result<impl eframe::App + use<>, &'static str> {
+    app::ViewerApp::new(cc, initial_source, heights, Some(locations))
 }

@@ -94,6 +94,118 @@ To render the view you're looking at, click **Copy as command** in the viewer an
 paste the command it copies. Run `copcat render --help` for the camera and style
 options.
 
+## Settings
+
+The viewer reads its settings from JSON files, as VS Code and Zed do:
+
+| File | Where |
+| --- | --- |
+| User settings | `~/.copcat/settings.json` (`%USERPROFILE%\.copcat\settings.json` on Windows) |
+| Workspace settings | `.copcat/settings.json` in the folder you start Copcat in |
+
+Settings are layered: the built-in defaults, then the user file, then the workspace
+file. Every key is optional, so a file only needs what it changes, and a later layer
+overrides an earlier one key by key at every depth: a workspace file that sets only
+`display.edl.radius` keeps the user file's `display.edl.strength`. `keybindings`
+combine by command. Connectors combine by `name`: a workspace connector named like a
+user one replaces it, and the rest are added after the user's.
+
+Comments (`//`, `/* */`) and trailing commas are allowed. A file that isn't valid JSON
+is skipped; an unknown key or a value of the wrong type is skipped; a number outside
+what the UI's slider allows is clamped. Each problem shows in a bar at the foot of
+the window (and on stderr), naming the file, and the rest of the settings still
+apply.
+
+Every key, with its default:
+
+```jsonc
+{
+  "theme": "graphite",              // the only theme so far
+  "display": {
+    "colorMode": "rgb",             // "height", "rgb" or "classification"
+    "pointSize": 2.0,               // 1 to 10 (logical pixels)
+    "edl": {                        // eye-dome lighting
+      "enabled": true,
+      "strength": 1.0,              // 0.1 to 5
+      "radius": 1.4                 // 1 to 4 (pixels)
+    },
+    "projection": "perspective"     // or "orthographic"
+  },
+  "performance": {
+    "pointBudget": 5000000,         // 500000 to 30000000
+    "spacingPx": 2.0                // 0.5 to 20
+  },
+  "export": {                       // Save image
+    "matchView": true,              // image size follows the 3D view
+    "width": 1920,                  // 1 to 16384, when matchView is false
+    "height": 1080
+  },
+  "keybindings": {
+    "view.top": "7",
+    "view.reset": "Ctrl+R",
+    "view.bottom": null             // null or "" removes a shortcut
+  },
+  "connectors": {
+    "stac": [
+      { "name": "NatureScan", "url": "https://stacapi.naturescan.earth/" }
+    ],
+    "folders": [
+      { "name": "My project", "path": "D:/data/project" }
+    ]
+  }
+}
+```
+
+A shortcut is modifiers and a key joined by `+`, in any case: `Ctrl+Shift+P`, `F5`,
+`Alt+Up`, `Ctrl++`. `Ctrl` means Cmd on a Mac. Keys are egui's names: letters,
+digits, `F1` to `F35`, `Up`, `PageDown`, `Escape`, `Space`, `Minus` and so on.
+Giving a command a shortcut another command has takes it from that command. The
+commands are:
+
+| Id | Command | Default |
+| --- | --- | --- |
+| `file.open` | Open file… | Ctrl+O |
+| `file.open_url` | Open URL… | Ctrl+L |
+| `mode.explore`, `mode.subcloud` | Explore or Subcloud mode | |
+| `subcloud.tool_line`, `subcloud.tool_circle`, `subcloud.tool_square` | Draw a line, circle or square subcloud | |
+| `subcloud.cancel_tool` | Cancel the subcloud tool | Esc while a tool is picked |
+| `view.top`, `view.bottom` | View from top, bottom | 7, Ctrl+7 |
+| `view.front`, `view.back` | View from front, back | 1, Ctrl+1 |
+| `view.right`, `view.left` | View from right, left | 3, Ctrl+3 |
+| `view.perspective`, `view.orthographic` | Set the projection | |
+| `view.toggle_projection` | Toggle perspective / orthographic | 5 |
+| `view.reset` | Reset view | |
+| `view.toggle_diagnostics` | Toggle diagnostics | Ctrl+Shift+D |
+| `display.toggle_edl` | Toggle eye-dome lighting | |
+| `display.color_height`, `display.color_rgb`, `display.color_class` | Colour by height, RGB, classification | |
+| `export.save_image` | Save image… | Ctrl+S |
+| `export.copy_command` | Copy render command | |
+| `settings.open_user` | Open user settings | |
+| `settings.open_workspace` | Open workspace settings | |
+| `settings.reload` | Reload settings | |
+| `settings.save_display_defaults` | Save current display settings as defaults | |
+
+Connectors are places to open clouds from: STAC APIs (`url`, `http` or `https`) and
+folders (`path`). A relative folder path is relative to the folder holding the
+`.copcat` directory that declares it, so `"path": "."` in a workspace file is the
+workspace. Each needs a `name`.
+
+The files are the source of truth: changing a setting in the window lasts until you
+close it. The settings commands (in the command palette, or bound to a shortcut):
+
+- **Open user settings** and **Open workspace settings** create the file with a
+  commented template if it's missing, and open it in your editor for `.json` files.
+- **Reload settings** reads the files again and applies them.
+- **Save current display settings as defaults** writes the display and performance
+  settings (colour, point size, eye-dome lighting, projection, point budget and
+  spacing) into the user file, keeping its other keys. The file is rewritten as plain
+  JSON, so its comments are lost.
+
+`COPCAT_CONFIG_DIR` moves the user settings directory (from `~/.copcat`), and
+`COPCAT_WORKSPACE` sets the workspace folder (from the current directory).
+`copcat render` doesn't read settings files: its output depends only on its
+arguments.
+
 ## Using it from WSL
 
 In WSL, install the Windows build rather than the Linux one. The Linux build works under

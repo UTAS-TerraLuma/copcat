@@ -220,7 +220,22 @@ impl Default for Theme {
     }
 }
 
+/// Every built-in theme: the name a settings file gives (lowercase), and
+/// how to make it. Adding a theme is one more entry.
+pub const THEMES: &[(&str, MakeTheme)] = &[("graphite", Theme::default)];
+
+/// Builds a built-in theme.
+pub type MakeTheme = fn() -> Theme;
+
 impl Theme {
+    /// The built-in theme a settings file calls `name`, ignoring case.
+    pub fn by_name(name: &str) -> Option<Self> {
+        THEMES
+            .iter()
+            .find(|(known, _)| known.eq_ignore_ascii_case(name.trim()))
+            .map(|(_, make)| make())
+    }
+
     /// Styles every widget, window and panel `ctx` draws from now on. Cheap
     /// enough to call again whenever the theme changes: fonts are only
     /// reloaded when the font choices differ from the last call's.
@@ -442,6 +457,20 @@ mod tests {
         for choice in [fonts.ui, fonts.monospace] {
             let bytes = choice.bundled.expect("Graphite bundles its fonts");
             assert_eq!(bytes[..4], [0, 1, 0, 0], "{} isn't a TTF", choice.family);
+        }
+    }
+
+    #[test]
+    fn themes_should_be_found_by_name_ignoring_case() {
+        assert_eq!(Theme::by_name("Graphite").unwrap().name, "Graphite");
+        assert!(Theme::by_name("solarized").is_none());
+    }
+
+    #[test]
+    fn theme_names_should_be_lowercase_and_match_their_theme() {
+        for (name, make) in THEMES {
+            assert_eq!(*name, name.to_lowercase());
+            assert_eq!(make().name.to_lowercase(), *name);
         }
     }
 

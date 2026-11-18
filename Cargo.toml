@@ -16,6 +16,8 @@ png = "0.18"
 pollster = "0.4"
 raw-window-handle = "0.6"
 rfd = "0.17"
+# preserve_order keeps a settings file's keys where they were when one is saved.
+serde_json = { version = "1.0.154", features = ["preserve_order"] }
 thiserror = "2.0.21"
 # No gzip: compressing an already-compressed LAZ range only adds work.
 ureq = { version = "3", default-features = false, features = ["rustls"] }
@@ -31,6 +33,8 @@ windows-sys = { version = "0.61", features = [
 [dev-dependencies]
 # Drives the real viewer headlessly in tests/ui_kittest.rs.
 egui_kittest = { version = "0.36.2", features = ["wgpu", "eframe", "snapshot"] }
+proptest = "1.12"
+tempfile = "3.27"
 
 [profile.dev.package."*"]
 opt-level = 2
