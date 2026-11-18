@@ -22,6 +22,7 @@ use crate::camera::{OrbitCamera, Projection};
 use crate::classification;
 use crate::heights::{HeightKind, PerHeight};
 use crate::loader::NodePoints;
+use crate::lod;
 use crate::subcloud::Footprint;
 
 const COLOR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
@@ -38,8 +39,14 @@ struct Uniforms {
     z_min: f32,
     z_max: f32,
     color_scale: f32,
-    /// WGSL aligns the `vec4` array below to 16 bytes.
-    _padding: [f32; 2],
+    /// Pixels per metre at 1 m depth (perspective) or any depth
+    /// (orthographic): see [`lod::pixel_scale`].
+    pixel_scale: f32,
+    /// [`AdaptiveSize::target_spacing_px`].
+    target_spacing: f32,
+    /// `(fill, min px, max px, on)`: [`AdaptiveSize`], used instead of
+    /// `point_size` when `on` is positive.
+    adaptive: [f32; 4],
     /// Points are only drawn inside all four, as `(normal, d)` with inside
     /// where `normal·p + d >= 0`. `(0, 0, 0, 1)` keeps everything.
     clip_planes: [[f32; 4]; 4],
@@ -49,6 +56,89 @@ struct Uniforms {
     /// RGB (plus padding) for each LAS class.
     class_colors: [[f32; 4]; 256],
 }
+
+/// What adaptive point sizes need to know about the node being drawn. Must
+/// match `Node` in `points.wgsl`. One per drawn node, each at a multiple of
+/// the device's uniform offset alignment in a buffer bound with a dynamic
+/// offset.
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct NodeUniforms {
+    /// The centre of the node's cube, where its octants meet.
+    centre: [f32; 3],
+    /// Metres between the node's points.
+    spacing: f32,
+    /// [`lod::finest_spacing`] for the node: octants 0 to 3, then 4 to 7.
+    finest: [[f32; 4]; 2],
+}
+
+impl NodeUniforms {
+    fn new(shape: &lod::OctreeShape, key: &VoxelKey, spacing: f32, finest: [f32; 8]) -> Self {
+        let [a, b, c, d, e, f, g, h] = finest;
+        Self {
+            centre: shape.node_centre(key).to_array(),
+            spacing,
+            finest: [[a, b, c, d], [e, f, g, h]],
+        }
+    }
+}
+
+/// How far apart a node's points are, in metres: measured from the points
+/// themselves, or the octree's spacing for the level if there are too few.
+///
+/// The octree's spacing is only what the level aims for. Writers put every
+/// point of a sparse area in the lowest node there, which then holds many
+/// more points than its level's spacing says, and in a sparse cloud a level
+/// can hold far fewer.
+fn node_spacing(shape: &lod::OctreeShape, key: &VoxelKey, measured: f32) -> f32 {
+    if measured.is_finite() {
+        measured
+    } else {
+        shape.node_spacing(key)
+    }
+}
+
+/// Roughly how far apart points are on the surfaces they sample, in metres:
+/// the square root of the surface area per point. Infinite for fewer than
+/// two points.
+///
+/// The area is the number of voxels the points touch times a voxel's face,
+/// with voxels a few spacings wide so that every one on a surface holds
+/// points. Counting voxels rather than the bounding box means a canopy over
+/// the ground counts as two surfaces, a wall as its face rather than its
+/// footprint, and a river or a gap between buildings as no surface at all.
+fn measured_spacing(positions: &[[f32; 3]]) -> f32 {
+    if positions.len() < 2 {
+        return f32::INFINITY;
+    }
+    let count = positions.len() as f32;
+    let (min, max) = positions.iter().fold(
+        (Vec3::splat(f32::INFINITY), Vec3::splat(f32::NEG_INFINITY)),
+        |(min, max), p| (min.min(Vec3::from(*p)), max.max(Vec3::from(*p))),
+    );
+    // A first guess from the two longest sides of the box, which is right
+    // for one flat surface and too small for several.
+    let mut sides = (max - min).to_array();
+    sides.sort_by(f32::total_cmp);
+    let rough = (sides[1] * sides[2] / count).sqrt();
+    if !(rough > 0.0 && rough.is_finite()) {
+        return rough;
+    }
+    let voxel = VOXELS_PER_SPACING * rough;
+    let mut voxels: Vec<[u32; 3]> = positions
+        .iter()
+        .map(|p| ((Vec3::from(*p) - min) / voxel).as_uvec3().to_array())
+        .collect();
+    voxels.sort_unstable();
+    voxels.dedup();
+    (voxels.len() as f32 * voxel * voxel / count).sqrt()
+}
+
+/// How many first-guess spacings wide [`measured_spacing`]'s voxels are.
+/// Wide enough that a surface sampled several times over (ground under a
+/// canopy, say, where the first guess is too small) still has points in
+/// almost every voxel it crosses, and narrow enough to see holes.
+const VOXELS_PER_SPACING: f32 = 3.0;
 
 /// A clip plane every point is inside.
 const NO_CLIP: Vec4 = Vec4::W;
@@ -154,10 +244,69 @@ impl Default for EdlSettings {
     }
 }
 
+/// Defaults for [`AdaptiveSize`], shared by the viewer and the command line.
+pub const DEFAULT_FILL: f32 = 1.5;
+pub const DEFAULT_MIN_POINT_PX: f32 = 1.0;
+pub const DEFAULT_MAX_POINT_PX: f32 = 20.0;
+
+/// Sizing each point by how far apart the points around it are on screen,
+/// so the surface looks filled without heaps of overlap, close up or far
+/// away.
+///
+/// A point's spacing is its node's spacing projected at the point's own
+/// depth. Where finer nodes are drawn over it (the octree is additive),
+/// it's halved once per level of refinement the LOD would have made there,
+/// i.e. until it's within `target_spacing_px`, but never below the spacing
+/// of the finest node actually drawn in that octant of its node
+/// ([`lod::finest_spacing`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct AdaptiveSize {
+    /// Diameter as a multiple of the spacing. Circles on a square grid
+    /// touch at 1 and cover it at about 1.4; scattered points need a bit
+    /// more.
+    pub fill: f32,
+    /// Smallest and largest diameter, in physical pixels.
+    pub min_px: f32,
+    pub max_px: f32,
+    /// The target spacing nodes were selected with, in physical pixels
+    /// ([`lod::LodSettings::target_spacing_px`]).
+    pub target_spacing_px: f32,
+}
+
+impl AdaptiveSize {
+    /// The diameter in pixels of a point whose node's points are
+    /// `spacing_px` apart on screen at its depth, in an octant where the
+    /// finest drawn node's points are `finest_px` apart (`spacing_px` if
+    /// none finer is drawn). `points.wgsl` does the same sums on the GPU;
+    /// this copy is for testing them.
+    #[cfg(test)]
+    fn diameter_px(&self, spacing_px: f32, finest_px: f32) -> f32 {
+        // Each refinement halves the spacing; the LOD refines until it's
+        // within the target.
+        let halvings = (spacing_px / self.target_spacing_px.max(1e-6))
+            .log2()
+            .ceil()
+            .max(0.0);
+        let refined = spacing_px * (-halvings).exp2();
+        let spacing = spacing_px.min(refined.max(finest_px));
+        (self.fill * spacing).clamp(self.min_px, self.max_px)
+    }
+
+    /// The closest together points are worth loading, in pixels on screen,
+    /// for this fill and smallest size. After a refinement, points are as
+    /// little as half the target spacing apart; any closer than this and
+    /// they'd be drawn at `min_px`, bigger than their spacing.
+    pub fn finest_useful_spacing_px(fill: f32, min_px: f32) -> f32 {
+        2.0 * min_px / fill.max(1e-6)
+    }
+}
+
 /// How to draw the points this frame.
 pub struct PointStyle {
-    /// Diameter in physical pixels.
+    /// Diameter in physical pixels, unless `adaptive` is set.
     pub size_px: f32,
+    /// Size points by their spacing on screen instead of `size_px`.
+    pub adaptive: Option<AdaptiveSize>,
     pub color: PointColor,
     /// Which height to draw points at.
     pub height: HeightKind,
@@ -193,6 +342,13 @@ pub struct PointRenderer {
     edl_pipeline: wgpu::RenderPipeline,
     /// Kept to build each viewport's bind group.
     bind_group_layout: wgpu::BindGroupLayout,
+    /// Per-node uniforms, bound at a dynamic offset for each draw.
+    node_bind_group_layout: wgpu::BindGroupLayout,
+    /// Bytes from one node's uniforms to the next: their size rounded up to
+    /// the device's uniform offset alignment (usually 256).
+    node_stride: u64,
+    /// The cloud's octree, for each node's centre and spacing.
+    octree_shape: lod::OctreeShape,
     /// The EDL bind group includes the depth texture, so it's rebuilt with
     /// the render target.
     edl_bind_group_layout: wgpu::BindGroupLayout,
@@ -218,6 +374,8 @@ pub struct PointRenderer {
 pub struct Viewport {
     uniform_buffer: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
+    /// Every drawn node's [`NodeUniforms`], grown when more are drawn.
+    nodes: NodeUniformBuffer,
     edl_uniform_buffer: wgpu::Buffer,
     /// Created on the first `render`, and again when the size changes.
     target: Option<RenderTarget>,
@@ -234,7 +392,17 @@ struct NodeBuffer {
     /// Heights to draw at instead of Z, from extra dimensions.
     heights: PerHeight<Option<wgpu::Buffer>>,
     count: u32,
+    /// [`measured_spacing`] of the node's points.
+    measured_spacing: f32,
     last_drawn: u64,
+}
+
+/// A viewport's per-node uniforms and the bind group that reads them.
+struct NodeUniformBuffer {
+    buffer: wgpu::Buffer,
+    bind_group: wgpu::BindGroup,
+    /// How many nodes fit.
+    capacity: usize,
 }
 
 /// Debug line vertices, reused across frames and grown when needed.
@@ -281,8 +449,33 @@ impl PointRenderer {
             label: Some("bind_group_layout"),
             entries: &[uniform_layout_entry(0, wgpu::ShaderStages::VERTEX)],
         });
+        // A uniform buffer at a dynamic offset gives each draw its node's
+        // values, and works on every backend and adapter (immediates need an
+        // optional feature, which WebGPU and some GL drivers lack).
+        let node_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("node_bind_group_layout"),
+                entries: &[wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: true,
+                        min_binding_size: wgpu::BufferSize::new(size_of::<NodeUniforms>() as u64),
+                    },
+                    count: None,
+                }],
+            });
+        let node_stride = (size_of::<NodeUniforms>() as u64).next_multiple_of(u64::from(
+            device.limits().min_uniform_buffer_offset_alignment,
+        ));
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("pipeline_layout"),
+            label: Some("point_pipeline_layout"),
+            bind_group_layouts: &[Some(&bind_group_layout), Some(&node_bind_group_layout)],
+            immediate_size: 0,
+        });
+        let line_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("line_pipeline_layout"),
             bind_group_layouts: &[Some(&bind_group_layout)],
             immediate_size: 0,
         });
@@ -383,7 +576,7 @@ impl PointRenderer {
             device,
             PipelineConfig {
                 label: "line_pipeline",
-                layout: &layout,
+                layout: &line_layout,
                 shader: &device.create_shader_module(wgpu::include_wgsl!("lines.wgsl")),
                 vertex_entry: "vs_main",
                 vertex_buffers: &[Some(wgpu::VertexBufferLayout {
@@ -451,6 +644,9 @@ impl PointRenderer {
             line_pipeline,
             edl_pipeline,
             bind_group_layout,
+            node_bind_group_layout,
+            node_stride,
+            octree_shape: lod::OctreeShape::default(),
             edl_bind_group_layout,
             nodes: HashMap::new(),
             resident_points: 0,
@@ -475,6 +671,7 @@ impl PointRenderer {
         Viewport {
             uniform_buffer,
             bind_group,
+            nodes: self.create_node_uniforms(64),
             edl_uniform_buffer: create_uniform_buffer(
                 device,
                 "edl_uniforms",
@@ -490,8 +687,41 @@ impl PointRenderer {
         self.device.limits().max_texture_dimension_2d
     }
 
+    fn create_node_uniforms(&self, capacity: usize) -> NodeUniformBuffer {
+        let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("node_uniforms"),
+            size: self.node_stride * capacity as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("node_bind_group"),
+            layout: &self.node_bind_group_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                // One node's worth, moved along by the dynamic offset.
+                resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                    buffer: &buffer,
+                    offset: 0,
+                    size: wgpu::BufferSize::new(size_of::<NodeUniforms>() as u64),
+                }),
+            }],
+        });
+        NodeUniformBuffer {
+            buffer,
+            bind_group,
+            capacity,
+        }
+    }
+
     pub fn set_z_range(&mut self, z_range: [f32; 2]) {
         self.z_range = z_range;
+    }
+
+    /// The open cloud's octree, which adaptive point sizes are worked out
+    /// from. Set it when a cloud opens.
+    pub fn set_octree_shape(&mut self, shape: lod::OctreeShape) {
+        self.octree_shape = shape;
     }
 
     pub fn has_node(&self, key: &VoxelKey) -> bool {
@@ -534,6 +764,7 @@ impl PointRenderer {
                     .map(|heights| upload("node_heights", bytemuck::cast_slice(heights)))
             }),
             count: positions.len() as u32,
+            measured_spacing: measured_spacing(positions),
             // Count as just drawn, so a node isn't evicted before its first frame.
             last_drawn: self.frame,
         };
@@ -734,6 +965,12 @@ impl PointRenderer {
         }
         self.upload_lines(lines);
         self.write_uniforms(viewport, size, camera, style);
+        let drawable: Vec<VoxelKey> = visible
+            .iter()
+            .filter(|key| self.nodes.get(key).is_some_and(|node| node.count > 0))
+            .copied()
+            .collect();
+        self.write_node_uniforms(viewport, &drawable);
 
         let mut encoder = self
             .device
@@ -764,11 +1001,11 @@ impl PointRenderer {
             pass.set_bind_group(0, &viewport.bind_group, &[]);
             // One draw per node keeps nodes independent, so loading or evicting
             // one never touches the others' buffers.
-            let drawable = visible
-                .iter()
-                .filter_map(|key| self.nodes.get(key))
-                .filter(|node| node.count > 0);
-            for node in drawable {
+            for (index, key) in drawable.iter().enumerate() {
+                let node = &self.nodes[key];
+                // Within the buffer's size, so it fits in a u32.
+                let offset = (index as u64 * self.node_stride) as u32;
+                pass.set_bind_group(1, &viewport.nodes.bind_group, &[offset]);
                 // Every node of a cloud has the same buffers, so in practice
                 // this picks the same pipeline for each.
                 let lifted = node.heights[style.height].as_ref();
@@ -843,6 +1080,33 @@ impl PointRenderer {
         viewport.target = Some(target);
     }
 
+    /// Writes each node's [`NodeUniforms`] in the order they're drawn,
+    /// growing the viewport's buffer if needed.
+    fn write_node_uniforms(&self, viewport: &mut Viewport, drawable: &[VoxelKey]) {
+        if drawable.len() > viewport.nodes.capacity {
+            viewport.nodes = self.create_node_uniforms(drawable.len().next_power_of_two());
+        }
+        let shape = &self.octree_shape;
+        let drawn: Vec<lod::DrawnNode> = drawable
+            .iter()
+            .map(|key| {
+                let node = &self.nodes[key];
+                let spacing = node_spacing(shape, key, node.measured_spacing);
+                lod::DrawnNode::new(shape, *key, spacing, node.count)
+            })
+            .collect();
+        let finest = lod::finest_spacing(&drawn);
+        let stride = self.node_stride as usize;
+        let mut bytes = vec![0; drawable.len() * stride];
+        for (node, slot) in drawn.iter().zip(bytes.chunks_exact_mut(stride)) {
+            let uniforms = NodeUniforms::new(shape, &node.key, node.spacing, finest[&node.key]);
+            slot[..size_of::<NodeUniforms>()].copy_from_slice(bytemuck::bytes_of(&uniforms));
+        }
+        if !bytes.is_empty() {
+            self.queue.write_buffer(&viewport.nodes.buffer, 0, &bytes);
+        }
+    }
+
     fn write_uniforms(
         &self,
         viewport: &Viewport,
@@ -852,6 +1116,9 @@ impl PointRenderer {
     ) {
         let aspect = size[0] as f32 / size[1] as f32;
         let (clip_planes, clip_circle) = clip_uniforms(style.clip);
+        let adaptive = style
+            .adaptive
+            .map_or([0.0; 4], |size| [size.fill, size.min_px, size.max_px, 1.0]);
         let uniforms = Uniforms {
             view_proj: camera.view_projection(aspect).to_cols_array_2d(),
             viewport_size: [size[0] as f32, size[1] as f32],
@@ -862,7 +1129,9 @@ impl PointRenderer {
                 PointColor::Height | PointColor::Classification => 1.0,
                 PointColor::Rgb { scale } => scale,
             },
-            _padding: [0.0; 2],
+            pixel_scale: lod::pixel_scale(camera, size),
+            target_spacing: style.adaptive.map_or(1.0, |size| size.target_spacing_px),
+            adaptive,
             clip_planes,
             clip_circle,
             class_colors: self.class_colors,
@@ -1106,6 +1375,115 @@ mod tests {
             delta.length() == 1.0
         });
         assert!(lines.len() == 24 && axis_aligned);
+    }
+
+    const SIZE: AdaptiveSize = AdaptiveSize {
+        fill: 1.5,
+        min_px: 1.0,
+        max_px: 20.0,
+        target_spacing_px: 2.0,
+    };
+
+    #[test]
+    fn diameter_px_should_scale_with_spacing_where_nothing_finer_is_drawn() {
+        // Up close past the finest level: the node's spacing, times fill.
+        assert_eq!(SIZE.diameter_px(8.0, 8.0), 12.0);
+        assert!((SIZE.diameter_px(1.6, 1.6) - 2.4).abs() < 1e-6);
+    }
+
+    #[test]
+    fn diameter_px_should_clamp_to_min_and_max() {
+        assert_eq!(SIZE.diameter_px(0.1, 0.1), 1.0);
+        assert_eq!(SIZE.diameter_px(100.0, 100.0), 20.0);
+    }
+
+    #[test]
+    fn diameter_px_should_shrink_a_parent_to_its_drawn_childrens_spacing() {
+        // 12 px apart, so the LOD refined three times here (12 → 6 → 3 →
+        // 1.5, within 2 px). With those levels drawn the parent's points are
+        // drawn for 1.5 px, like its great-grandchildren's.
+        assert_eq!(SIZE.diameter_px(12.0, 1.5), 1.5 * 1.5);
+        // Finer nodes drawn elsewhere in the octant (nearer the camera)
+        // don't shrink it further.
+        assert_eq!(SIZE.diameter_px(12.0, 0.1), 1.5 * 1.5);
+        // Only the child drawn (the rest not loaded yet, or over the
+        // budget): only down to the child's spacing, so no gaps open up.
+        assert_eq!(SIZE.diameter_px(12.0, 6.0), 6.0 * 1.5);
+    }
+
+    #[test]
+    fn diameter_px_should_not_shrink_points_already_within_the_target() {
+        // The far side of a parent whose near side was refined.
+        assert_eq!(SIZE.diameter_px(2.0, 0.1), 3.0);
+        assert!((SIZE.diameter_px(1.2, 0.1) - 1.8).abs() < 1e-6);
+    }
+
+    #[test]
+    fn finest_useful_spacing_px_should_keep_half_the_target_at_least_min_size() {
+        let finest = AdaptiveSize::finest_useful_spacing_px(SIZE.fill, SIZE.min_px);
+        // Just after a refinement points are half the target apart; drawn
+        // for that, they're exactly the smallest size.
+        assert_eq!(SIZE.fill * finest / 2.0, SIZE.min_px);
+    }
+
+    #[test]
+    fn node_uniforms_should_list_octants_in_order() {
+        let shape = lod::OctreeShape {
+            halfsize: 100.0,
+            spacing: 8.0,
+        };
+        let finest = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
+        let uniforms = NodeUniforms::new(&shape, &VoxelKey::ROOT, 8.0, finest);
+        assert_eq!(
+            uniforms.finest,
+            [[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0]]
+        );
+        assert_eq!(size_of::<NodeUniforms>(), 48);
+    }
+
+    #[test]
+    fn node_spacing_should_prefer_the_measured_spacing() {
+        let shape = lod::OctreeShape {
+            halfsize: 100.0,
+            spacing: 8.0,
+        };
+        assert_eq!(node_spacing(&shape, &VoxelKey::ROOT, 12.0), 12.0);
+        assert_eq!(node_spacing(&shape, &VoxelKey::ROOT, f32::INFINITY), 8.0);
+    }
+
+    #[test]
+    fn measured_spacing_should_find_a_grids_spacing_on_its_face() {
+        // A 10 x 10 grid 0.5 m apart, standing up like a wall.
+        let wall: Vec<[f32; 3]> = (0..100)
+            .map(|i| [3.0, (i % 10) as f32 * 0.5, (i / 10) as f32 * 0.5])
+            .collect();
+        let spacing = measured_spacing(&wall);
+        assert!((spacing - 0.5).abs() < 0.06, "{spacing}");
+        assert_eq!(measured_spacing(&wall[..1]), f32::INFINITY);
+    }
+
+    /// An `n` x `n` grid `step` apart on the ground, at height `z`.
+    fn layer(n: u32, step: f32, z: f32) -> impl Iterator<Item = [f32; 3]> {
+        (0..n * n).map(move |i| [(i % n) as f32 * step, (i / n) as f32 * step, z])
+    }
+
+    #[test]
+    fn measured_spacing_should_count_a_canopy_over_the_ground_as_two_surfaces() {
+        // Each layer is 1 m apart; together they'd look 0.7 m apart over
+        // the footprint, and points that size would leave gaps in each.
+        let two_layers: Vec<_> = layer(40, 1.0, 0.0).chain(layer(40, 1.0, 15.0)).collect();
+        let spacing = measured_spacing(&two_layers);
+        assert!((spacing - 1.0).abs() < 0.15, "{spacing}");
+    }
+
+    #[test]
+    fn measured_spacing_should_not_count_holes_as_surface() {
+        // Two 20 x 20 m patches 1 m apart, with 60 m of nothing between.
+        let patches: Vec<_> = layer(20, 1.0, 0.0)
+            .chain(layer(20, 1.0, 0.0).map(|[x, y, z]| [x + 80.0, y, z]))
+            .collect();
+        let spacing = measured_spacing(&patches);
+        assert!((spacing - 1.0).abs() < 0.2, "{spacing}");
     }
 
     #[test]

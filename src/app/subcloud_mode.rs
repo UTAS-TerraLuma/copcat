@@ -254,9 +254,8 @@ impl SubcloudMode {
             map: map_view.as_ref(),
             export: scene.export_view,
         };
-        scene
-            .session
-            .update(scene.renderer, views, &scene.settings.lod);
+        let lod = scene.settings.lod_for_view(area.pixels_per_point);
+        scene.session.update(scene.renderer, views, &lod);
         let texture_id = scene.render_main(&area, &self.camera, Some(footprint));
         area.paint(ui, texture_id, scene.image_aspect, scene.theme);
 

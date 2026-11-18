@@ -6,7 +6,9 @@
 //! them (the command line shares them) and re-exported here.
 
 pub(crate) use crate::lod::LodSettings;
+use crate::renderer::AdaptiveSize;
 pub(crate) use crate::renderer::EdlSettings;
+use crate::renderer::{DEFAULT_FILL, DEFAULT_MAX_POINT_PX, DEFAULT_MIN_POINT_PX};
 
 /// Every user setting the viewer has.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -20,7 +22,12 @@ pub(crate) struct Settings {
 /// How the points are drawn and how much detail is loaded.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct ViewSettings {
-    /// Point diameter in logical pixels (scaled by the display's DPI when drawn).
+    /// Size points by their spacing on screen, or all the same.
+    pub(crate) point_size_mode: PointSizeMode,
+    /// In Adaptive mode: how big points are drawn for their spacing.
+    pub(crate) adaptive_size: AdaptiveSizeSettings,
+    /// In Fixed mode: point diameter in logical pixels (scaled by the
+    /// display's DPI when drawn).
     pub(crate) point_size: f32,
     /// Preferred colouring. RGB falls back to height for files without colour.
     pub(crate) color_mode: ColorMode,
@@ -32,11 +39,75 @@ pub(crate) struct ViewSettings {
 impl Default for ViewSettings {
     fn default() -> Self {
         Self {
+            point_size_mode: PointSizeMode::default(),
+            adaptive_size: AdaptiveSizeSettings::default(),
             point_size: 2.0,
             color_mode: ColorMode::default(),
             edl_enabled: true,
             edl: EdlSettings::default(),
             lod: LodSettings::default(),
+        }
+    }
+}
+
+impl ViewSettings {
+    /// The level of detail to load for a view at `pixels_per_point`. In
+    /// Adaptive mode, no finer than points can be drawn: the smallest size
+    /// sets how close together they're worth loading.
+    pub(crate) fn lod_for_view(&self, pixels_per_point: f32) -> LodSettings {
+        match self.point_size_mode {
+            PointSizeMode::Fixed => self.lod,
+            PointSizeMode::Adaptive => {
+                let size = &self.adaptive_size;
+                self.lod
+                    .no_finer_than(AdaptiveSize::finest_useful_spacing_px(
+                        size.fill,
+                        size.min_px * pixels_per_point,
+                    ))
+            }
+        }
+    }
+}
+
+/// How big points are drawn.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub(crate) enum PointSizeMode {
+    /// By how far apart they are on screen, so the surface looks filled
+    /// close up and far away.
+    #[default]
+    Adaptive,
+    /// All the same size in pixels.
+    Fixed,
+}
+
+impl PointSizeMode {
+    pub(crate) const ALL: [Self; 2] = [Self::Adaptive, Self::Fixed];
+
+    /// A short name, for the radio buttons.
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Adaptive => "Adaptive",
+            Self::Fixed => "Fixed",
+        }
+    }
+}
+
+/// Adaptive point sizes, in logical pixels (scaled by the display's DPI
+/// when drawn). See [`AdaptiveSize`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct AdaptiveSizeSettings {
+    /// Diameter as a multiple of the points' spacing on screen.
+    pub(crate) fill: f32,
+    pub(crate) min_px: f32,
+    pub(crate) max_px: f32,
+}
+
+impl Default for AdaptiveSizeSettings {
+    fn default() -> Self {
+        Self {
+            fill: DEFAULT_FILL,
+            min_px: DEFAULT_MIN_POINT_PX,
+            max_px: DEFAULT_MAX_POINT_PX,
         }
     }
 }
@@ -146,6 +217,26 @@ mod tests {
     #[test]
     fn default_export_should_match_the_view() {
         assert!(Settings::default().export.match_view);
+    }
+
+    #[test]
+    fn default_settings_should_size_points_adaptively() {
+        assert_eq!(
+            Settings::default().view.point_size_mode,
+            PointSizeMode::Adaptive
+        );
+    }
+
+    #[test]
+    fn lod_for_view_should_load_no_finer_than_the_smallest_point_in_adaptive_mode() {
+        let mut view = ViewSettings::default();
+        view.lod.target_spacing_px = 1.0;
+        view.adaptive_size.min_px = 1.5;
+        view.adaptive_size.fill = 1.5;
+        // 2 × 1.5 logical px × 2 px per point / 1.5.
+        assert_eq!(view.lod_for_view(2.0).target_spacing_px, 4.0);
+        view.point_size_mode = PointSizeMode::Fixed;
+        assert_eq!(view.lod_for_view(2.0), view.lod);
     }
 
     #[test]

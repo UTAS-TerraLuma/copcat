@@ -14,6 +14,14 @@ struct Uniforms {
     // Multiplies RGB after unpacking: 1 for 16-bit colour, 257 for files that
     // store 8-bit values in the 16-bit fields.
     color_scale: f32,
+    // Pixels per metre at 1 m depth (perspective, where clip w is the depth)
+    // or at any depth (orthographic, where w is 1).
+    pixel_scale: f32,
+    // The LOD's target spacing in pixels.
+    target_spacing: f32,
+    // (fill, min px, max px, on): when on > 0, points are sized by their
+    // spacing on screen instead of `point_size`.
+    adaptive: vec4<f32>,
     // Points are drawn only inside all four planes: dot(plane, (p, 1)) >= 0.
     // (0, 0, 0, 1) keeps everything.
     clip_planes: array<vec4<f32>, 4>,
@@ -26,6 +34,20 @@ struct Uniforms {
 
 @group(0) @binding(0) var<uniform> u: Uniforms;
 
+// The node being drawn, for adaptive sizes.
+struct Node {
+    // Where the node's octants meet.
+    centre: vec3<f32>,
+    // Metres between the node's points.
+    spacing: f32,
+    // For each octant, the spacing of the finest node drawn in it (this one,
+    // or one below it): octants 0 to 3, then 4 to 7. An octant is numbered
+    // 1 for upper X + 2 for upper Y + 4 for upper Z.
+    finest: array<vec4<f32>, 2>,
+};
+
+@group(1) @binding(0) var<uniform> node: Node;
+
 struct VertexOutput {
     @builtin(position) clip_position: vec4<f32>,
     @location(0) corner: vec2<f32>,
@@ -37,7 +59,7 @@ fn vs_height(
     @builtin(vertex_index) vertex_index: u32,
     @location(0) position: vec3<f32>,
 ) -> VertexOutput {
-    return height_vertex(vertex_index, position);
+    return height_vertex(vertex_index, position, position);
 }
 
 @vertex
@@ -47,7 +69,7 @@ fn vs_rgb(
     // Unorm16x4: the GPU divides the stored u16s by 65535.
     @location(1) color: vec4<f32>,
 ) -> VertexOutput {
-    return rgb_vertex(vertex_index, position, color);
+    return rgb_vertex(vertex_index, position, position, color);
 }
 
 @vertex
@@ -56,7 +78,7 @@ fn vs_class(
     @location(0) position: vec3<f32>,
     @location(1) classification: u32,
 ) -> VertexOutput {
-    return class_vertex(vertex_index, position, classification);
+    return class_vertex(vertex_index, position, position, classification);
 }
 
 @vertex
@@ -65,7 +87,7 @@ fn vs_height_lifted(
     @location(0) position: vec3<f32>,
     @location(2) height: f32,
 ) -> VertexOutput {
-    return height_vertex(vertex_index, vec3(position.xy, height));
+    return height_vertex(vertex_index, vec3(position.xy, height), position);
 }
 
 @vertex
@@ -75,7 +97,7 @@ fn vs_rgb_lifted(
     @location(1) color: vec4<f32>,
     @location(2) height: f32,
 ) -> VertexOutput {
-    return rgb_vertex(vertex_index, vec3(position.xy, height), color);
+    return rgb_vertex(vertex_index, vec3(position.xy, height), position, color);
 }
 
 @vertex
@@ -85,23 +107,65 @@ fn vs_class_lifted(
     @location(1) classification: u32,
     @location(2) height: f32,
 ) -> VertexOutput {
-    return class_vertex(vertex_index, vec3(position.xy, height), classification);
+    return class_vertex(vertex_index, vec3(position.xy, height), position, classification);
 }
 
-fn height_vertex(vertex_index: u32, position: vec3<f32>) -> VertexOutput {
+// `position` is where the point is drawn; `in_octree` is where it is in the
+// octree (its file Z), which tells which octant of its node it's in.
+
+fn height_vertex(vertex_index: u32, position: vec3<f32>, in_octree: vec3<f32>) -> VertexOutput {
     let t = clamp((position.z - u.z_min) / max(u.z_max - u.z_min, 1e-6), 0.0, 1.0);
-    return point_vertex(vertex_index, position, viridis(t));
+    return point_vertex(vertex_index, position, in_octree, viridis(t));
 }
 
-fn rgb_vertex(vertex_index: u32, position: vec3<f32>, color: vec4<f32>) -> VertexOutput {
-    return point_vertex(vertex_index, position, min(color.rgb * u.color_scale, vec3(1.0)));
+fn rgb_vertex(
+    vertex_index: u32,
+    position: vec3<f32>,
+    in_octree: vec3<f32>,
+    color: vec4<f32>,
+) -> VertexOutput {
+    let rgb = min(color.rgb * u.color_scale, vec3(1.0));
+    return point_vertex(vertex_index, position, in_octree, rgb);
 }
 
-fn class_vertex(vertex_index: u32, position: vec3<f32>, classification: u32) -> VertexOutput {
-    return point_vertex(vertex_index, position, u.class_colors[classification].rgb);
+fn class_vertex(
+    vertex_index: u32,
+    position: vec3<f32>,
+    in_octree: vec3<f32>,
+    classification: u32,
+) -> VertexOutput {
+    return point_vertex(vertex_index, position, in_octree, u.class_colors[classification].rgb);
 }
 
-fn point_vertex(vertex_index: u32, position: vec3<f32>, color: vec3<f32>) -> VertexOutput {
+// The point's diameter in pixels, when its clip-space w is `w`. Must match
+// `AdaptiveSize::diameter_px` in renderer.rs.
+fn diameter_px(w: f32, in_octree: vec3<f32>) -> f32 {
+    let adaptive = u.adaptive;
+    if adaptive.w <= 0.0 {
+        return u.point_size;
+    }
+    // The node's spacing on screen at this point's depth.
+    let spacing_px = node.spacing * u.pixel_scale / max(w, 1e-6);
+    // Finer nodes drawn in this point's octant add points between its
+    // node's, so its neighbours are closer: halve the spacing once per
+    // level the LOD refined here (until it was within the target), but not
+    // below the finest node actually drawn there.
+    let d = in_octree - node.centre;
+    let octant = select(0u, 1u, d.x >= 0.0) | select(0u, 2u, d.y >= 0.0)
+        | select(0u, 4u, d.z >= 0.0);
+    let finest_px = node.finest[octant / 4u][octant % 4u] * u.pixel_scale / max(w, 1e-6);
+    let halvings = max(ceil(log2(spacing_px / max(u.target_spacing, 1e-6))), 0.0);
+    let refined = spacing_px * exp2(-halvings);
+    let spacing = min(spacing_px, max(refined, finest_px));
+    return clamp(adaptive.x * spacing, adaptive.y, adaptive.z);
+}
+
+fn point_vertex(
+    vertex_index: u32,
+    position: vec3<f32>,
+    in_octree: vec3<f32>,
+    color: vec3<f32>,
+) -> VertexOutput {
     var corners = array<vec2<f32>, 6>(
         vec2(-1.0, -1.0), vec2(1.0, -1.0), vec2(1.0, 1.0),
         vec2(-1.0, -1.0), vec2(1.0, 1.0), vec2(-1.0, 1.0),
@@ -117,9 +181,9 @@ fn point_vertex(vertex_index: u32, position: vec3<f32>, color: vec3<f32>) -> Ver
     }
 
     let center = u.view_proj * vec4(position, 1.0);
-    // Offset in NDC so the quad is `point_size` pixels wide whatever the depth.
+    // Offset in NDC so the quad is the diameter in pixels whatever the depth.
     // Multiplying by w undoes the perspective divide the GPU applies afterwards.
-    let offset = corner * u.point_size / u.viewport_size * center.w;
+    let offset = corner * diameter_px(center.w, in_octree) / u.viewport_size * center.w;
 
     out.clip_position = vec4(center.xy + offset, center.zw);
     out.corner = corner;

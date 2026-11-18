@@ -222,6 +222,7 @@ impl ViewerApp {
                 let session = Session::new(loader, *opened);
                 let (min, max) = session.octree.bounds();
                 self.renderer.set_z_range([min.z, max.z]);
+                self.renderer.set_octree_shape(session.octree.shape());
                 self.camera.frame_bounds(min, max);
                 LoadState::Open(Box::new(session))
             }

@@ -10,7 +10,7 @@ use crate::lod::LodSettings;
 use super::widgets::{fitted_slider, legend_color, settings_grid, text_width};
 use crate::app::commands::Command;
 use crate::app::session::Session;
-use crate::app::settings::{ColorMode, ViewSettings};
+use crate::app::settings::{ColorMode, PointSizeMode, ViewSettings};
 
 /// The width of the widest label, so grids given it line their controls up.
 fn label_width(ui: &egui::Ui, labels: &[&str]) -> f32 {
@@ -59,13 +59,7 @@ pub(crate) fn display_ui(
     if settings.color_mode == ColorMode::Classification {
         class_legend_ui(ui, &session.classes_seen);
     }
-    settings_grid(ui, "point_settings", label_width, |ui| {
-        slider_row(
-            ui,
-            "Point size",
-            egui::Slider::new(&mut settings.point_size, 1.0..=10.0),
-        );
-    });
+    point_size_ui(ui, settings, label_width);
 
     let mut edl_enabled = settings.edl_enabled;
     if ui
@@ -95,6 +89,75 @@ pub(crate) fn display_ui(
     }
 }
 
+/// Point size: Adaptive (a fill factor, with the smallest and largest sizes
+/// under Advanced) or Fixed (one size).
+fn point_size_ui(ui: &mut egui::Ui, settings: &mut ViewSettings, label_width: f32) {
+    settings_grid(ui, "point_settings", label_width, |ui| {
+        ui.weak("Point size");
+        ui.horizontal_wrapped(|ui| {
+            for mode in PointSizeMode::ALL {
+                let hint = match mode {
+                    PointSizeMode::Adaptive => {
+                        "Size points by how far apart they are on screen, so surfaces look \
+                         filled close up without heaps of overlap far away"
+                    }
+                    PointSizeMode::Fixed => "Draw every point the same size",
+                };
+                ui.radio_value(&mut settings.point_size_mode, mode, mode.label())
+                    .on_hover_text(hint);
+            }
+        });
+        ui.end_row();
+        match settings.point_size_mode {
+            PointSizeMode::Adaptive => {
+                slider_row(
+                    ui,
+                    "Fill",
+                    egui::Slider::new(&mut settings.adaptive_size.fill, 0.5..=4.0),
+                )
+                .on_hover_text(
+                    "Point size as a multiple of the points' spacing on screen. Higher fills \
+                     gaps, lower shows single points.",
+                );
+            }
+            PointSizeMode::Fixed => {
+                slider_row(
+                    ui,
+                    "Size (px)",
+                    egui::Slider::new(&mut settings.point_size, 1.0..=10.0),
+                );
+            }
+        }
+    });
+    if settings.point_size_mode == PointSizeMode::Adaptive {
+        let size = &mut settings.adaptive_size;
+        egui::CollapsingHeader::new("Advanced")
+            .id_salt("adaptive_size_advanced")
+            .show(ui, |ui| {
+                let label_width = label_width - ui.spacing().indent;
+                settings_grid(ui, "adaptive_size_settings", label_width, |ui| {
+                    slider_row(
+                        ui,
+                        "Min (px)",
+                        egui::Slider::new(&mut size.min_px, 0.5..=8.0).logarithmic(true),
+                    )
+                    .on_hover_text(
+                        "The smallest points are drawn. Detail finer than this can show isn't \
+                         loaded.",
+                    );
+                    slider_row(
+                        ui,
+                        "Max (px)",
+                        egui::Slider::new(&mut size.max_px, 2.0..=64.0).logarithmic(true),
+                    )
+                    .on_hover_text("The biggest points are drawn, close up past the finest detail");
+                });
+            });
+        // Keep the range the right way round whichever slider moved.
+        size.max_px = size.max_px.max(size.min_px);
+    }
+}
+
 /// The Performance section, collapsed at first: how many points to draw and
 /// how much detail to load.
 pub(crate) fn performance_ui(ui: &mut egui::Ui, lod: &mut LodSettings) {
@@ -113,7 +176,9 @@ pub(crate) fn performance_ui(ui: &mut egui::Ui, lod: &mut LodSettings) {
                 .on_hover_text("The most points to draw at once");
                 let spacing_hint = "The target spacing: nodes are refined until their points \
                                     are at most this far apart on screen. Lower means more \
-                                    detail, up to the point budget.";
+                                    detail, up to the point budget. With adaptive point \
+                                    sizes, detail stops where points would be drawn bigger \
+                                    than their spacing (2 × Min ÷ Fill).";
                 slider_row(
                     ui,
                     "Spacing (px)",

@@ -110,3 +110,16 @@ RGB is the default colour mode, falling back to height for files without colour.
 by default (strength 1, radius 1.4 logical px). On the drone site it outlines shrubs well.
 Sparse areas get dark speckles where background shows between points. Larger points or
 a lower target spacing reduce that.
+
+## Status (adaptive point size done)
+Points are sized by their spacing on screen (Display > Point size: Adaptive, the
+default, or Fixed; `copcat render --point-size-mode`, `--fill`, `--min-point-size`,
+`--max-point-size`). Each node's spacing is measured from its points (surface area
+from occupied voxels / count), since writers' per-level spacing can be far off. The
+vertex shader projects it at each point's depth, halves it once per refinement the
+LOD made there, but never below the finest node drawn in that octant
+(`lod::finest_spacing`), then multiplies by Fill and clamps. Adaptive mode loads no
+finer than `2 × Min / Fill` px. Known artefacts: large flat discs show EDL rims
+("scales") up close; isolated points become blobs; where the budget cuts refinement,
+coarse nodes draw big points with visible octant seams; a parent's points can shrink
+over a sibling region whose finer nodes haven't loaded, leaving brief gaps.

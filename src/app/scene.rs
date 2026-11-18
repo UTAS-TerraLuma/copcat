@@ -7,13 +7,13 @@ use crate::camera::OrbitCamera;
 use crate::gizmo;
 use crate::heights::HeightKind;
 use crate::lod;
-use crate::renderer::{EdlSettings, PointColor, PointRenderer, PointStyle, Viewport};
+use crate::renderer::{AdaptiveSize, EdlSettings, PointColor, PointRenderer, PointStyle, Viewport};
 use crate::subcloud::{Footprint, Subcloud};
 use crate::theme::Theme;
 
 use super::camera_input::camera_controls;
 use super::session::{Session, Views};
-use super::settings::{DiagnosticsSettings, MapStyleSettings, ViewSettings};
+use super::settings::{DiagnosticsSettings, MapStyleSettings, PointSizeMode, ViewSettings};
 use super::subcloud_tool::SubcloudTool;
 
 /// Gap between the 3D view's edges and the gizmo, in logical pixels.
@@ -53,8 +53,15 @@ pub(crate) fn point_style(
     clip: Option<Footprint>,
     theme: &Theme,
 ) -> PointStyle {
+    let adaptive = &settings.adaptive_size;
     PointStyle {
         size_px: settings.point_size * pixels_per_point,
+        adaptive: (settings.point_size_mode == PointSizeMode::Adaptive).then(|| AdaptiveSize {
+            fill: adaptive.fill,
+            min_px: adaptive.min_px * pixels_per_point,
+            max_px: adaptive.max_px * pixels_per_point,
+            target_spacing_px: settings.lod_for_view(pixels_per_point).target_spacing_px,
+        }),
         color: session.point_color(settings.color_mode),
         height: session.shown,
         edl: settings.edl_enabled.then_some(EdlSettings {
@@ -78,6 +85,8 @@ pub(crate) fn map_point_style(
 ) -> PointStyle {
     PointStyle {
         size_px: map.point_size * pixels_per_point,
+        // Always a fixed size: the map is a small overview.
+        adaptive: None,
         color,
         height,
         edl: map.edl_enabled.then_some(EdlSettings {
@@ -242,9 +251,8 @@ pub(crate) fn explore_view(
         map: None,
         export: scene.export_view,
     };
-    scene
-        .session
-        .update(scene.renderer, views, &scene.settings.lod);
+    let lod = scene.settings.lod_for_view(area.pixels_per_point);
+    scene.session.update(scene.renderer, views, &lod);
     let texture_id = scene.render_main(&area, camera, None);
     area.paint(ui, texture_id, scene.image_aspect, scene.theme);
     tool.paint(ui, &area, camera, scene.theme);
