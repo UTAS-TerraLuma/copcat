@@ -176,6 +176,8 @@ commands are:
 | `view.toggle_projection` | Toggle perspective / orthographic | 5 |
 | `view.reset` | Reset view | |
 | `view.toggle_diagnostics` | Toggle diagnostics | Ctrl+Shift+D |
+| `palette.commands` | Show all commands (the command palette) | Ctrl+Shift+P |
+| `palette.open` | Quick open a source | Ctrl+P |
 | `display.toggle_edl` | Toggle eye-dome lighting | |
 | `display.color_height`, `display.color_rgb`, `display.color_class` | Colour by height, RGB, classification | |
 | `export.save_image` | Save image… | Ctrl+S |

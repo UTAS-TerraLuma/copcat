@@ -47,6 +47,10 @@ pub(crate) enum Command {
     CopyCommandLine,
     /// Show or hide the Diagnostics section.
     ToggleDiagnostics,
+    /// Show the command palette, listing every command.
+    ShowCommands,
+    /// Show the command palette's quick open list of sources.
+    QuickOpen,
     /// Open, reload or save the settings files.
     Settings(SettingsCommand),
 }
@@ -129,6 +133,8 @@ impl Command {
             Self::SaveImage,
             Self::CopyCommandLine,
             Self::ToggleDiagnostics,
+            Self::ShowCommands,
+            Self::QuickOpen,
         ]);
         commands.extend(SettingsCommand::ALL.map(Self::Settings));
         commands
@@ -210,6 +216,15 @@ impl Command {
                     Key::D,
                 )),
             ),
+            Self::ShowCommands => info(
+                "palette.commands",
+                "Show all commands",
+                Some(KeyboardShortcut::new(
+                    Modifiers::COMMAND.plus(Modifiers::SHIFT),
+                    Key::P,
+                )),
+            ),
+            Self::QuickOpen => info("palette.open", "Quick open…", command_key(Key::P)),
             Self::Settings(command) => match command {
                 SettingsCommand::OpenUser => info("settings.open_user", "Open user settings", None),
                 SettingsCommand::OpenWorkspace => {
