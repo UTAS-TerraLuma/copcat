@@ -606,7 +606,9 @@ mod tests {
     fn point_size_alone_should_not_switch_to_fixed() {
         let (config, warnings) = Config::parse(r#"{"display": {"pointSize": 6}}"#, None);
         assert!(warnings.is_empty(), "{warnings:?}");
+        // As if an earlier file had chosen adaptive.
         let mut settings = Settings::default();
+        settings.view.point_size_mode = PointSizeMode::Adaptive;
         apply_settings(&config, &mut settings, &mut OrbitCamera::default());
         assert_eq!(settings.view.point_size_mode, PointSizeMode::Adaptive);
         assert_eq!(settings.view.point_size, 6.0, "kept for fixed mode");

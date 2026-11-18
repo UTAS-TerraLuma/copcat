@@ -5,7 +5,7 @@ use eframe::egui;
 
 use crate::heights::{HeightKind, HeightSettings, HeightSource, SourceSetting};
 
-use super::widgets::text_width;
+use super::widgets::{choice_combo, text_width};
 use crate::app::session::Session;
 
 /// A change asked for in the Heights section.
@@ -25,20 +25,24 @@ pub(crate) fn heights_ui(
 ) -> Option<HeightsAction> {
     let info = &session.info;
     let mut action = None;
-    ui.horizontal_wrapped(|ui| {
-        ui.label("Draw at:");
-        for kind in HeightKind::ALL {
-            let available = info.heights[kind].is_some();
-            let response = ui
-                .add_enabled(
-                    available,
-                    egui::Button::selectable(session.shown == kind, kind.label()),
-                )
-                .on_disabled_hover_text("Not in this file. Choose where it is under Sources.");
-            if response.clicked() && session.shown != kind {
-                action = Some(HeightsAction::Show(kind));
+    ui.horizontal(|ui| {
+        let label = ui.weak("Draw at");
+        let labels = HeightKind::ALL.map(HeightKind::label);
+        choice_combo(ui, "draw_at_height", session.shown.label(), labels, |ui| {
+            for kind in HeightKind::ALL {
+                let available = info.heights[kind].is_some();
+                let response = ui
+                    .add_enabled(
+                        available,
+                        egui::Button::selectable(session.shown == kind, kind.label()),
+                    )
+                    .on_disabled_hover_text("Not in this file. Choose where it is under Sources.");
+                if response.clicked() && session.shown != kind {
+                    action = Some(HeightsAction::Show(kind));
+                }
             }
-        }
+        })
+        .labelled_by(label.id);
     });
     egui::CollapsingHeader::new("Sources")
         .id_salt("height_sources")

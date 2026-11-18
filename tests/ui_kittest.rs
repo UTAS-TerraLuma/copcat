@@ -50,6 +50,14 @@ fn text_after(harness: &Harness<'_, impl eframe::App>, name: &str) -> Option<Str
     value_after(harness, name).map(|(text, _)| text)
 }
 
+/// The Colour drop-down.
+fn colour<'h>(harness: &'h Harness<'_, impl eframe::App>) -> egui_kittest::Node<'h> {
+    harness
+        .query_all_by_label("Colour")
+        .find(|node| node.accesskit_node().role() == egui::accesskit::Role::ComboBox)
+        .expect("a Colour drop-down")
+}
+
 #[test]
 fn viewer_should_load_the_fixture_and_draw_it() {
     if !has_adapter() {
@@ -122,20 +130,23 @@ fn viewer_should_load_the_fixture_and_draw_it() {
         text_after(&harness, "Extent (m)").as_deref(),
         Some("100.0 × 60.0 × 25.0")
     );
-    // Drive the UI through AccessKit: colour by class, then look straight down.
-    // The settings panel scrolls, so bring each control into view first.
-    for label in ["Class", "Top"] {
-        harness.get_by_label(label).scroll_to_me();
-        harness.run_ok();
-        harness.get_by_label(label).click();
-        harness.run_ok();
-    }
+    // Drive the UI through AccessKit: colour by class from the drop-down,
+    // then look straight down with the Top view's shortcut. The settings
+    // panel scrolls, so bring the drop-down into view first.
+    colour(&harness).scroll_to_me();
+    harness.run_ok();
+    colour(&harness).click();
+    harness.run_ok();
+    harness.get_by_label("Class").click();
+    harness.run_ok();
+    harness.key_press(egui::Key::Num7);
+    harness.run_ok();
     harness.remove_cursor();
     harness.run_ok();
     assert_eq!(
-        harness.get_by_label("Class").accesskit_node().toggled(),
-        Some(egui::accesskit::Toggled::True),
-        "the Class colour mode should be selected"
+        colour(&harness).value().as_deref(),
+        Some("Class"),
+        "the Class colour mode should be chosen"
     );
 
     // The open time changes every run; hide it from the snapshot.

@@ -104,35 +104,36 @@ fn by_role_and_label<'h>(
         .unwrap_or_else(|| panic!("no {role:?} labelled {label}"))
 }
 
-/// The value of the slider labelled `label`.
-fn slider_value(harness: &Harness<'_, impl eframe::App>, label: &str) -> f64 {
-    by_role_and_label(harness, egui::accesskit::Role::Slider, label)
+/// The value of the number field labelled `label`.
+fn field_value(harness: &Harness<'_, impl eframe::App>, label: &str) -> f64 {
+    by_role_and_label(harness, egui::accesskit::Role::SpinButton, label)
         .accesskit_node()
         .numeric_value()
-        .expect("a slider has a value")
+        .expect("a number field has a value")
 }
 
-/// Whether there's a slider labelled `label`.
-fn has_slider(harness: &Harness<'_, impl eframe::App>, label: &str) -> bool {
+/// Whether there's a number field labelled `label`.
+fn has_field(harness: &Harness<'_, impl eframe::App>, label: &str) -> bool {
     harness
         .query_all_by_label(label)
-        .any(|node| node.accesskit_node().role() == egui::accesskit::Role::Slider)
+        .any(|node| node.accesskit_node().role() == egui::accesskit::Role::SpinButton)
 }
 
-/// Clicks the radio button labelled `label` and lets the UI settle.
-fn click_radio(harness: &mut Harness<'_, impl eframe::App>, label: &str) {
-    by_role_and_label(harness, egui::accesskit::Role::RadioButton, label).click();
+/// What the drop-down labelled `label` shows.
+fn chosen(harness: &Harness<'_, impl eframe::App>, label: &str) -> String {
+    by_role_and_label(harness, egui::accesskit::Role::ComboBox, label)
+        .value()
+        .expect("a drop-down shows its choice")
+}
+
+/// Opens the drop-down labelled `label`, picks `option` and lets the UI
+/// settle.
+fn choose(harness: &mut Harness<'_, impl eframe::App>, label: &str, option: &str) {
+    by_role_and_label(harness, egui::accesskit::Role::ComboBox, label).click();
+    harness.run_ok();
+    by_role_and_label(harness, egui::accesskit::Role::Button, option).click();
     harness.run_ok();
 }
-
-/// Whether the radio button labelled `label` is selected.
-fn toggled(harness: &Harness<'_, impl eframe::App>, label: &str) -> bool {
-    by_role_and_label(harness, egui::accesskit::Role::RadioButton, label)
-        .accesskit_node()
-        .toggled()
-        == Some(egui::accesskit::Toggled::True)
-}
-
 /// The text of every settings warning in the settings bar.
 fn warnings(harness: &Harness<'_, impl eframe::App>) -> Vec<String> {
     harness
@@ -176,28 +177,20 @@ fn settings_files_should_set_the_display_defaults() {
     let (mut harness, woken) = viewer(&user_dir, &workspace, Some(fixture));
     wait_for_display_section(&mut harness, &woken);
 
-    assert!(
-        toggled(&harness, "Class"),
+    assert_eq!(
+        chosen(&harness, "Colour"),
+        "Class",
         "colour by class from the user file"
     );
-    assert!(!toggled(&harness, "RGB"));
+    assert_eq!(chosen(&harness, "Point size"), "Fixed");
+    assert_eq!(field_value(&harness, "Size (px)"), 4.0);
     assert!(
-        toggled(&harness, "Fixed"),
-        "fixed point size from the user file"
-    );
-    assert!(!toggled(&harness, "Adaptive"));
-    assert_eq!(slider_value(&harness, "Size (px)"), 4.0);
-    assert!(
-        !has_slider(&harness, "Fill"),
+        !has_field(&harness, "Fill"),
         "no adaptive controls when fixed"
     );
+    assert_eq!(field_value(&harness, "Strength"), 3.0, "from the workspace");
     assert_eq!(
-        slider_value(&harness, "Strength"),
-        3.0,
-        "from the workspace"
-    );
-    assert_eq!(
-        slider_value(&harness, "Radius (px)"),
+        field_value(&harness, "Radius (px)"),
         2.0,
         "from the user file"
     );
@@ -220,7 +213,7 @@ fn adaptive_point_sizes_from_the_files_should_reach_the_ui() {
     let scratch = common::scratch_dir("adaptive_point_sizes_from_the_files");
     let user_dir = scratch.join("home").join(".copcat");
     let workspace = scratch.join("project");
-    // `pointSize` without `pointSizeMode` doesn't switch to fixed.
+    // Adaptive sizes without `pointSizeMode` don't switch to adaptive.
     write(
         &user_dir.join("settings.json"),
         r#"{ "display": { "fill": 2.5, "minPointSize": 2.0, "pointSize": 7.0 } }"#,
@@ -234,27 +227,33 @@ fn adaptive_point_sizes_from_the_files_should_reach_the_ui() {
     let (mut harness, woken) = viewer(&user_dir, &workspace, Some(fixture));
     wait_for_display_section(&mut harness, &woken);
 
-    assert!(toggled(&harness, "Adaptive"), "still the default mode");
-    assert!(!toggled(&harness, "Fixed"));
-    assert!(!has_slider(&harness, "Size (px)"));
-    assert_eq!(slider_value(&harness, "Fill"), 2.5, "from the user file");
-    harness.get_by_label("Advanced").click();
-    harness.run_ok();
     assert_eq!(
-        slider_value(&harness, "Min (px)"),
-        2.0,
-        "from the user file"
+        chosen(&harness, "Point size"),
+        "Fixed",
+        "still the default mode"
     );
     assert_eq!(
-        slider_value(&harness, "Max (px)"),
+        field_value(&harness, "Size (px)"),
+        7.0,
+        "from the user file"
+    );
+    assert!(
+        !has_field(&harness, "Fill"),
+        "no adaptive controls when fixed"
+    );
+
+    // The files' adaptive sizes are what Adaptive then uses.
+    choose(&mut harness, "Point size", "Adaptive");
+    assert!(!has_field(&harness, "Size (px)"));
+    assert_eq!(field_value(&harness, "Fill"), 2.5, "from the user file");
+    harness.get_by_label("Advanced").click();
+    harness.run_ok();
+    assert_eq!(field_value(&harness, "Min (px)"), 2.0, "from the user file");
+    assert_eq!(
+        field_value(&harness, "Max (px)"),
         30.0,
         "from the workspace"
     );
-
-    // The file's fixed size is what Fixed then uses.
-    click_radio(&mut harness, "Fixed");
-    assert_eq!(slider_value(&harness, "Size (px)"), 7.0);
-    assert!(!has_slider(&harness, "Fill"));
     assert_eq!(
         warnings(&harness),
         Vec::<String>::new(),
@@ -288,10 +287,11 @@ fn a_bad_settings_file_should_show_a_warning_and_keep_the_good_one() {
     wait_for_display_section(&mut harness, &woken);
 
     // The user file's good value is used; the broken workspace file isn't.
-    assert!(toggled(&harness, "Height"));
-    assert!(toggled(&harness, "Adaptive"), "the default mode");
-    assert_eq!(slider_value(&harness, "Fill"), 1.5, "the default");
-    assert_eq!(slider_value(&harness, "Strength"), 1.0, "the default");
+    assert_eq!(chosen(&harness, "Colour"), "Height");
+    assert_eq!(chosen(&harness, "Point size"), "Fixed", "the default mode");
+    // The bad fixed size isn't used.
+    assert_eq!(field_value(&harness, "Size (px)"), 2.0, "the default");
+    assert_eq!(field_value(&harness, "Strength"), 1.0, "the default");
 
     let shown = warnings(&harness);
     assert_eq!(shown.len(), 2, "{shown:#?}");
@@ -314,10 +314,9 @@ fn a_bad_settings_file_should_show_a_warning_and_keep_the_good_one() {
     harness.get_by_label("Dismiss").click();
     harness.run_ok();
     assert_eq!(warnings(&harness), Vec::<String>::new());
-    assert!(toggled(&harness, "Height"));
-    // The bad fixed size wasn't used either.
-    click_radio(&mut harness, "Fixed");
-    assert_eq!(slider_value(&harness, "Size (px)"), 2.0, "the default");
+    assert_eq!(chosen(&harness, "Colour"), "Height");
+    choose(&mut harness, "Point size", "Adaptive");
+    assert_eq!(field_value(&harness, "Fill"), 1.5, "the default");
 }
 
 #[test]
@@ -382,15 +381,15 @@ fn save_and_reload_should_round_trip_through_the_user_file() {
     let fixture = common::fixture().to_str().unwrap().to_owned();
     let (mut harness, woken) = viewer(&user_dir, &scratch.join("nowhere"), Some(fixture));
     wait_for_display_section(&mut harness, &woken);
-    assert!(toggled(&harness, "Fixed"));
-    assert_eq!(slider_value(&harness, "Size (px)"), 3.0);
+    assert_eq!(chosen(&harness, "Point size"), "Fixed");
+    assert_eq!(field_value(&harness, "Size (px)"), 3.0);
 
     // Changes in the window, saved as the default.
     harness.key_press(egui::Key::H);
     harness.run_ok();
-    assert!(toggled(&harness, "Height"));
-    click_radio(&mut harness, "Adaptive");
-    assert_eq!(slider_value(&harness, "Fill"), 2.0, "from the file");
+    assert_eq!(chosen(&harness, "Colour"), "Height");
+    choose(&mut harness, "Point size", "Adaptive");
+    assert_eq!(field_value(&harness, "Fill"), 2.0, "from the file");
     harness.key_press(egui::Key::F9);
     harness.run_ok();
 
@@ -427,8 +426,89 @@ fn save_and_reload_should_round_trip_through_the_user_file() {
     fs::write(&user_file, edited).unwrap();
     harness.key_press(egui::Key::F10);
     harness.run_ok();
-    assert!(toggled(&harness, "Fixed"), "the edited mode");
-    assert_eq!(slider_value(&harness, "Size (px)"), 6.0);
-    assert!(toggled(&harness, "Height"), "the saved colour mode");
+    assert_eq!(chosen(&harness, "Point size"), "Fixed", "the edited mode");
+    assert_eq!(field_value(&harness, "Size (px)"), 6.0);
+    assert_eq!(
+        chosen(&harness, "Colour"),
+        "Height",
+        "the saved colour mode"
+    );
     assert_eq!(warnings(&harness), Vec::<String>::new());
+}
+
+#[test]
+fn number_fields_should_step_take_typed_values_and_clamp() {
+    if !has_adapter() {
+        common::skip_or_fail_without_gpu("couldn't find a GPU: no wgpu adapters");
+        return;
+    }
+    let _gpu = ONE_VIEWER_AT_A_TIME
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let scratch = common::scratch_dir("number_fields_should_step");
+    let fixture = common::fixture().to_str().unwrap().to_owned();
+    let (mut harness, woken) = viewer(
+        &scratch.join("home"),
+        &scratch.join("nowhere"),
+        Some(fixture),
+    );
+    wait_for_display_section(&mut harness, &woken);
+    // Size (px) is 2 by default, from 1 to 10 in steps of 0.5.
+    assert_eq!(field_value(&harness, "Size (px)"), 2.0);
+    click(&mut harness, "Increase Size (px)");
+    assert_eq!(field_value(&harness, "Size (px)"), 2.5);
+    for _ in 0..4 {
+        click(&mut harness, "Decrease Size (px)");
+    }
+    assert_eq!(
+        field_value(&harness, "Size (px)"),
+        1.0,
+        "stops at the minimum"
+    );
+
+    // Click to type, Enter to keep: a value past the end is clamped.
+    type_into(&mut harness, "Size (px)", "4.5", egui::Key::Enter);
+    assert_eq!(field_value(&harness, "Size (px)"), 4.5);
+    type_into(&mut harness, "Size (px)", "50", egui::Key::Enter);
+    assert_eq!(
+        field_value(&harness, "Size (px)"),
+        10.0,
+        "clamped to the maximum"
+    );
+    // Esc leaves the value as it was.
+    type_into(&mut harness, "Size (px)", "3", egui::Key::Escape);
+    assert_eq!(field_value(&harness, "Size (px)"), 10.0);
+    click(&mut harness, "Increase Size (px)");
+    assert_eq!(
+        field_value(&harness, "Size (px)"),
+        10.0,
+        "stops at the maximum"
+    );
+
+    // The point budget reads counts as it shows them.
+    harness.get_by_label("Performance").scroll_to_me();
+    harness.run_ok();
+    click(&mut harness, "Performance");
+    type_into(&mut harness, "Point budget", "750 k", egui::Key::Enter);
+    assert_eq!(field_value(&harness, "Point budget"), 750_000.0);
+}
+
+/// Clicks what's labelled `label` and lets the UI settle.
+fn click(harness: &mut Harness<'_, impl eframe::App>, label: &str) {
+    harness.get_by_label(label).click();
+    harness.run_ok();
+}
+
+/// Clicks the number field labelled `label` to type into it, types `text`
+/// and presses `key`.
+fn type_into(harness: &mut Harness<'_, impl eframe::App>, label: &str, text: &str, key: egui::Key) {
+    by_role_and_label(harness, egui::accesskit::Role::SpinButton, label).click();
+    harness.run_ok();
+    // Still a spin button while typing, now focused.
+    let field = by_role_and_label(harness, egui::accesskit::Role::SpinButton, label);
+    assert!(field.is_focused(), "clicking {label} should start typing");
+    field.type_text(text);
+    harness.run_ok();
+    harness.key_press(key);
+    harness.run_ok();
 }

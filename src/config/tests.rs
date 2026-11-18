@@ -135,10 +135,7 @@ fn templates_should_be_valid_once_uncommented() {
     };
     let user = parse_clean(&uncomment(USER_TEMPLATE));
     assert_eq!(user.display.color_mode, Some(ColorModeName::Rgb));
-    assert_eq!(
-        user.display.point_size_mode,
-        Some(PointSizeModeName::Adaptive)
-    );
+    assert_eq!(user.display.point_size_mode, Some(PointSizeModeName::Fixed));
     assert!(user.display.fill.is_some());
     assert!(user.display.min_point_size.is_some());
     assert!(user.display.max_point_size.is_some());

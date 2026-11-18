@@ -126,6 +126,14 @@ fn is_selected(harness: &Harness<'_, impl eframe::App>, label: &str) -> bool {
     harness.get_by_label(label).accesskit_node().toggled() == Some(Toggled::True)
 }
 
+/// What the settings panel's Colour drop-down shows.
+fn colour_mode(harness: &Harness<'_, impl eframe::App>) -> Option<String> {
+    harness
+        .query_all_by_label("Colour")
+        .find(|node| node.accesskit_node().role() == egui::accesskit::Role::ComboBox)?
+        .value()
+}
+
 #[test]
 fn palette_should_run_commands_and_open_a_typed_path() {
     if !has_adapter() {
@@ -174,7 +182,7 @@ fn palette_should_run_commands_and_open_a_typed_path() {
     assert!(is_selected(&harness, "Perspective"));
 
     // Enter runs the best match.
-    assert!(!is_selected(&harness, "Class"));
+    assert_ne!(colour_mode(&harness).as_deref(), Some("Class"));
     command_palette(&mut harness);
     type_text(&mut harness, "class");
     assert_eq!(
@@ -182,7 +190,7 @@ fn palette_should_run_commands_and_open_a_typed_path() {
         Some(true)
     );
     press(&mut harness, Modifiers::NONE, Key::Enter);
-    assert!(is_selected(&harness, "Class"));
+    assert_eq!(colour_mode(&harness).as_deref(), Some("Class"));
     assert!(!has_row(&harness, "Colour by classification"));
 
     // Arrow keys move down the list.

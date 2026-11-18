@@ -74,16 +74,16 @@ impl ViewSettings {
 pub(crate) enum PointSizeMode {
     /// By how far apart they are on screen, so the surface looks filled
     /// close up and far away.
-    #[default]
     Adaptive,
     /// All the same size in pixels.
+    #[default]
     Fixed,
 }
 
 impl PointSizeMode {
-    pub(crate) const ALL: [Self; 2] = [Self::Adaptive, Self::Fixed];
+    pub(crate) const ALL: [Self; 2] = [Self::Fixed, Self::Adaptive];
 
-    /// A short name, for the radio buttons.
+    /// A short name, for the drop-down.
     pub(crate) fn label(self) -> &'static str {
         match self {
             Self::Adaptive => "Adaptive",
@@ -151,7 +151,7 @@ pub(crate) enum ColorMode {
 impl ColorMode {
     pub(crate) const ALL: [Self; 3] = [Self::Height, Self::Rgb, Self::Classification];
 
-    /// A short name, for the radio buttons.
+    /// A short name, for the drop-down.
     pub(crate) fn label(self) -> &'static str {
         match self {
             Self::Height => "Height",
@@ -220,16 +220,19 @@ mod tests {
     }
 
     #[test]
-    fn default_settings_should_size_points_adaptively() {
+    fn default_settings_should_draw_points_at_a_fixed_size() {
         assert_eq!(
             Settings::default().view.point_size_mode,
-            PointSizeMode::Adaptive
+            PointSizeMode::Fixed
         );
     }
 
     #[test]
     fn lod_for_view_should_load_no_finer_than_the_smallest_point_in_adaptive_mode() {
-        let mut view = ViewSettings::default();
+        let mut view = ViewSettings {
+            point_size_mode: PointSizeMode::Adaptive,
+            ..ViewSettings::default()
+        };
         view.lod.target_spacing_px = 1.0;
         view.adaptive_size.min_px = 1.5;
         view.adaptive_size.fill = 1.5;
