@@ -40,6 +40,10 @@ pub(crate) enum Command {
     CopyCommandLine,
     /// Show or hide the Diagnostics section.
     ToggleDiagnostics,
+    /// Show the command palette, listing every command.
+    ShowCommands,
+    /// Show the command palette's quick open list of sources.
+    QuickOpen,
 }
 
 /// What people and settings files know a command by.
@@ -96,6 +100,8 @@ impl Command {
             Self::SaveImage,
             Self::CopyCommandLine,
             Self::ToggleDiagnostics,
+            Self::ShowCommands,
+            Self::QuickOpen,
         ]);
         commands
     }
@@ -167,6 +173,15 @@ impl Command {
                     Key::D,
                 )),
             ),
+            Self::ShowCommands => info(
+                "palette.commands",
+                "Show all commands",
+                Some(KeyboardShortcut::new(
+                    Modifiers::COMMAND.plus(Modifiers::SHIFT),
+                    Key::P,
+                )),
+            ),
+            Self::QuickOpen => info("palette.open", "Quick open…", command_key(Key::P)),
         }
     }
 }

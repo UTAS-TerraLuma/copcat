@@ -11,12 +11,14 @@
 //! - [`subcloud_mode`]: Subcloud mode's map panel and 3D view.
 //! - [`export_ui`]: the Save image section and its job.
 //! - [`open_ui`]: the Open menu and the Open URL dialog.
+//! - [`palette`]: the command palette (Ctrl+Shift+P) and quick open (Ctrl+P).
 //! - [`panels`]: the settings panel's sections and the status indicator.
 
 mod camera_input;
 mod commands;
 mod export_ui;
 mod open_ui;
+mod palette;
 mod panels;
 mod scene;
 mod session;
@@ -40,6 +42,7 @@ use crate::theme::Theme;
 
 use commands::{Command, Keymap};
 use export_ui::{ExportContext, ExportJob, ImageExport, export_ui};
+use palette::{Palette, PaletteMode};
 use panels::{
     HeightsAction, cloud_summary, diagnostics_ui, display_ui, heights_ui, performance_ui, section,
     status_indicator, view_ui,
@@ -74,6 +77,8 @@ pub struct ViewerApp {
     pending: Vec<Command>,
     /// The Open URL dialog's text, while it's showing.
     url_dialog: Option<String>,
+    /// The command palette, and the sources opened this session.
+    palette: Palette,
     /// The 3D view's size in physical pixels, as of the last frame with a
     /// cloud open.
     view_size_px: [u32; 2],
@@ -141,6 +146,7 @@ impl ViewerApp {
             keymap: Keymap::default(),
             pending: Vec::new(),
             url_dialog: None,
+            palette: Palette::default(),
             view_size_px: [1, 1],
         };
         if let Some(source) = initial_source.as_deref().and_then(open_ui::clean_source) {
@@ -151,6 +157,7 @@ impl ViewerApp {
 
     fn start_loading(&mut self, ctx: &egui::Context, source: String) {
         self.heights_draft = self.heights.clone();
+        self.palette.remember(&source);
         let loader = Loader::spawn(source.clone(), self.heights.clone(), ctx.clone());
         // Replacing the state drops any previous loader, which stops its thread.
         self.state = LoadState::Opening { source, loader };
@@ -265,7 +272,9 @@ impl ViewerApp {
             Command::OpenSource(_)
             | Command::OpenFileDialog
             | Command::OpenUrlDialog
-            | Command::ToggleDiagnostics => true,
+            | Command::ToggleDiagnostics
+            | Command::ShowCommands
+            | Command::QuickOpen => true,
             Command::SaveImage => is_open && !self.export.is_busy(),
             Command::SetMode(_)
             | Command::SetView(_)
@@ -317,6 +326,8 @@ impl ViewerApp {
                 let diagnostics = &mut self.settings.diagnostics;
                 diagnostics.visible = !diagnostics.visible;
             }
+            Command::ShowCommands => self.palette.open(PaletteMode::Commands),
+            Command::QuickOpen => self.palette.open(PaletteMode::Open),
         }
         // The change shows next frame.
         ctx.request_repaint();
@@ -434,8 +445,8 @@ impl eframe::App for ViewerApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.poll_loader();
 
-        // Digits typed into text fields aren't shortcuts.
-        if !ui.ctx().text_edit_focused() && self.url_dialog.is_none() {
+        // Digits typed into text fields, or the palette, aren't shortcuts.
+        if !ui.ctx().text_edit_focused() && self.url_dialog.is_none() && !self.palette.is_open() {
             let pressed = ui.input_mut(|input| self.keymap.consume(input));
             self.pending.extend(pressed);
         }
@@ -559,6 +570,7 @@ impl eframe::App for ViewerApp {
         if let Some(command) = open_ui::url_dialog(ui.ctx(), &mut self.url_dialog) {
             self.pending.push(command);
         }
+        self.palette_ui(ui.ctx());
         for command in mem::take(&mut self.pending) {
             self.run(ui.ctx(), command);
         }
