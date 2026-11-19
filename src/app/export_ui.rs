@@ -178,7 +178,7 @@ pub(crate) struct ExportContext {
     pub(crate) in_subcloud: bool,
 }
 
-/// The Save image section. Its buttons ask for commands.
+/// The Save image section's contents. Its buttons ask for commands.
 pub(crate) fn export_ui(
     ui: &mut egui::Ui,
     export: &ImageExport,
@@ -187,7 +187,6 @@ pub(crate) fn export_ui(
     keymap: &Keymap,
     commands: &mut Vec<Command>,
 ) {
-    ui.strong("Save image");
     ui.add_enabled_ui(!settings.match_view, |ui| {
         for (side, label) in settings.size.iter_mut().zip(["Width", "Height"]) {
             prop_row(ui, label, |ui| {

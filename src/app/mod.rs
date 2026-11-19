@@ -55,8 +55,8 @@ use connectors::ConnectorHub;
 use export_ui::{ExportContext, ExportJob, ImageExport, export_ui};
 use palette::{Palette, PaletteMode};
 use panels::{
-    HeightsAction, cloud_summary, diagnostics_ui, display_ui, heights_ui, performance_ui, section,
-    status_bar, view_ui,
+    Fold, HeightsAction, cloud_summary, diagnostics_ui, folding_section, heights_ui, rendering_ui,
+    section, status_bar, view_ui,
 };
 use scene::{Scene, Viewports, explore_view};
 use session::Session;
@@ -81,7 +81,7 @@ pub struct ViewerApp {
     export: ImageExport,
     /// Where the open cloud's heights were read from, as asked.
     heights: HeightSettings,
-    /// The same, as edited in the Heights section until Reload applies it.
+    /// The same, as edited in the Z position section until Reload applies it.
     heights_draft: HeightSettings,
     /// The UI's colours, fonts and spacing, as applied to the egui context.
     theme: Theme,
@@ -478,14 +478,22 @@ impl ViewerApp {
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
                         section(ui, theme, |ui| cloud_summary(ui, &session.info));
-                        section(ui, theme, |ui| {
-                            display_ui(ui, &mut settings.view, session, commands);
+                        let rendering = Fold::new("rendering", "Rendering").default_open(true);
+                        folding_section(ui, theme, rendering, |ui| {
+                            rendering_ui(ui, &mut settings.view, session, commands);
                         });
-                        section(ui, theme, |ui| view_ui(ui, camera, commands));
-                        heights_action = section(ui, theme, |ui| {
+                        let projection = Fold::new("projection", "Projection").default_open(true);
+                        folding_section(ui, theme, projection, |ui| {
+                            view_ui(ui, camera, commands);
+                        });
+                        let z_position = Fold::new("z_position", "Z position");
+                        heights_action = folding_section(ui, theme, z_position, |ui| {
                             heights_ui(ui, session, &mut self.heights_draft, &self.heights)
-                        });
-                        section(ui, theme, |ui| {
+                        })
+                        .body
+                        .flatten();
+                        let save_image = Fold::new("save_image", "Save image");
+                        folding_section(ui, theme, save_image, |ui| {
                             export_ui(
                                 ui,
                                 &self.export,
@@ -495,16 +503,14 @@ impl ViewerApp {
                                 commands,
                             );
                         });
-                        section(ui, theme, |ui| performance_ui(ui, &mut settings.view.lod));
-                        section(ui, theme, |ui| {
-                            diagnostics_ui(
-                                ui,
-                                session,
-                                &self.renderer,
-                                &mut settings.diagnostics,
-                                commands,
-                            );
-                        });
+                        diagnostics_ui(
+                            ui,
+                            theme,
+                            session,
+                            &self.renderer,
+                            &mut settings.diagnostics,
+                            commands,
+                        );
                         controls_help(ui, theme, in_subcloud);
                     });
             });

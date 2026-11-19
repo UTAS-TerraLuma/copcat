@@ -116,6 +116,46 @@ pub fn mask_shown<State>(harness: &mut egui_kittest::Harness<'_, State>, rect: e
     }
 }
 
+/// The header of the settings panel's section (or the group in one) titled
+/// `title`, and whether it's open. None if it isn't there.
+pub fn section_header<State>(
+    harness: &egui_kittest::Harness<'_, State>,
+    title: &str,
+) -> Option<bool> {
+    use egui_kittest::kittest::{NodeT, Queryable};
+    harness
+        .query_all_by_label(title)
+        .find_map(|node| node.accesskit_node().data().is_expanded())
+}
+
+/// Opens the settings panel's section (or the group in one) titled `title`
+/// if it's closed, scrolled into view first, and lets the UI settle.
+pub fn open_section<State>(harness: &mut egui_kittest::Harness<'_, State>, title: &str) {
+    let open = section_header(harness, title).unwrap_or_else(|| panic!("no section {title}"));
+    if open {
+        return;
+    }
+    fn header<'h, State>(
+        harness: &'h egui_kittest::Harness<'_, State>,
+        title: &'h str,
+    ) -> egui_kittest::Node<'h> {
+        use egui_kittest::kittest::{NodeT, Queryable};
+        harness
+            .query_all_by_label(title)
+            .find(|node| node.accesskit_node().data().is_expanded().is_some())
+            .unwrap()
+    }
+    header(harness, title).scroll_to_me();
+    harness.run_ok();
+    header(harness, title).click();
+    harness.run_ok();
+    assert_eq!(
+        section_header(harness, title),
+        Some(true),
+        "{title} should open"
+    );
+}
+
 pub fn write_png(path: &Path, image: &Rgb) {
     let file = File::create(path).unwrap();
     let mut encoder = png::Encoder::new(BufWriter::new(file), image.width, image.height);

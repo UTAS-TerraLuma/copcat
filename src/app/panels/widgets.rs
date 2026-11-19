@@ -28,11 +28,160 @@ pub(crate) fn section<R>(
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.spacing_mut().item_spacing.y = theme.spacing.row_gap;
+            // Separators and group guide lines: the theme's line colour is for
+            // the panel, and all but vanishes on a box in the dark theme.
+            let colors = &theme.colors;
+            ui.visuals_mut().widgets.noninteractive.bg_stroke.color = egui::lerp(
+                egui::Rgba::from(colors.box_fill)..=egui::Rgba::from(colors.strong_stroke),
+                0.5,
+            )
+            .into();
             let span = ui.max_rect().x_range();
             ui.data_mut(|data| data.insert_temp(section_span_id(), span));
             add_contents(ui)
         })
         .inner
+}
+
+/// A [`section`] whose contents fold away under a header, as [`Fold`] does.
+/// Returns the header's response and, while open, what `add_contents`
+/// returned.
+pub(crate) fn folding_section<R>(
+    ui: &mut egui::Ui,
+    theme: &Theme,
+    fold: Fold<'_>,
+    add_contents: impl FnOnce(&mut egui::Ui) -> R,
+) -> FoldResponse<R> {
+    section(ui, theme, |ui| fold.show(ui, add_contents))
+}
+
+/// A group of rows under a header that opens and closes it: a small
+/// triangle and the title, the whole row clickable and labelled by the
+/// title for AccessKit. Rows in it still split at the box's x, indented or
+/// not. Open or closed is kept in egui's memory for the session.
+pub(crate) struct Fold<'a> {
+    id_salt: &'a str,
+    title: &'a str,
+    default_open: bool,
+    open: Option<bool>,
+    indented: bool,
+}
+
+pub(crate) struct FoldResponse<R> {
+    pub(crate) header: egui::Response,
+    /// What the contents returned, if they were shown.
+    pub(crate) body: Option<R>,
+}
+
+impl<'a> Fold<'a> {
+    /// Closed at first. `id_salt` keeps its state apart from other folds'.
+    pub(crate) fn new(id_salt: &'a str, title: &'a str) -> Self {
+        Self {
+            id_salt,
+            title,
+            default_open: false,
+            open: None,
+            indented: false,
+        }
+    }
+
+    /// Rows indented behind a guide line, for a group inside a section, so
+    /// it's clear where the group ends.
+    pub(crate) fn indented(mut self) -> Self {
+        self.indented = true;
+        self
+    }
+
+    pub(crate) fn default_open(mut self, open: bool) -> Self {
+        self.default_open = open;
+        self
+    }
+
+    /// Open or closed as the caller says, not by clicks on the header; the
+    /// caller reads clicks from [`FoldResponse::header`].
+    pub(crate) fn open(mut self, open: bool) -> Self {
+        self.open = Some(open);
+        self
+    }
+
+    pub(crate) fn show<R>(
+        self,
+        ui: &mut egui::Ui,
+        add_contents: impl FnOnce(&mut egui::Ui) -> R,
+    ) -> FoldResponse<R> {
+        let id = ui.make_persistent_id(self.id_salt);
+        let mut state = egui::collapsing_header::CollapsingState::load_with_default_open(
+            ui.ctx(),
+            id,
+            self.default_open,
+        );
+        let header = self.header(ui, id.with("header"), &mut state);
+        let body = if self.indented {
+            state.show_body_indented(&header, ui, add_contents)
+        } else {
+            state.show_body_unindented(ui, add_contents)
+        };
+        let body = body.map(|inner| inner.inner);
+        FoldResponse { header, body }
+    }
+
+    /// The header row, as wide as the box and as tall as a control, laid out
+    /// as egui's collapsing headers are.
+    fn header(
+        &self,
+        ui: &mut egui::Ui,
+        id: egui::Id,
+        state: &mut egui::collapsing_header::CollapsingState,
+    ) -> egui::Response {
+        let size = egui::vec2(ui.available_width(), ui.spacing().interact_size.y);
+        let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
+        let mut response = ui.interact(rect, id, egui::Sense::click());
+        match self.open {
+            Some(open) => {
+                if open != state.is_open() {
+                    state.toggle(ui);
+                }
+            }
+            None => {
+                if response.clicked() {
+                    state.toggle(ui);
+                    response.mark_changed();
+                }
+            }
+        }
+        let title = self.title;
+        response.widget_info(|| {
+            egui::WidgetInfo::labeled(egui::WidgetType::CollapsingHeader, ui.is_enabled(), title)
+        });
+        // So assistive tech, and tests, can tell open from closed.
+        let open = state.is_open();
+        ui.ctx()
+            .accesskit_node_builder(response.id, |node| node.set_expanded(open));
+        if ui.is_rect_visible(rect) {
+            let indent = ui.spacing().indent;
+            let (mut icon_rect, _) = ui.spacing().icon_rectangles(rect);
+            icon_rect.set_center(egui::pos2(rect.left() + indent / 2.0, rect.center().y));
+            let openness = state.openness(ui.ctx());
+            egui::collapsing_header::paint_default_icon(
+                ui,
+                openness,
+                &response.clone().with_new_rect(icon_rect),
+            );
+            let galley = egui::WidgetText::from(title).into_galley(
+                ui,
+                Some(egui::TextWrapMode::Truncate),
+                (rect.width() - indent).max(0.0),
+                egui::TextStyle::Button,
+            );
+            let at = egui::pos2(
+                rect.left() + indent,
+                rect.center().y - galley.size().y / 2.0,
+            );
+            let color = ui.style().interact(&response).text_color();
+            ui.painter().galley(at, galley, color);
+        }
+        response
+    }
 }
 
 /// The x of a row's label column's left edge, the split, and the right edge
@@ -305,10 +454,36 @@ pub(crate) fn choice_combo(
             .width(ui.available_width())
             .truncate()
             .icon(chevron)
-            .show_ui(ui, add_options)
+            .show_ui(ui, |ui| {
+                same_size_items(ui);
+                add_options(ui);
+            })
             .response
     })
     .inner
+}
+
+/// Makes every item in a drop-down's list one size in every state. egui
+/// takes a button's outline width off its padding, but draws a selectable
+/// button's frame (and so the outline) only once it's hovered, pressed or
+/// selected: a plain item was 2 px shorter, and the list moved as the
+/// highlight did. With no outline in any state, framed and plain are the
+/// same size; the fill still shows the highlight. The padding makes items
+/// as tall as a control.
+fn same_size_items(ui: &mut egui::Ui) {
+    let widgets = &mut ui.visuals_mut().widgets;
+    for state in [
+        &mut widgets.noninteractive,
+        &mut widgets.inactive,
+        &mut widgets.hovered,
+        &mut widgets.active,
+        &mut widgets.open,
+    ] {
+        state.bg_stroke.width = 0.0;
+        state.expansion = 0.0;
+    }
+    let content = text_height(ui, egui::TextStyle::Button);
+    ui.spacing_mut().button_padding.y = padding_to_fit(ui, content);
 }
 
 /// How tall a line of text in `style` is laid out.
@@ -830,7 +1005,8 @@ mod tests {
                         })
                     });
                     prop_control(ui, "tick", |ui| ui.checkbox(&mut ticked, "Tick"));
-                    egui::CollapsingHeader::new("More")
+                    Fold::new("more", "More")
+                        .indented()
                         .default_open(true)
                         .show(ui, |ui| {
                             prop_row(ui, "Inner", |ui| {
@@ -961,6 +1137,112 @@ mod tests {
         harness.hover_at(egui::pos2(150.0, 90.0));
         harness.run();
         assert_eq!(arrows_painted(&harness), 0, "hidden again");
+    }
+
+    /// A drop-down of four options: one selected, one disabled. Its response
+    /// id is kept in the state, to find its list's popup.
+    fn combo_harness(theme: Theme) -> egui_kittest::Harness<'static, Option<egui::Id>> {
+        let mut chosen = 2_usize;
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(300.0, 300.0))
+            .build_ui_state(
+                move |ui, combo_id| {
+                    theme.apply(ui.ctx());
+                    section(ui, &theme, |ui| {
+                        let response = prop_row(ui, "Colour", |ui| {
+                            choice_combo(
+                                ui,
+                                "combo",
+                                ["Height", "RGB", "Class", "Intensity"][chosen],
+                                |ui| {
+                                    for (index, label) in ["Height", "RGB", "Class", "Intensity"]
+                                        .into_iter()
+                                        .enumerate()
+                                    {
+                                        let option = ui.add_enabled(
+                                            index != 1,
+                                            egui::Button::selectable(chosen == index, label),
+                                        );
+                                        if option.clicked() {
+                                            chosen = index;
+                                        }
+                                    }
+                                },
+                            )
+                        });
+                        *combo_id = Some(response.id);
+                    });
+                },
+                None,
+            );
+        harness.run();
+        harness
+    }
+
+    /// Each option's rect, by label, and the open list's.
+    fn list_rects(
+        harness: &egui_kittest::Harness<'_, Option<egui::Id>>,
+    ) -> (Vec<egui::Rect>, egui::Rect) {
+        let items = ["Height", "RGB", "Class", "Intensity"]
+            .into_iter()
+            .map(|label| {
+                harness
+                    .query_all_by_label(label)
+                    .find(|node| node.accesskit_node().role() == Role::Button)
+                    .unwrap_or_else(|| panic!("no option {label}"))
+                    .rect()
+            })
+            .collect();
+        let combo_id = harness.state().expect("the drop-down was drawn");
+        // What egui's `ComboBox::widget_to_popup_id` makes, which is private.
+        let popup_id = combo_id.with("popup");
+        let popup = harness
+            .ctx
+            .memory(|memory| memory.area_rect(popup_id))
+            .expect("the list is open");
+        (items, popup)
+    }
+
+    #[test]
+    fn drop_down_options_should_keep_one_size_whatever_is_highlighted() {
+        for theme in [Theme::default(), Theme::graphite_light()] {
+            let mut harness = combo_harness(theme);
+            harness.get_by_role(Role::ComboBox).click();
+            harness.run();
+            let (items, popup) = list_rects(&harness);
+            let height = items[0].height();
+            for item in &items {
+                assert_eq!(item.height(), height, "{items:?}");
+                assert_eq!(item.width(), items[0].width(), "{items:?}");
+                // All in the list, so there's nothing to scroll to.
+                assert!(popup.contains_rect(*item), "{item:?} outside {popup:?}");
+            }
+
+            // Hover each option, then the list's empty edge, and tab through
+            // them: nothing moves or grows, and every frame still fits.
+            let mut states = Vec::new();
+            for item in &items {
+                harness.hover_at(item.center());
+                harness.step();
+                states.push(list_rects(&harness));
+                harness.run();
+                states.push(list_rects(&harness));
+            }
+            for label in ["Height", "Class", "Intensity"] {
+                harness
+                    .query_all_by_label(label)
+                    .find(|node| node.accesskit_node().role() == Role::Button)
+                    .unwrap()
+                    .focus();
+                harness.step();
+                states.push(list_rects(&harness));
+                harness.run();
+                states.push(list_rects(&harness));
+            }
+            for (at, state) in states.iter().enumerate() {
+                assert_eq!(state, &(items.clone(), popup), "state {at}");
+            }
+        }
     }
 
     #[test]

@@ -85,7 +85,7 @@ fn viewer_at_scale(
     (harness, woken)
 }
 
-/// Steps until the cloud is open and the Display section is showing.
+/// Steps until the cloud is open and the Rendering section is showing.
 fn wait_for_display_section(
     harness: &mut Harness<'_, impl eframe::App>,
     woken: &mpsc::Receiver<()>,
@@ -499,9 +499,8 @@ fn number_fields_should_step_take_typed_values_and_clamp() {
     );
 
     // The point budget reads counts as it shows them.
-    harness.get_by_label("Performance").scroll_to_me();
+    by_role_and_label(&harness, egui::accesskit::Role::SpinButton, "Point budget").scroll_to_me();
     harness.run_ok();
-    click(&mut harness, "Performance");
     type_into(&mut harness, "Point budget", "750 k", egui::Key::Enter);
     assert_eq!(field_value(&harness, "Point budget"), 750_000.0);
 }
@@ -525,16 +524,88 @@ fn settings_rows_should_split_at_one_x_through_the_panel() {
             pixels_per_point,
         );
         wait_for_display_section(&mut harness, &woken);
-        // Every kind of row: adaptive sizes with Advanced open, and the
-        // collapsing sections, which indent their rows.
+        // Every kind of row: adaptive sizes with Advanced open, and every
+        // section and group in them open.
         choose(&mut harness, "Point size", "Adaptive");
-        for header in ["Advanced", "Sources", "Performance"] {
-            harness.get_by_label(header).scroll_to_me();
-            harness.run_ok();
-            click(&mut harness, header);
+        for header in ["Advanced", "Z position", "Sources", "Save image"] {
+            common::open_section(&mut harness, header);
         }
         assert_rows_line_up(&harness, pixels_per_point);
     }
+}
+
+#[test]
+fn each_section_header_should_open_and_close_its_section() {
+    if !has_adapter() {
+        common::skip_or_fail_without_gpu("couldn't find a GPU: no wgpu adapters");
+        return;
+    }
+    let _gpu = ONE_VIEWER_AT_A_TIME
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let scratch = common::scratch_dir("each_section_header_should_open_and_close");
+    let fixture = common::fixture().to_str().unwrap().to_owned();
+    let (mut harness, woken) = viewer(
+        &scratch.join("home"),
+        &scratch.join("nowhere"),
+        Some(fixture),
+    );
+    wait_for_display_section(&mut harness, &woken);
+
+    // Each section, open at first or not, and a label only its contents have.
+    let sections = [
+        ("Rendering", true, "Point budget"),
+        ("Projection", true, "Orthographic for axis views"),
+        ("Z position", false, "Draw at"),
+        ("Save image", false, "Match view"),
+        ("Diagnostics", false, "Nodes drawn"),
+    ];
+    let shows = |harness: &Harness<'_, _>, label: &str| {
+        harness.query_all_by_label(label).next().is_some()
+            || harness.query_all_by_value(label).next().is_some()
+    };
+    for (title, open, inside) in sections {
+        assert_eq!(
+            common::section_header(&harness, title),
+            Some(open),
+            "{title}"
+        );
+        assert_eq!(shows(&harness, inside), open, "{title}: {inside}");
+    }
+    assert_eq!(
+        common::section_header(&harness, "Performance"),
+        None,
+        "merged into Rendering"
+    );
+
+    // A click on the header toggles it, and another puts it back.
+    for (title, open, inside) in sections {
+        for now_open in [!open, open] {
+            harness
+                .query_all_by_label(title)
+                .find(|node| node.accesskit_node().data().is_expanded().is_some())
+                .unwrap()
+                .scroll_to_me();
+            harness.run_ok();
+            click_header(&mut harness, title);
+            assert_eq!(
+                common::section_header(&harness, title),
+                Some(now_open),
+                "{title}"
+            );
+            assert_eq!(shows(&harness, inside), now_open, "{title}: {inside}");
+        }
+    }
+}
+
+/// Clicks the header of the section titled `title` and lets the UI settle.
+fn click_header(harness: &mut Harness<'_, impl eframe::App>, title: &str) {
+    harness
+        .query_all_by_label(title)
+        .find(|node| node.accesskit_node().data().is_expanded().is_some())
+        .unwrap_or_else(|| panic!("no section {title}"))
+        .click();
+    harness.run_ok();
 }
 
 /// Asserts the settings panel's controls share one left edge (the split)
@@ -595,7 +666,6 @@ fn assert_rows_line_up(harness: &Harness<'_, impl eframe::App>, pixels_per_point
         "Max (px)",
         "Strength",
         "Radius (px)",
-        "Projection",
         "Draw at",
         "Width",
         "Point budget",
