@@ -1,5 +1,5 @@
-//! How points look: colour, point size and eye-dome lighting, and the
-//! Performance section's level of detail settings.
+//! The Rendering section: how points look (colour, point size and eye-dome
+//! lighting) and how much detail is drawn.
 
 use eframe::egui;
 
@@ -8,7 +8,7 @@ use crate::config::ranges;
 use crate::format::format_count;
 use crate::lod::LodSettings;
 
-use super::widgets::{NumberField, choice_combo, legend_color, prop_control, prop_row};
+use super::widgets::{Fold, NumberField, choice_combo, legend_color, prop_control, prop_row};
 use crate::app::commands::Command;
 use crate::app::session::Session;
 use crate::app::settings::{ColorMode, PointSizeMode, ViewSettings};
@@ -19,9 +19,9 @@ fn number_row(ui: &mut egui::Ui, field: NumberField<'_>) -> egui::Response {
     prop_row(ui, name, |ui| ui.add(field))
 }
 
-/// The Display section. Colour mode and eye-dome lighting ask for commands;
-/// the other controls change `settings` directly.
-pub(crate) fn display_ui(
+/// The Rendering section's contents. Colour mode and eye-dome lighting ask
+/// for commands; the other controls change `settings` directly.
+pub(crate) fn rendering_ui(
     ui: &mut egui::Ui,
     settings: &mut ViewSettings,
     session: &Session,
@@ -74,6 +74,7 @@ pub(crate) fn display_ui(
             .precision(0.01),
         );
     }
+    level_of_detail_ui(ui, &mut settings.lod);
 }
 
 /// Point size: Fixed (one size) or Adaptive (a fill factor, with the
@@ -119,8 +120,8 @@ fn point_size_ui(ui: &mut egui::Ui, settings: &mut ViewSettings) {
     }
     if settings.point_size_mode == PointSizeMode::Adaptive {
         let size = &mut settings.adaptive_size;
-        egui::CollapsingHeader::new("Advanced")
-            .id_salt("adaptive_size_advanced")
+        Fold::new("adaptive_size_advanced", "Advanced")
+            .indented()
             .show(ui, |ui| {
                 number_row(
                     ui,
@@ -147,40 +148,34 @@ fn point_size_ui(ui: &mut egui::Ui, settings: &mut ViewSettings) {
     }
 }
 
-/// The Performance section, collapsed at first: how many points to draw and
-/// how much detail to load.
-pub(crate) fn performance_ui(ui: &mut egui::Ui, lod: &mut LodSettings) {
-    egui::CollapsingHeader::new("Performance")
-        .id_salt("performance")
-        .show(ui, |ui| {
-            number_row(
-                ui,
-                NumberField::new(&mut lod.point_budget, ranges::POINT_BUDGET, "Point budget")
-                    .step(1e6)
-                    .precision(1e4)
-                    .logarithmic()
-                    .formatter(|value| format_count(value as u64))
-                    .parser(parse_count),
-            )
-            .on_hover_text("The most points to draw at once");
-            let spacing_hint = "The target spacing: nodes are refined until their points \
-                                are at most this far apart on screen. Lower means more \
-                                detail, up to the point budget. With adaptive point \
-                                sizes, detail stops where points would be drawn bigger \
-                                than their spacing (2 × Min ÷ Fill).";
-            number_row(
-                ui,
-                NumberField::new(
-                    &mut lod.target_spacing_px,
-                    ranges::SPACING_PX,
-                    "Spacing (px)",
-                )
-                .step(0.5)
-                .precision(0.1)
-                .logarithmic(),
-            )
-            .on_hover_text(spacing_hint);
-        });
+/// How many points to draw and how much detail to load, under a small
+/// heading after the settings for how points look.
+fn level_of_detail_ui(ui: &mut egui::Ui, lod: &mut LodSettings) {
+    ui.separator();
+    ui.label(egui::RichText::new("Level of detail").weak());
+    number_row(
+        ui,
+        NumberField::new(&mut lod.point_budget, ranges::POINT_BUDGET, "Point budget")
+            .step(1e6)
+            .precision(1e4)
+            .logarithmic()
+            .formatter(|value| format_count(value as u64))
+            .parser(parse_count),
+    )
+    .on_hover_text("The most points to draw at once");
+    let spacing_hint = "The target spacing: nodes are refined until their points                         are at most this far apart on screen. Lower means more                         detail, up to the point budget. With adaptive point                         sizes, detail stops where points would be drawn bigger                         than their spacing (2 × Min ÷ Fill).";
+    number_row(
+        ui,
+        NumberField::new(
+            &mut lod.target_spacing_px,
+            ranges::SPACING_PX,
+            "Spacing (px)",
+        )
+        .step(0.5)
+        .precision(0.1)
+        .logarithmic(),
+    )
+    .on_hover_text(spacing_hint);
 }
 
 /// A count typed in, as it's shown or as plain digits: `5 M`, `2.5m`,

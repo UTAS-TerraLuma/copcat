@@ -1,22 +1,22 @@
-//! The Heights section: which height points are drawn at, and where each
+//! The Z position section: which height points are drawn at, and where each
 //! height is read from.
 
 use eframe::egui;
 
 use crate::heights::{HeightKind, HeightSettings, HeightSource, SourceSetting};
 
-use super::widgets::{choice_combo, prop_control, prop_row};
+use super::widgets::{Fold, choice_combo, prop_control, prop_row};
 use crate::app::session::Session;
 
-/// A change asked for in the Heights section.
+/// A change asked for in the Z position section.
 pub(crate) enum HeightsAction {
     Show(HeightKind),
     /// Open the cloud again, reading heights from where the section now says.
     Reload,
 }
 
-/// The Heights section: which height the points are drawn at, and where in
-/// the file each height comes from.
+/// The Z position section's contents: which height the points are drawn
+/// at, and where in the file each height comes from.
 pub(crate) fn heights_ui(
     ui: &mut egui::Ui,
     session: &Session,
@@ -41,8 +41,8 @@ pub(crate) fn heights_ui(
             }
         })
     });
-    egui::CollapsingHeader::new("Sources")
-        .id_salt("height_sources")
+    Fold::new("height_sources", "Sources")
+        .indented()
         .show(ui, |ui| {
             for kind in HeightKind::ALL {
                 // What it's set to, then where it was read from this time.

@@ -381,6 +381,15 @@ fn a_stac_api_should_list_every_page_by_itself_and_open_a_cloud() {
     assert_eq!(first_page_requests(&server), 1);
     harness.get_by_label("Refresh").click();
     harness.run_ok();
+    // The old list stays up while it fetches, so wait on the fetch itself:
+    // each page that arrives wakes the viewer.
+    let started = Instant::now();
+    while first_page_requests(&server) < 2 {
+        let left = TIMEOUT.saturating_sub(started.elapsed());
+        assert!(!left.is_zero(), "Refresh didn't fetch the first page again");
+        let _ = woken.recv_timeout(left);
+        harness.step();
+    }
     wait_for_row(&mut harness, &woken, "Late flight");
     assert_eq!(first_page_requests(&server), 2);
 

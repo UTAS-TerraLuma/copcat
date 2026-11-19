@@ -8,29 +8,33 @@ use crate::cloud::CloudInfo;
 use crate::format::format_count;
 use crate::renderer::PointRenderer;
 
-use super::widgets::{legend_color, mono, prop_control, stat_grid, stat_row, stat_row_with};
+use crate::theme::Theme;
+
+use super::widgets::{
+    Fold, folding_section, legend_color, mono, prop_control, stat_grid, stat_row, stat_row_with,
+};
 use crate::app::commands::Command;
 use crate::app::session::{FAILED_COLOR, FETCHING_COLOR, LOADED_COLOR, QUEUED_COLOR, Session};
 use crate::app::settings::DiagnosticsSettings;
 
-/// A collapsing section, open while `settings.visible`. Opening or closing
-/// it asks for [`Command::ToggleDiagnostics`].
+/// A folding section, open while `settings.visible`. Opening or closing it
+/// asks for [`Command::ToggleDiagnostics`].
 pub(crate) fn diagnostics_ui(
     ui: &mut egui::Ui,
+    theme: &Theme,
     session: &Session,
     renderer: &PointRenderer,
     settings: &mut DiagnosticsSettings,
     commands: &mut Vec<Command>,
 ) {
-    let header = egui::CollapsingHeader::new("Diagnostics")
-        .id_salt("diagnostics")
-        .open(Some(settings.visible))
-        .show(ui, |ui| {
-            streaming_stats(ui, session, renderer);
-            timings(ui, &session.info);
-            bounds_ui(ui, settings);
-        });
-    if header.header_response.clicked() {
+    let visible = settings.visible;
+    let fold = Fold::new("diagnostics", "Diagnostics").open(visible);
+    let shown = folding_section(ui, theme, fold, |ui| {
+        streaming_stats(ui, session, renderer);
+        timings(ui, &session.info);
+        bounds_ui(ui, settings);
+    });
+    if shown.header.clicked() {
         commands.push(Command::ToggleDiagnostics);
     }
 }

@@ -60,7 +60,7 @@ out which is where from the extra dimensions' names:
   named like height above ground, is elevation, and Z is height above ground.
 - Otherwise Z is elevation.
 
-Under **Heights** in the Point cloud window, **Draw at** switches between the two.
+Under **Z position** in the Point cloud window, **Draw at** switches between the two.
 The cloud opens at whichever height is in Z. Under **Sources** you can say where
 each height is, and then click **Reload with these**. On the command line, use
 `--elevation` and `--hag`. Each takes `z`, the name of an extra dimension, or
@@ -136,7 +136,7 @@ Every key, with its default:
     },
     "projection": "perspective"     // or "orthographic"
   },
-  "performance": {
+  "performance": {                  // Level of detail, under Rendering
     "pointBudget": 5000000,         // 500000 to 30000000
     "spacingPx": 2.0                // 0.5 to 20
   },
