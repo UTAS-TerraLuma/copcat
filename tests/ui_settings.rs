@@ -147,7 +147,7 @@ fn choose(harness: &mut Harness<'_, impl eframe::App>, label: &str, option: &str
     by_role_and_label(harness, egui::accesskit::Role::Button, option).click();
     harness.run_ok();
 }
-/// The text of every settings warning in the settings bar.
+/// The text of every settings warning in the toasts.
 fn warnings(harness: &Harness<'_, impl eframe::App>) -> Vec<String> {
     harness
         .query_all_by_role(egui::accesskit::Role::Label)
@@ -323,9 +323,16 @@ fn a_bad_settings_file_should_show_a_warning_and_keep_the_good_one() {
         "{shown:#?}"
     );
 
-    // Non-blocking: the warning goes once dismissed, and the app carries on.
-    harness.get_by_label("Dismiss").click();
-    harness.run_ok();
+    // Non-blocking: each warning goes once dismissed, and the app carries on.
+    for left in (0..shown.len()).rev() {
+        harness
+            .query_all_by_label("Dismiss")
+            .next()
+            .unwrap()
+            .click();
+        harness.run_ok();
+        assert_eq!(warnings(&harness).len(), left);
+    }
     assert_eq!(warnings(&harness), Vec::<String>::new());
     assert_eq!(chosen(&harness, "Colour"), "Height");
     choose(&mut harness, "Point size", "Adaptive");

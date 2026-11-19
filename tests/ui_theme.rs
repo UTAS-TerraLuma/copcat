@@ -123,7 +123,7 @@ fn panel_fill(harness: &Harness<'_, impl eframe::App>) -> egui::Color32 {
     harness.ctx.global_style().visuals.window_fill
 }
 
-/// The text of every message in the settings bar.
+/// The text of every message in the toasts.
 fn messages(harness: &Harness<'_, impl eframe::App>) -> Vec<String> {
     harness
         .query_all_by_role(Role::Label)

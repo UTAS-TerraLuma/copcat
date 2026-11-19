@@ -1,7 +1,7 @@
 //! The settings files ([`crate::config`]) applied to the viewer: display,
 //! performance and export defaults into [`Settings`], keybindings into the
-//! [`Keymap`], the theme by name. Also the settings commands, and the bar
-//! that shows problems with the files.
+//! [`Keymap`], the theme by name. Also the settings commands; problems
+//! with the files show as toasts ([`super::toasts`]).
 //!
 //! The files are the source of truth: changes made in the UI last for the
 //! session unless saved with [`SettingsCommand::SaveDisplayDefaults`].
@@ -22,6 +22,7 @@ use super::ViewerApp;
 use super::commands::{Command, Keymap, SettingsCommand};
 use super::palette::{Env, ItemAction, Listing, PaletteItem, PaletteMode, Provider};
 use super::settings::{ColorMode, ExportSettings, PointSizeMode, Settings, ViewSettings};
+use super::toasts::{Severity, Toasts};
 
 /// The settings files and what came of reading them.
 #[derive(Debug, Default)]
@@ -31,15 +32,9 @@ pub(crate) struct UserConfig {
     pub(crate) locations: Option<Locations>,
     /// Places to open clouds from: the data sources in quick open.
     pub(crate) connectors: Connectors,
-    /// Shown at the foot of the window until dismissed.
-    pub(crate) messages: Vec<Message>,
-}
-
-/// A line in the settings bar.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct Message {
-    pub(crate) text: String,
-    pub(crate) is_warning: bool,
+    /// Shown as toasts above the status bar: information for a few
+    /// seconds, warnings and errors until dismissed.
+    pub(crate) messages: Toasts,
 }
 
 impl UserConfig {
@@ -50,20 +45,23 @@ impl UserConfig {
         }
     }
 
+    /// A problem worth knowing, such as a bad setting. Stays until dismissed.
     pub(crate) fn warn(&mut self, text: impl Into<String>) {
         let text = text.into();
         eprintln!("copcat settings: {text}");
-        self.messages.push(Message {
-            text,
-            is_warning: true,
-        });
+        self.messages.push(Severity::Warn, text);
     }
 
+    /// Something asked for that failed. Stays until dismissed.
+    pub(crate) fn error(&mut self, text: impl Into<String>) {
+        let text = text.into();
+        eprintln!("copcat settings: {text}");
+        self.messages.push(Severity::Error, text);
+    }
+
+    /// Something done, such as a file saved. Goes by itself.
     pub(crate) fn inform(&mut self, text: impl Into<String>) {
-        self.messages.push(Message {
-            text: text.into(),
-            is_warning: false,
-        });
+        self.messages.push(Severity::Info, text);
     }
 }
 
@@ -330,7 +328,7 @@ pub(crate) fn parse_shortcut(text: &str) -> Result<KeyboardShortcut, String> {
 impl ViewerApp {
     /// Reads the settings files and applies them over the defaults:
     /// display, performance and export settings, the theme and the
-    /// keybindings. Problems are reported in the settings bar.
+    /// keybindings. Problems are shown as toasts.
     pub(super) fn load_user_config(&mut self, ctx: &egui::Context) {
         let loaded = self
             .user_config
@@ -372,7 +370,7 @@ impl ViewerApp {
         match command {
             SettingsCommand::OpenUser => match locations.user_file() {
                 Some(file) => self.open_settings_file(&file, config::USER_TEMPLATE),
-                None => self.user_config.warn(format!(
+                None => self.user_config.error(format!(
                     "couldn't find the home directory; set {} to where settings should go",
                     config::CONFIG_DIR_ENV
                 )),
@@ -393,7 +391,7 @@ impl ViewerApp {
             }
             SettingsCommand::SaveDisplayDefaults => {
                 let Some(file) = locations.user_file() else {
-                    self.user_config.warn("couldn't find the home directory");
+                    self.user_config.error("couldn't find the home directory");
                     return;
                 };
                 let defaults = current_defaults(&self.settings.view, self.camera.projection());
@@ -411,7 +409,7 @@ impl ViewerApp {
                     }
                     Err(problem) => self
                         .user_config
-                        .warn(format!("{}: {problem}", file.display())),
+                        .error(format!("{}: {problem}", file.display())),
                 }
             }
             SettingsCommand::SelectTheme => unreachable!("handled above"),
@@ -463,14 +461,19 @@ impl ViewerApp {
                 message
             }
             Err(problem) => {
-                self.user_config.warn(format!(
+                self.user_config.error(format!(
                     "{}: {problem}; {name} is only for this session",
                     file.display()
                 ));
                 return;
             }
         };
-        self.user_config.inform(message);
+        // The choice won't last, so it stays until read.
+        if overridden {
+            self.user_config.messages.push(Severity::Warn, message);
+        } else {
+            self.user_config.inform(message);
+        }
     }
 
     /// Creates `file` from `template` if it's missing, then opens it in the
@@ -485,45 +488,8 @@ impl ViewerApp {
             )),
             Err(error) => self
                 .user_config
-                .warn(format!("couldn't open {}: {error}", file.display())),
+                .error(format!("couldn't open {}: {error}", file.display())),
         }
-    }
-
-    /// The bar at the foot of the window listing problems with the settings
-    /// files and what the settings commands did, until dismissed.
-    pub(super) fn settings_bar(&mut self, ui: &mut egui::Ui) {
-        if self.user_config.messages.is_empty() {
-            return;
-        }
-        let theme = &self.theme;
-        let messages = &mut self.user_config.messages;
-        egui::Panel::bottom("settings_messages")
-            .frame(theme.header_frame())
-            .show_separator_line(false)
-            .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    if ui.button("Dismiss").clicked() {
-                        messages.clear();
-                    }
-                    ui.vertical(|ui| {
-                        for message in messages.iter() {
-                            let color = if message.is_warning {
-                                theme.colors.warn
-                            } else {
-                                theme.colors.text_secondary
-                            };
-                            let prefix = if message.is_warning { "Settings: " } else { "" };
-                            ui.add(
-                                egui::Label::new(
-                                    egui::RichText::new(format!("{prefix}{}", message.text))
-                                        .color(color),
-                                )
-                                .wrap(),
-                            );
-                        }
-                    });
-                });
-            });
     }
 }
 
