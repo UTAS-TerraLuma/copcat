@@ -42,6 +42,7 @@ use std::sync::mpsc::TryRecvError;
 use copc_streaming::VoxelKey;
 use eframe::egui;
 
+use crate::cache::{self, Caches};
 use crate::camera::OrbitCamera;
 use crate::cloud::LoadError;
 use crate::config::Locations;
@@ -156,6 +157,14 @@ impl ViewerApp {
             main: renderer.create_viewport(),
             map: renderer.create_viewport(),
         };
+        // Kept beside the settings, so a viewer without settings (tests)
+        // keeps nothing on disk.
+        let caches = config_locations
+            .as_ref()
+            .and_then(|locations| locations.user_dir.as_deref())
+            .map(|dir| Caches::in_config_dir(dir, cache::system_clock()));
+        let mut palette = Palette::default();
+        palette.set_thumbnail_cache(caches.as_ref().map(|caches| caches.thumbnails.clone()));
         let mut app = Self {
             state: LoadState::Idle,
             renderer,
@@ -173,8 +182,8 @@ impl ViewerApp {
             user_config: UserConfig::new(config_locations),
             pending: Vec::new(),
             url_dialog: None,
-            palette: Palette::default(),
-            connector_hub: ConnectorHub::new(cc.egui_ctx.clone()),
+            palette,
+            connector_hub: ConnectorHub::new(cc.egui_ctx.clone(), caches, cache::system_clock()),
             sources: Vec::new(),
             view_size_px: [1, 1],
         };

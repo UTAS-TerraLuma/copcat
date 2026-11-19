@@ -6,12 +6,19 @@
 //! time, on threads that also decode and shrink it; the palette uploads it
 //! as a texture when it arrives. Each URL is fetched once per session, and
 //! one that can't be fetched or decoded is simply left blank.
+//!
+//! With a cache (the viewer has a settings directory), the shrunk picture
+//! is kept on disk as a small PNG, by a hash of its URL, and read from
+//! there in later sessions instead of being fetched. Failures aren't kept,
+//! so they're tried again next session.
 
 use std::collections::HashMap;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::Duration;
 
 use eframe::egui;
+
+use crate::cache::{DiskCache, stable_hash};
 
 /// Whether palette rows show STAC items' thumbnails.
 pub(crate) const ENABLED: bool = true;
@@ -44,6 +51,7 @@ pub(crate) struct Thumbnails {
     send: Sender<Decoded>,
     receive: Receiver<Decoded>,
     agent: ureq::Agent,
+    cache: Option<DiskCache>,
 }
 
 impl Default for Thumbnails {
@@ -62,11 +70,17 @@ impl Default for Thumbnails {
             send,
             receive,
             agent,
+            cache: None,
         }
     }
 }
 
 impl Thumbnails {
+    /// Keeps thumbnails in `cache` between sessions, if given.
+    pub(crate) fn set_cache(&mut self, cache: Option<DiskCache>) {
+        self.cache = cache;
+    }
+
     /// Uploads the thumbnails that have arrived, and starts fetching more.
     /// Call once a frame before [`Thumbnails::get`].
     pub(crate) fn poll(&mut self, ctx: &egui::Context) {
@@ -110,15 +124,39 @@ impl Thumbnails {
             };
             self.in_flight += 1;
             let agent = self.agent.clone();
+            let cache = self.cache.clone();
             let send = self.send.clone();
             let ctx = ctx.clone();
             std::thread::spawn(move || {
-                let image = fetch(&agent, &url).and_then(|bytes| decode(&bytes));
+                let image = load(&agent, cache.as_ref(), &url);
                 let _ = send.send((url, image));
                 ctx.request_repaint();
             });
         }
     }
+}
+
+/// The thumbnail at `url`, from the cache if it's there, else fetched,
+/// shrunk and kept in the cache.
+fn load(agent: &ureq::Agent, cache: Option<&DiskCache>, url: &str) -> Option<egui::ColorImage> {
+    let name = format!("{}.png", stable_hash(url));
+    if let Some(image) = cache
+        .and_then(|cache| cache.read(&name))
+        .and_then(|bytes| decode(&bytes))
+    {
+        return Some(image);
+    }
+    let small = shrink(&fetch(agent, url)?)?;
+    if let Some(cache) = cache {
+        let mut png = Vec::new();
+        if small
+            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .is_ok()
+        {
+            cache.write(&name, &png);
+        }
+    }
+    Some(color_image(&small))
 }
 
 fn fetch(agent: &ureq::Agent, url: &str) -> Option<Vec<u8>> {
@@ -135,19 +173,23 @@ fn fetch(agent: &ureq::Agent, url: &str) -> Option<Vec<u8>> {
 
 /// A PNG or JPEG, shrunk to at most [`KEEP_PIXELS`] on each side.
 pub(crate) fn decode(bytes: &[u8]) -> Option<egui::ColorImage> {
+    shrink(bytes).map(|small| color_image(&small))
+}
+
+fn shrink(bytes: &[u8]) -> Option<image::RgbaImage> {
     let image = image::load_from_memory(bytes).ok()?;
     // `thumbnail` would also enlarge a small one.
     let small = if image.width() > KEEP_PIXELS || image.height() > KEEP_PIXELS {
         image.thumbnail(KEEP_PIXELS, KEEP_PIXELS)
     } else {
         image
-    }
-    .to_rgba8();
+    };
+    Some(small.to_rgba8())
+}
+
+fn color_image(small: &image::RgbaImage) -> egui::ColorImage {
     let size = [small.width() as usize, small.height() as usize];
-    Some(egui::ColorImage::from_rgba_unmultiplied(
-        size,
-        small.as_raw(),
-    ))
+    egui::ColorImage::from_rgba_unmultiplied(size, small.as_raw())
 }
 
 /// The size of the slot at the left of each row: as tall as the row's text,
@@ -190,6 +232,51 @@ mod tests {
             .unwrap();
         let image = decode(&bytes).expect("a JPEG");
         assert_eq!(image.size, [64, 32]);
+    }
+
+    #[test]
+    fn a_thumbnail_should_be_kept_shrunk_and_read_back_without_fetching() {
+        let temp = tempfile::tempdir().unwrap();
+        let cache = DiskCache::new(
+            temp.path().to_path_buf(),
+            crate::cache::THUMBNAIL_LIMITS,
+            crate::cache::system_clock(),
+        );
+        let big = image::RgbImage::from_pixel(400, 200, image::Rgb([200, 100, 50]));
+        let mut bytes = Vec::new();
+        image::DynamicImage::ImageRgb8(big)
+            .write_to(
+                &mut std::io::Cursor::new(&mut bytes),
+                image::ImageFormat::Png,
+            )
+            .unwrap();
+        let server = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/big.png", server.local_addr().unwrap());
+        let serve = std::thread::spawn(move || {
+            use std::io::{Read, Write};
+            let (mut stream, _) = server.accept().unwrap();
+            let mut request = [0; 1024];
+            let _ = stream.read(&mut request);
+            let head = format!(
+                "HTTP/1.1 200 OK
+Content-Length: {}
+Connection: close
+
+",
+                bytes.len()
+            );
+            stream.write_all(head.as_bytes()).unwrap();
+            stream.write_all(&bytes).unwrap();
+        });
+        let agent = Thumbnails::default().agent;
+        let fetched = load(&agent, Some(&cache), &url).expect("fetched");
+        serve.join().unwrap();
+        assert_eq!(fetched.size, [64, 32]);
+        let kept = cache.read(&format!("{}.png", stable_hash(&url))).unwrap();
+        assert!(kept.len() < 4096, "{} bytes", kept.len());
+        // The server has gone: this comes from the cache.
+        let cached = load(&agent, Some(&cache), &url).expect("cached");
+        assert_eq!(cached.size, [64, 32]);
     }
 
     #[test]

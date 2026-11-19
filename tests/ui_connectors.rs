@@ -502,3 +502,200 @@ fn add_stac_source_should_save_it_and_list_it_in_quick_open() {
     press(&mut harness, Modifiers::COMMAND, Key::P);
     assert_eq!(row_enabled(&harness, "Fixture catalog"), None);
 }
+
+/// Copies the directory `from` into `to`, recursively.
+fn copy_dir(from: &Path, to: &Path) {
+    fs::create_dir_all(to).unwrap();
+    for entry in fs::read_dir(from).unwrap() {
+        let entry = entry.unwrap();
+        let target = to.join(entry.file_name());
+        if entry.file_type().unwrap().is_dir() {
+            copy_dir(&entry.path(), &target);
+        } else {
+            fs::copy(entry.path(), target).unwrap();
+        }
+    }
+}
+
+/// A copy of the fixture catalogs, served from a scratch directory so a test
+/// can change them.
+fn served_copy(scratch: &Path) -> (FileServer, std::path::PathBuf) {
+    let served = scratch.join("served");
+    copy_dir(&common::data_dir().join("stac"), &served.join("stac"));
+    (FileServer::serve(&served), served)
+}
+
+/// The cached listings' files.
+fn cached_lists(user_dir: &Path) -> Vec<std::path::PathBuf> {
+    match fs::read_dir(user_dir.join("cache").join("stac")) {
+        Ok(dir) => dir.map(|entry| entry.unwrap().path()).collect(),
+        Err(_) => Vec::new(),
+    }
+}
+
+/// Every label's text.
+fn labels(harness: &Harness<'_, impl eframe::App>) -> Vec<String> {
+    harness
+        .query_all_by_role(Role::Label)
+        .filter_map(|node| node.value().or_else(|| node.accesskit_node().label()))
+        .collect()
+}
+
+fn has_label_starting(harness: &Harness<'_, impl eframe::App>, start: &str) -> bool {
+    labels(harness).iter().any(|text| text.starts_with(start))
+}
+
+/// Steps until a label starts with `start`.
+fn wait_for_label(
+    harness: &mut Harness<'_, impl eframe::App>,
+    woken: &mpsc::Receiver<()>,
+    start: &str,
+) {
+    let started = Instant::now();
+    loop {
+        harness.step();
+        if has_label_starting(harness, start) {
+            harness.run_ok();
+            return;
+        }
+        let left = TIMEOUT.saturating_sub(started.elapsed());
+        assert!(
+            !left.is_zero(),
+            "no label {start:?}; the labels are {:#?}",
+            labels(harness)
+        );
+        let _ = woken.recv_timeout(left);
+    }
+}
+
+fn requests_for(server: &FileServer, path: &str) -> usize {
+    server
+        .requests()
+        .iter()
+        .filter(|request| request.path == path)
+        .count()
+}
+
+#[test]
+fn a_stac_list_should_show_from_the_cache_at_once_then_update() {
+    let Some(_gpu) = lock_gpu() else { return };
+    let scratch = common::scratch_dir("a_stac_list_should_show_from_the_cache");
+    let (server, served) = served_copy(&scratch);
+    let user_dir = user_settings(
+        &scratch,
+        serde_json::json!({ "stac": [{ "name": "Fixture API", "url": server.url("stac/api/") }] }),
+    );
+
+    // The first session fetches the lists, and keeps them once whole.
+    let (mut harness, woken) = viewer(&user_dir, &scratch.join("nowhere"));
+    press(&mut harness, Modifiers::COMMAND, Key::P);
+    type_text(&mut harness, "fixture api");
+    enter(&mut harness);
+    wait_for_row(&mut harness, &woken, "Fixture flights");
+    enter(&mut harness);
+    wait_for_row(&mut harness, &woken, "Late flight");
+    let files = cached_lists(&user_dir);
+    assert_eq!(files.len(), 2, "the source's top level and the items");
+    for file in &files {
+        println!(
+            "cached list {}: {} bytes",
+            file.display(),
+            fs::metadata(file).unwrap().len()
+        );
+    }
+    drop(harness);
+
+    // The collection is renamed, and the server doesn't answer yet.
+    let collections = served.join("stac/api/collections/index.json");
+    let renamed = fs::read_to_string(&collections)
+        .unwrap()
+        .replace("\"Fixture flights\"", "\"Renamed flights\"");
+    fs::write(&collections, renamed).unwrap();
+    server.hold(true);
+    let landing_before = requests_for(&server, "/stac/api/");
+
+    // The next session lists them at once, from the cache, and says it's
+    // updating them.
+    let (mut harness, woken) = viewer(&user_dir, &scratch.join("nowhere"));
+    press(&mut harness, Modifiers::COMMAND, Key::P);
+    type_text(&mut harness, "fixture api");
+    enter(&mut harness);
+    assert_eq!(row_enabled(&harness, "Fixture flights"), Some(true));
+    assert!(
+        has_label_starting(&harness, "Updating…"),
+        "{:#?}",
+        labels(&harness)
+    );
+    enter(&mut harness);
+    assert_eq!(row_enabled(&harness, "Late flight"), Some(true));
+    for title in ["flight-2", "flight-3"] {
+        assert_eq!(row_enabled(&harness, title), Some(true), "{title}");
+    }
+    assert_eq!(
+        requests_for(&server, "/stac/api/"),
+        landing_before,
+        "no reply yet"
+    );
+
+    // Once the server answers, the new list replaces the cached one.
+    press(&mut harness, Modifiers::NONE, Key::Escape);
+    server.hold(false);
+    wait_for_row(&mut harness, &woken, "Renamed flights");
+    assert_eq!(row_enabled(&harness, "Fixture flights"), None);
+    assert!(requests_for(&server, "/stac/api/") > landing_before);
+    assert!(!has_label_starting(&harness, "Updating…"));
+
+    // Clearing the cache deletes the files and says so.
+    press(&mut harness, Modifiers::NONE, Key::Escape);
+    press(&mut harness, Modifiers::COMMAND | Modifiers::SHIFT, Key::P);
+    type_text(&mut harness, "clear data source cache");
+    enter(&mut harness);
+    assert!(
+        has_label_starting(&harness, "Cleared the data source cache: 2 lists"),
+        "{:#?}",
+        labels(&harness)
+    );
+    assert!(cached_lists(&user_dir).is_empty());
+}
+
+#[test]
+fn a_cached_stac_list_should_stay_when_the_server_fails() {
+    let Some(_gpu) = lock_gpu() else { return };
+    let scratch = common::scratch_dir("a_cached_stac_list_should_stay_when_the_server_fails");
+    let (server, _served) = served_copy(&scratch);
+    let user_dir = user_settings(
+        &scratch,
+        serde_json::json!({ "stac": [{ "name": "Fixture API", "url": server.url("stac/api/") }] }),
+    );
+    let (mut harness, woken) = viewer(&user_dir, &scratch.join("nowhere"));
+    press(&mut harness, Modifiers::COMMAND, Key::P);
+    type_text(&mut harness, "fixture api");
+    enter(&mut harness);
+    wait_for_row(&mut harness, &woken, "Fixture flights");
+    drop(harness);
+
+    server.fail_all(true);
+    let (mut harness, woken) = viewer(&user_dir, &scratch.join("nowhere"));
+    press(&mut harness, Modifiers::COMMAND, Key::P);
+    type_text(&mut harness, "fixture api");
+    enter(&mut harness);
+    wait_for_label(&mut harness, &woken, "Offline: showing the list from");
+    assert_eq!(row_enabled(&harness, "Fixture flights"), Some(true));
+    assert!(
+        !labels(&harness)
+            .iter()
+            .any(|text| text.contains("HTTP 503")),
+        "no error in place of the list: {:#?}",
+        labels(&harness)
+    );
+
+    // Removing the source deletes its cached lists.
+    assert!(!cached_lists(&user_dir).is_empty());
+    press(&mut harness, Modifiers::NONE, Key::Escape);
+    press(&mut harness, Modifiers::COMMAND | Modifiers::SHIFT, Key::P);
+    type_text(&mut harness, "remove data source");
+    enter(&mut harness);
+    assert_eq!(row_enabled(&harness, "Fixture API"), Some(true));
+    enter(&mut harness);
+    assert!(cached_lists(&user_dir).is_empty());
+}

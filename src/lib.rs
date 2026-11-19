@@ -2,6 +2,7 @@
 //! window and the `copcat` command line.
 
 mod app;
+mod cache;
 mod camera;
 mod classification;
 mod cloud;

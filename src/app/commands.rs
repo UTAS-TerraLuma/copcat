@@ -82,6 +82,8 @@ pub(crate) enum ConnectorCommand {
     Save(NewSource),
     /// Remove the data source with this name from the user settings file.
     Delete(ConnectorList, String),
+    /// Delete the data sources' listings and thumbnails kept on disk.
+    ClearCache,
 }
 
 /// What to do with the settings files (see `crate::config`).
@@ -175,6 +177,7 @@ impl Command {
                 ConnectorCommand::AddStac,
                 ConnectorCommand::AddFolder,
                 ConnectorCommand::Remove,
+                ConnectorCommand::ClearCache,
             ]
             .map(Self::Connector),
         );
@@ -290,6 +293,9 @@ impl Command {
                     info("sources.add_folder", "Add folder source…", None)
                 }
                 ConnectorCommand::Remove => info("sources.remove", "Remove data source…", None),
+                ConnectorCommand::ClearCache => {
+                    info("sources.clear_cache", "Clear data source cache", None)
+                }
                 ConnectorCommand::Browse(_) => info("sources.browse", "Browse data source", None),
                 ConnectorCommand::Save(_) => info("sources.save", "Save data source", None),
                 ConnectorCommand::Delete(..) => info("sources.delete", "Delete data source", None),

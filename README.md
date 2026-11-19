@@ -203,6 +203,7 @@ commands are:
 | `sources.add_stac` | Add STAC source… | |
 | `sources.add_folder` | Add folder source… | |
 | `sources.remove` | Remove data source… | |
+| `sources.clear_cache` | Clear data source cache | |
 
 Connectors are places to open clouds from: STAC catalogs and APIs (`url`, `http` or
 `https`) and folders (`path`). A relative folder path is relative to the folder holding
@@ -264,9 +265,37 @@ cloud to open it. Esc, or Backspace in an empty field, goes back up a level. The
   unless it's your home folder or a drive or filesystem root, which would take too
   long to search.
 
-What's been fetched is kept until you close the viewer, so going back is instant;
-choose **Refresh** at the top right of a list to fetch it again. No signing in is
-supported yet: a catalog that needs it shows the server's refusal.
+What's been fetched is kept until you close the viewer, so going back is instant.
+Going back to a list fetched more than 5 minutes ago shows it at once and fetches it
+again behind it; choose **Refresh** at the top right of a list to fetch it again now.
+No signing in is supported yet: a catalog that needs it shows the server's refusal.
+
+### The data source cache
+
+STAC lists are also kept on disk, so the next time you start Copcat, browsing into a
+list you've seen shows it straight away. It's fetched again at the same time
+("Updating…" at the top right), and the new list replaces the old one when it has all
+arrived, keeping your selection. If it can't be fetched (you're offline, say), the old
+list stays, with a note saying how old it is, such as "Offline: showing the list from
+3 days ago"; hover over it for the reason. **Refresh** does the same.
+
+- **Where**: `cache/` in the user settings directory: `~/.copcat/cache` (or in
+  `COPCAT_CONFIG_DIR`). `cache/stac/` has one small JSON file per list (a source's
+  top level, a catalog or collection, a collection's items); `cache/thumbnails/` has
+  item thumbnails as small PNGs, already shrunk to fit a row.
+- **What**: only what the list shows: each entry's title, kind and date, its link, its
+  COPC point clouds' URLs and its thumbnail's URL, plus the source's URL and when it
+  was fetched. Never the STAC JSON itself, and never point cloud data. A list is
+  written only once it has all arrived (all of it, or the first 1000 items, as many as
+  are fetched without **Load more…**; items after that aren't kept).
+- **How big**: a list of 125 items is about 75 KB. The lists may take 20 MB in all
+  (4 MB for one) and the thumbnails 10 MB; past that the least recently used go
+  first. Anything not used for 30 days is deleted.
+- **Clearing it**: **Clear data source cache** (`sources.clear_cache`) in the command
+  palette deletes it all and says how much went. Removing a STAC source deletes its
+  lists. Deleting the folder by hand is fine too.
+
+Copcat started without a settings directory (as in its tests) keeps nothing on disk.
 
 Add and remove sources from the command palette (Ctrl+Shift+P), or from the
 **Open…** menu. These change your user settings file, keeping its other keys (it's
