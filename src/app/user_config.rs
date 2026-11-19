@@ -19,7 +19,8 @@ use crate::config::{
 use crate::theme::Theme;
 
 use super::ViewerApp;
-use super::commands::{Keymap, SettingsCommand};
+use super::commands::{Command, Keymap, SettingsCommand};
+use super::palette::{Env, ItemAction, Listing, PaletteItem, PaletteMode, Provider};
 use super::settings::{ColorMode, ExportSettings, PointSizeMode, Settings, ViewSettings};
 
 /// The settings files and what came of reading them.
@@ -195,7 +196,7 @@ pub(crate) fn theme_named(name: Option<&str>, warnings: &mut Vec<Warning>) -> Th
     Theme::by_name(name).unwrap_or_else(|| {
         let known: Vec<_> = crate::theme::THEMES
             .iter()
-            .map(|(name, _)| format!("{name:?}"))
+            .map(|theme| format!("{:?}", theme.id))
             .collect();
         warnings.push(Warning::new(
             None,
@@ -206,6 +207,51 @@ pub(crate) fn theme_named(name: Option<&str>, warnings: &mut Vec<Warning>) -> Th
         ));
         Theme::default()
     })
+}
+
+/// The theme selector's list: every built-in theme, the one showing marked
+/// current. The selected theme shows as the selection moves, and the one
+/// that was showing comes back if the list is left without choosing.
+pub(crate) struct ThemeSelector {
+    /// The theme showing when the selector opened, if it's a built-in one.
+    was: Option<&'static str>,
+}
+
+impl ThemeSelector {
+    pub(crate) fn new(was: Option<&'static str>) -> Self {
+        Self { was }
+    }
+}
+
+impl Provider for ThemeSelector {
+    fn title(&self) -> String {
+        "Select theme".to_owned()
+    }
+
+    fn hint(&self) -> String {
+        "Up and Down to preview, Enter to keep".to_owned()
+    }
+
+    fn items(&mut self, _query: &str, _env: &Env<'_>) -> Listing {
+        let items = crate::theme::THEMES
+            .iter()
+            .map(|theme| {
+                let current = self.was == Some(theme.id);
+                PaletteItem::new(
+                    (theme.make)().name,
+                    ItemAction::Run(Command::SetTheme(theme.id)),
+                )
+                .with_detail(if current { "current" } else { "" })
+                .with_preview(Command::PreviewTheme(theme.id))
+                .with_current(current)
+            })
+            .collect();
+        Listing::ready(items)
+    }
+
+    fn leave(&mut self) -> Option<Command> {
+        self.was.map(Command::PreviewTheme)
+    }
 }
 
 /// The default keymap with `bindings` applied, warning about unknown
@@ -311,6 +357,13 @@ impl ViewerApp {
     }
 
     pub(super) fn run_settings_command(&mut self, ctx: &egui::Context, command: SettingsCommand) {
+        // Choosing a theme works without settings files: it just isn't saved.
+        if command == SettingsCommand::SelectTheme {
+            self.palette.open(PaletteMode::Open);
+            self.palette
+                .browse(Box::new(ThemeSelector::new(self.theme.id())));
+            return;
+        }
         let Some(locations) = self.user_config.locations.clone() else {
             self.user_config
                 .warn("settings files aren't used in this session");
@@ -361,7 +414,63 @@ impl ViewerApp {
                         .warn(format!("{}: {problem}", file.display())),
                 }
             }
+            SettingsCommand::SelectTheme => unreachable!("handled above"),
         }
+    }
+
+    /// Shows the built-in theme `id` for this session.
+    pub(super) fn show_theme(&mut self, ctx: &egui::Context, id: &str) {
+        if let Some(theme) = Theme::by_name(id) {
+            self.theme = theme;
+            self.theme.apply(ctx);
+        }
+    }
+
+    /// Shows the built-in theme `id` and saves it as the user settings
+    /// file's `theme`, as Save current display settings as defaults saves
+    /// its settings.
+    pub(super) fn set_theme(&mut self, ctx: &egui::Context, id: &str) {
+        self.show_theme(ctx, id);
+        let name = &self.theme.name;
+        let Some(locations) = &self.user_config.locations else {
+            // Tests, which read and write no settings files.
+            return;
+        };
+        let Some(file) = locations.user_file() else {
+            self.user_config.warn(format!(
+                "couldn't find the home directory, so {name} is only for this session; set {} \
+                 to where settings should go",
+                config::CONFIG_DIR_ENV
+            ));
+            return;
+        };
+        // The workspace file wins when the files are next read.
+        let overridden = locations
+            .workspace_file()
+            .is_some_and(|workspace| config::read_file(&workspace).0.theme.is_some());
+        let message = match config::save_over(&file, &serde_json::json!({ "theme": id })) {
+            Ok(dropped_comments) => {
+                let mut message = format!("Saved the theme {name} to {}", file.display());
+                if dropped_comments {
+                    message.push_str(" (its comments were removed)");
+                }
+                if overridden {
+                    message.push_str(
+                        ". The workspace settings file sets a theme too, which replaces it \
+                         when settings are next loaded.",
+                    );
+                }
+                message
+            }
+            Err(problem) => {
+                self.user_config.warn(format!(
+                    "{}: {problem}; {name} is only for this session",
+                    file.display()
+                ));
+                return;
+            }
+        };
+        self.user_config.inform(message);
     }
 
     /// Creates `file` from `template` if it's missing, then opens it in the
@@ -528,12 +637,21 @@ mod tests {
     #[test]
     fn an_unknown_theme_should_warn_and_fall_back() {
         let mut warnings = Vec::new();
-        assert_eq!(theme_named(Some("neon"), &mut warnings).name, "Graphite");
+        assert_eq!(theme_named(Some("neon"), &mut warnings), Theme::default());
         assert_eq!(warnings.len(), 1);
-        assert!(warnings[0].message.contains("\"graphite\""));
+        let message = &warnings[0].message;
+        assert!(message.contains("\"neon\""), "{message}");
+        assert!(
+            message.contains("\"graphite-dark\", \"graphite-light\""),
+            "{message}"
+        );
         warnings.clear();
         theme_named(Some("GRAPHITE"), &mut warnings);
         theme_named(None, &mut warnings);
+        assert_eq!(
+            theme_named(Some("graphite-light"), &mut warnings),
+            Theme::graphite_light()
+        );
         assert!(warnings.is_empty());
     }
 

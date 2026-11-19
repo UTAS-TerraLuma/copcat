@@ -335,6 +335,8 @@ impl ViewerApp {
             | Command::OpenUrlDialog
             | Command::ToggleDiagnostics
             | Command::Settings(_)
+            | Command::PreviewTheme(_)
+            | Command::SetTheme(_)
             | Command::ShowCommands
             | Command::QuickOpen
             | Command::Connector(_) => true,
@@ -415,6 +417,8 @@ impl ViewerApp {
                 diagnostics.visible = !diagnostics.visible;
             }
             Command::Settings(command) => self.run_settings_command(ctx, command),
+            Command::PreviewTheme(id) => self.show_theme(ctx, id),
+            Command::SetTheme(id) => self.set_theme(ctx, id),
             Command::ShowCommands => self.palette.open(PaletteMode::Commands),
             Command::QuickOpen => self.palette.open(PaletteMode::Open),
             Command::Connector(command) => self.run_connector_command(command),

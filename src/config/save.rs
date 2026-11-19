@@ -14,7 +14,7 @@ pub(crate) const USER_TEMPLATE: &str = r#"// Copcat user settings. Every key is 
 // you want. A workspace's .copcat/settings.json overrides these key by key.
 // See "Settings" in Copcat's README for every key.
 {
-  // "theme": "graphite",
+  // "theme": "graphite-dark",       // or "graphite-light"
   // "display": {
   //   "colorMode": "rgb",            // "height", "rgb" or "classification"
   //   "pointSizeMode": "fixed",      // or "adaptive"; only this picks the mode

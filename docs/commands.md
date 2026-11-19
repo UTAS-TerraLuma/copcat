@@ -114,6 +114,7 @@ subcloud" before one has been drawn.
 | Open workspace settings | | `settings.open_workspace` |
 | Reload settings | | `settings.reload` |
 | Save current display settings as defaults | | `settings.save_display_defaults` |
+| Select theme… | | `settings.select_theme` |
 
 ### Data sources
 

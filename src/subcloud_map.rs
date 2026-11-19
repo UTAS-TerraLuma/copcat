@@ -9,15 +9,13 @@ use glam::{Mat4, Vec2, Vec3};
 use crate::camera::{OrbitCamera, Projection, ViewPreset};
 use crate::lod::LodSettings;
 use crate::subcloud::{self, ShapeKind, Subcloud};
+use crate::theme::Theme;
 
 /// The map shows the whole site, so coarse detail is plenty.
 pub const LOD: LodSettings = LodSettings {
     point_budget: 1_000_000,
     target_spacing_px: 2.0,
 };
-
-/// The colour subclouds are drawn in, on the map.
-pub const SUBCLOUD_COLOR: Color32 = Color32::from_rgb(255, 210, 80);
 
 const HANDLE_RADIUS: f32 = 7.0;
 /// Size handles sit at least this far (in logical pixels) from where they
@@ -247,22 +245,30 @@ impl SubcloudMap {
         }
     }
 
-    /// Paints the rendered map, then the shape on top.
-    pub fn paint(&self, frame: &MapFrame, texture_id: egui::TextureId, subcloud: &Subcloud) {
+    /// Paints the rendered map, then the shape on top in `theme`'s subcloud
+    /// colour.
+    pub fn paint(
+        &self,
+        frame: &MapFrame,
+        texture_id: egui::TextureId,
+        subcloud: &Subcloud,
+        theme: &Theme,
+    ) {
         let painter = &frame.painter;
         let projection = &frame.projection;
         let full_uv = Rect::from_min_max(Pos2::ZERO, egui::pos2(1.0, 1.0));
         painter.image(texture_id, projection.rect, full_uv, Color32::WHITE);
 
-        let fill = SUBCLOUD_COLOR.gamma_multiply(0.25);
-        let outline = Stroke::new(1.5, SUBCLOUD_COLOR);
-        let thin = Stroke::new(1.0, SUBCLOUD_COLOR);
+        let color = theme.colors.subcloud;
+        let fill = color.gamma_multiply(0.25);
+        let outline = Stroke::new(1.5, color);
+        let thin = Stroke::new(1.0, color);
         let highlight = |grab: Grab| frame.hovered == Some(grab);
         // Under the other handles: for a line, the stem starts at a width handle.
         let paint_rotate_handle = || {
             let (stem_base, rotate) = rotate_handle(projection, subcloud);
             painter.line_segment([stem_base, rotate], thin);
-            paint_round_handle(painter, rotate, highlight(Grab::Rotate));
+            paint_round_handle(painter, rotate, color, highlight(Grab::Rotate));
         };
         match subcloud.shape {
             ShapeKind::Line => {
@@ -275,16 +281,23 @@ impl SubcloudMap {
                 paint_rotate_handle();
                 for side in [1.0, -1.0] {
                     let pos = width_handle(projection, subcloud, side);
-                    paint_size_handle(painter, pos, highlight(Grab::Width { side }));
+                    paint_size_handle(painter, pos, color, highlight(Grab::Width { side }));
                 }
                 for (pos, label, grab) in [(start, "A", Grab::Start), (end, "B", Grab::End)] {
-                    paint_round_handle(painter, pos, highlight(grab));
+                    let highlighted = highlight(grab);
+                    paint_round_handle(painter, pos, color, highlighted);
+                    // Black on the white of a highlighted handle.
+                    let ink = if highlighted {
+                        Color32::BLACK
+                    } else {
+                        theme.colors.subcloud_ink
+                    };
                     painter.text(
                         pos,
                         egui::Align2::CENTER_CENTER,
                         label,
                         egui::FontId::proportional(11.0),
-                        Color32::BLACK,
+                        ink,
                     );
                 }
             }
@@ -296,19 +309,19 @@ impl SubcloudMap {
                     .x
                     - centre.x;
                 painter.circle(centre, radius_px, fill, outline);
-                painter.circle_filled(centre, 2.0, SUBCLOUD_COLOR);
+                painter.circle_filled(centre, 2.0, color);
                 paint_rotate_handle();
                 let handle = size_handle(projection, subcloud);
-                paint_size_handle(painter, handle, highlight(Grab::Size));
+                paint_size_handle(painter, handle, color, highlight(Grab::Size));
             }
             ShapeKind::Square => {
                 let square = &subcloud.square;
                 let corners = square.corners().map(|corner| projection.to_screen(corner));
                 painter.add(egui::Shape::convex_polygon(corners.to_vec(), fill, outline));
-                painter.circle_filled(projection.to_screen(square.centre), 2.0, SUBCLOUD_COLOR);
+                painter.circle_filled(projection.to_screen(square.centre), 2.0, color);
                 paint_rotate_handle();
                 let handle = size_handle(projection, subcloud);
-                paint_size_handle(painter, handle, highlight(Grab::Size));
+                paint_size_handle(painter, handle, color, highlight(Grab::Size));
             }
         }
     }
@@ -390,9 +403,10 @@ fn rotate_to(subcloud: &mut Subcloud, at: Vec2, snap: bool) {
     subcloud.set_rotation(rotation.rem_euclid(TAU));
 }
 
-fn paint_size_handle(painter: &egui::Painter, pos: Pos2, highlighted: bool) {
+// Handles are outlined in black, which shows on light and dark maps alike.
+fn paint_size_handle(painter: &egui::Painter, pos: Pos2, color: Color32, highlighted: bool) {
     let rect = Rect::from_center_size(pos, egui::vec2(8.0, 8.0));
-    painter.rect_filled(rect, 1.0, handle_color(highlighted));
+    painter.rect_filled(rect, 1.0, handle_color(color, highlighted));
     painter.rect_stroke(
         rect,
         1.0,
@@ -401,17 +415,13 @@ fn paint_size_handle(painter: &egui::Painter, pos: Pos2, highlighted: bool) {
     );
 }
 
-fn paint_round_handle(painter: &egui::Painter, pos: Pos2, highlighted: bool) {
+fn paint_round_handle(painter: &egui::Painter, pos: Pos2, color: Color32, highlighted: bool) {
     let stroke = Stroke::new(1.0, Color32::BLACK);
-    painter.circle(pos, HANDLE_RADIUS, handle_color(highlighted), stroke);
+    painter.circle(pos, HANDLE_RADIUS, handle_color(color, highlighted), stroke);
 }
 
-fn handle_color(highlighted: bool) -> Color32 {
-    if highlighted {
-        Color32::WHITE
-    } else {
-        SUBCLOUD_COLOR
-    }
+fn handle_color(color: Color32, highlighted: bool) -> Color32 {
+    if highlighted { Color32::WHITE } else { color }
 }
 
 /// Converts between map pixels and ground coordinates for one frame.

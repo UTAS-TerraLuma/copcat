@@ -121,7 +121,7 @@ Every key, with its default:
 
 ```jsonc
 {
-  "theme": "graphite",              // the only theme so far
+  "theme": "graphite-dark",         // or "graphite-light"
   "display": {
     "colorMode": "rgb",             // "height", "rgb" or "classification"
     "pointSizeMode": "fixed",       // or "adaptive"; see below
@@ -199,6 +199,7 @@ commands are:
 | `settings.open_workspace` | Open workspace settings | |
 | `settings.reload` | Reload settings | |
 | `settings.save_display_defaults` | Save current display settings as defaults | |
+| `settings.select_theme` | Select theme… | |
 | `sources.add_stac` | Add STAC source… | |
 | `sources.add_folder` | Add folder source… | |
 | `sources.remove` | Remove data source… | |
@@ -219,6 +220,12 @@ close it. The settings commands (in the command palette, or bound to a shortcut)
   point size, eye-dome lighting, projection, point budget and spacing) into the user
   file, keeping its other keys. The file is rewritten as plain
   JSON, so its comments are lost.
+- **Select theme…** lists the themes, Graphite Dark (the default) and Graphite Light,
+  in the command palette. The arrow keys show each theme as they reach it; Enter
+  keeps it and saves it as `theme` in the user file (rewritten as plain JSON, like
+  the command above), and Esc or a click outside goes back to the theme you had. A
+  workspace file that sets `theme` still wins the next time the settings are loaded.
+  `"theme": "graphite"`, from before there was a light theme, means Graphite Dark.
 
 `COPCAT_CONFIG_DIR` moves the user settings directory (from `~/.copcat`), and
 `COPCAT_WORKSPACE` sets the workspace folder (from the current directory).

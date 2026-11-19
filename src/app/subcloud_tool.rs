@@ -9,14 +9,13 @@
 
 use std::f32::consts::{FRAC_PI_2, TAU};
 
-use eframe::egui::{self, Color32, CursorIcon, Key, Modifiers, Pos2, Stroke};
+use eframe::egui::{self, CursorIcon, Key, Modifiers, Pos2, Stroke};
 use glam::{Mat4, Vec2};
 
 use crate::camera::OrbitCamera;
 use crate::lod;
 use crate::pick;
 use crate::subcloud::{Footprint, ShapeKind, Subcloud};
-use crate::subcloud_map::SUBCLOUD_COLOR;
 use crate::theme::Theme;
 
 use super::scene::ViewArea;
@@ -152,7 +151,7 @@ impl SubcloudTool {
             theme.colors.text,
         );
         let backing = egui::Rect::from_min_size(text_pos, galley.size()).expand(6.0);
-        painter.rect_filled(backing, 4.0, Color32::from_black_alpha(160));
+        painter.rect_filled(backing, 4.0, theme.colors.overlay);
         painter.galley(text_pos, galley, theme.colors.text);
 
         let Some(drag) = self.drag else { return };
@@ -162,11 +161,12 @@ impl SubcloudTool {
         let view_projection = camera.view_projection(area.rect.aspect_ratio());
         let to_screen = |ground: Vec2| to_screen(view_projection, area.rect, ground, drag.ground_z);
         let outline: Vec<Option<Pos2>> = outline(&subcloud).into_iter().map(to_screen).collect();
-        let stroke = Stroke::new(2.0, SUBCLOUD_COLOR);
+        let color = theme.colors.subcloud;
+        let stroke = Stroke::new(2.0, color);
         if let Some(points) = outline.iter().copied().collect::<Option<Vec<_>>>() {
             painter.add(egui::Shape::convex_polygon(
                 points,
-                SUBCLOUD_COLOR.gamma_multiply(0.2),
+                color.gamma_multiply(0.2),
                 stroke,
             ));
         } else {
@@ -178,18 +178,18 @@ impl SubcloudTool {
             }
         }
         if let (Some(from), Some(to)) = (to_screen(drag.from), to_screen(drag.to)) {
-            painter.line_segment([from, to], Stroke::new(1.0, SUBCLOUD_COLOR));
-            painter.circle_filled(from, 3.0, SUBCLOUD_COLOR);
+            painter.line_segment([from, to], Stroke::new(1.0, color));
+            painter.circle_filled(from, 3.0, color);
             let size = match shape {
                 ShapeKind::Line => format!("{:.1} m", subcloud.line.length()),
                 ShapeKind::Circle => format!("radius {:.1} m", subcloud.circle.radius),
                 ShapeKind::Square => format!("side {:.1} m", subcloud.square.side),
             };
-            let galley = painter.layout_no_wrap(size, font, Color32::BLACK);
+            let galley = painter.layout_no_wrap(size, font, theme.colors.subcloud_ink);
             let at = to + egui::vec2(10.0, 10.0);
             let backing = egui::Rect::from_min_size(at, galley.size()).expand(3.0);
-            painter.rect_filled(backing, 3.0, SUBCLOUD_COLOR);
-            painter.galley(at, galley, Color32::BLACK);
+            painter.rect_filled(backing, 3.0, color);
+            painter.galley(at, galley, theme.colors.subcloud_ink);
         }
     }
 }

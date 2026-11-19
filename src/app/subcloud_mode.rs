@@ -269,7 +269,8 @@ impl SubcloudMode {
                 &scene.session.map_selection.keys,
                 &[],
             );
-            self.map.paint(&frame, texture_id, &self.subcloud);
+            self.map
+                .paint(&frame, texture_id, &self.subcloud, scene.theme);
         }
     }
 
