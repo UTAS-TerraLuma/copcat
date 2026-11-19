@@ -571,6 +571,20 @@ impl Theme {
             .inner_margin(margin(self.spacing.box_padding))
     }
 
+    /// A message floating over the main area: a small popup, outlined so it
+    /// stands off the 3D view in either theme.
+    pub fn toast_frame(&self) -> egui::Frame {
+        egui::Frame::new()
+            .fill(self.colors.panel)
+            .stroke(egui::Stroke::new(1.0, self.colors.strong_stroke))
+            .corner_radius(self.shape.widget_radius)
+            .shadow(self.shape.popup_shadow)
+            .inner_margin(Margin::symmetric(
+                self.spacing.button_padding.x as i8,
+                (self.spacing.button_padding.y + 1.0) as i8,
+            ))
+    }
+
     /// The 3D view's background, as the renderer takes it.
     pub fn viewport_background(&self) -> [u8; 3] {
         let c = self.colors.viewport;
@@ -727,8 +741,8 @@ mod tests {
             for (bg_name, bg) in [("panel", c.panel), ("box", c.box_fill)] {
                 body.push(("active_text", c.active_text, bg_name, bg));
             }
-            // Messages: the settings bar is a header, the status bar the
-            // gutter, and errors also show on panels.
+            // Messages: toasts are filled like panels, the status bar is the
+            // gutter, and errors also show in headers.
             for (bg_name, bg) in [
                 ("panel", c.panel),
                 ("header", c.header),

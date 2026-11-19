@@ -17,6 +17,7 @@
 //! - [`palette`]: the command palette (Ctrl+Shift+P) and quick open (Ctrl+P).
 //! - [`panels`]: the settings panel's sections and the status bar.
 //! - [`user_config`]: the settings files applied, and the settings commands.
+//! - [`toasts`]: messages floating above the status bar.
 
 mod camera_input;
 mod commands;
@@ -32,6 +33,7 @@ mod settings;
 mod subcloud_mode;
 mod subcloud_tool;
 mod thumbnails;
+mod toasts;
 mod user_config;
 
 use std::mem;
@@ -56,7 +58,7 @@ use export_ui::{ExportContext, ExportJob, ImageExport, export_ui};
 use palette::{Palette, PaletteMode};
 use panels::{
     HeightsAction, cloud_summary, diagnostics_ui, display_ui, heights_ui, performance_ui, section,
-    status_bar, view_ui,
+    spinner, status_bar, view_ui,
 };
 use scene::{Scene, Viewports, explore_view};
 use session::Session;
@@ -550,8 +552,6 @@ impl eframe::App for ViewerApp {
             .frame(self.theme.header_frame())
             .show_separator_line(false)
             .show(ui, |ui| self.top_bar(ui));
-        // Added before the settings messages, so it's the bottom-most and
-        // they stack above it.
         egui::Panel::bottom("status_bar")
             .frame(self.theme.status_bar_frame())
             .show_separator_line(false)
@@ -566,7 +566,6 @@ impl eframe::App for ViewerApp {
                     &mut self.pending,
                 );
             });
-        self.settings_bar(ui);
 
         // Subcloud mode's map. Side panels have to be laid out before the
         // central panel, but the map is only drawn after it, once the nodes
@@ -608,7 +607,7 @@ impl eframe::App for ViewerApp {
                     LoadState::Idle => open_ui::idle_ui(ui, &self.keymap, &mut self.pending),
                     LoadState::Opening { source, .. } => {
                         ui.horizontal(|ui| {
-                            ui.spinner();
+                            spinner(ui, &self.theme, self.theme.fonts.body_size);
                             ui.label(format!("Loading {source}"));
                         });
                     }
@@ -691,10 +690,24 @@ impl eframe::App for ViewerApp {
         }
 
         self.finish_export(ui.ctx());
+        self.show_toasts(ui.ctx());
     }
 }
 
 impl ViewerApp {
+    /// The messages, floating over the bottom-left of the main area just
+    /// above the status bar. Drawn last, so ones added this frame show.
+    fn show_toasts(&mut self, ctx: &egui::Context) {
+        let spacing = &self.theme.spacing;
+        // In line with the status bar's text, and clear of the view's edge.
+        let left = spacing.panel_gap / 2.0 + spacing.panel_padding;
+        let bottom =
+            self.theme.status_bar_height() + spacing.panel_gap / 2.0 + spacing.panel_padding;
+        self.user_config
+            .messages
+            .show(ctx, &self.theme, left, bottom);
+    }
+
     /// Shows just the points inside a newly drawn `subcloud`, in Subcloud
     /// mode. The Explore camera stays where it was, for coming back.
     fn open_subcloud(&mut self, subcloud: Subcloud) {
