@@ -327,7 +327,7 @@ fn a_static_stac_catalog_should_browse_down_to_a_cloud_and_open_it() {
     for rect in with_port {
         common::mask_shown(&mut harness, rect);
     }
-    harness.snapshot("connector_static_stac_fixture");
+    common::snapshot(&mut harness, "connector_static_stac_fixture");
 }
 
 /// How many times the server was asked for the fixture API's first page.

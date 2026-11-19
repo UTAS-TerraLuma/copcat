@@ -16,7 +16,8 @@ wgpu). `src/lib.rs` is the library; `copcat-viewer` is the window and
   UI snapshots: `UPDATE_SNAPSHOTS=1 cargo test --test ui_kittest`
 
 GPU tests skip (printing `SKIPPED:`) without a GPU adapter, unless
-`COPCAT_REQUIRE_GPU=1`. `WGPU_ADAPTER_NAME=<part of a name>` picks the adapter
+`COPCAT_REQUIRE_GPU=1`. UI snapshots are made on Windows with WARP;
+`COPCAT_SKIP_SNAPSHOTS=1` renders them without comparing (Linux CI sets it). `WGPU_ADAPTER_NAME=<part of a name>` picks the adapter
 for `copcat render`, e.g. `basic render` for WARP or `llvmpipe` for lavapipe.
 
 Test data: `tests/data/fixture.copc.laz` is synthetic; see

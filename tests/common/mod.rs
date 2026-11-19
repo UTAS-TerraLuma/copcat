@@ -43,6 +43,26 @@ pub fn scratch_dir(test: &str) -> PathBuf {
 /// as CI: then a missing adapter fails GPU tests instead of skipping them.
 pub const REQUIRE_GPU: &str = "COPCAT_REQUIRE_GPU";
 
+/// Set to leave UI snapshots uncompared, see [`snapshot`].
+pub const SKIP_SNAPSHOTS: &str = "COPCAT_SKIP_SNAPSHOTS";
+
+/// Compares the harness's picture with `tests/snapshots/<name>.png`, as
+/// `Harness::snapshot` does.
+///
+/// The snapshots are made on Windows with WARP. Other software renderers
+/// draw a few pixels differently (lavapipe: 58 in one snapshot), so where
+/// `COPCAT_SKIP_SNAPSHOTS` is set, as on the Linux CI runner, the picture is
+/// still rendered but not compared.
+pub fn snapshot<State>(harness: &mut egui_kittest::Harness<'_, State>, name: &str) {
+    // Empty counts as unset: CI sets it to nothing on the other runners.
+    if std::env::var_os(SKIP_SNAPSHOTS).is_some_and(|value| !value.is_empty()) {
+        harness.render().expect("the snapshot's picture");
+        eprintln!("SKIPPED: comparing snapshot {name} ({SKIP_SNAPSHOTS} is set)");
+        return;
+    }
+    harness.snapshot(name);
+}
+
 /// What a GPU test should do after `copcat::render` failed with `error`:
 /// returns normally (so the test can return early and pass as skipped) if
 /// there's no GPU adapter and none is required, else panics.

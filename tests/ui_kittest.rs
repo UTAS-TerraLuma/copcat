@@ -162,5 +162,5 @@ fn viewer_should_load_the_fixture_and_draw_it() {
         common::mask_shown(&mut harness, rect);
     }
 
-    harness.snapshot("viewer_fixture_top_class");
+    common::snapshot(&mut harness, "viewer_fixture_top_class");
 }

@@ -31,6 +31,9 @@ jobs:
           # builds stay on 22.04 (release.yml) for the older glibc.
           - os: ubuntu-24.04
             adapter: llvmpipe
+            # The UI snapshots are made with WARP; lavapipe draws a few
+            # pixels differently, so here they're rendered but not compared.
+            skip_snapshots: 1
           # WARP, Direct3D 12 on the CPU, ships with Windows.
           - os: windows-latest
             adapter: Microsoft Basic Render Driver
@@ -39,6 +42,7 @@ jobs:
       # `copcat render` (and so tests/golden_render.rs) uses the adapter
       # whose name contains this. egui_kittest picks a CPU adapter itself.
       WGPU_ADAPTER_NAME: ${{ matrix.adapter }}
+      COPCAT_SKIP_SNAPSHOTS: ${{ matrix.skip_snapshots }}
     steps:
       - uses: actions/checkout@v6
       - name: Install lavapipe
@@ -52,7 +56,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --check
       - run: cargo clippy --all-targets --locked -- -D warnings
-      - run: cargo test --locked
+      # Every test file, so one failure doesn't hide the rest.
+      - run: cargo test --locked --no-fail-fast
       - name: Upload golden and snapshot diffs
         if: failure()
         uses: actions/upload-artifact@v4

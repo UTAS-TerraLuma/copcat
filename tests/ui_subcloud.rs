@@ -221,5 +221,5 @@ fn circle_tool_should_open_a_subcloud_where_it_was_dragged() {
     for rect in masks {
         common::mask_shown(&mut harness, rect);
     }
-    harness.snapshot("subcloud_circle_over_building");
+    common::snapshot(&mut harness, "subcloud_circle_over_building");
 }

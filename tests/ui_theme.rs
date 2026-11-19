@@ -389,5 +389,5 @@ fn viewer_should_draw_the_fixture_in_graphite_light() {
     harness.remove_cursor();
     harness.run_ok();
     mask_run_specifics(&mut harness);
-    harness.snapshot("viewer_fixture_graphite_light");
+    common::snapshot(&mut harness, "viewer_fixture_graphite_light");
 }
