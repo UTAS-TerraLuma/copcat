@@ -38,9 +38,14 @@ pub struct Colors {
     pub viewport: Color32,
     /// Buttons and combo boxes at rest.
     pub control: Color32,
-    /// Text fields, checkboxes, radio buttons and slider rails: lighter than
-    /// the panel they sit in.
+    /// Text fields, number fields, checkboxes, radio buttons and slider
+    /// rails: lighter than the panel they sit in.
     pub field: Color32,
+    /// Drop-downs in the settings panel at rest: darker than fields, as in
+    /// Blender, so the two read apart.
+    pub dropdown: Color32,
+    /// Drop-downs in the settings panel under the pointer.
+    pub dropdown_hover: Color32,
     /// Any widget under the pointer.
     pub hover: Color32,
     /// Subtle separators, and the outline of windows.
@@ -128,6 +133,9 @@ pub struct Spacing {
     pub box_padding: f32,
     /// Between widgets, horizontally and vertically.
     pub item_spacing: Vec2,
+    /// Between rows in a settings box: smaller than `item_spacing`, so
+    /// settings sit close as in Blender.
+    pub row_gap: f32,
     /// Between a button's edge and its text.
     pub button_padding: Vec2,
     /// The minimum height of buttons, fields and other interactive widgets.
@@ -162,6 +170,8 @@ impl Default for Theme {
                 viewport: Color32::from_rgb(0x1F, 0x1F, 0x1F),
                 control: Color32::from_rgb(0x3D, 0x3D, 0x3D),
                 field: Color32::from_rgb(0x3A, 0x3A, 0x3A),
+                dropdown: Color32::from_rgb(0x22, 0x22, 0x22),
+                dropdown_hover: Color32::from_rgb(0x2A, 0x2A, 0x2A),
                 hover: Color32::from_rgb(0x47, 0x47, 0x47),
                 stroke: Color32::from_rgb(0x2F, 0x2F, 0x2F),
                 strong_stroke: Color32::from_rgb(0x4A, 0x4A, 0x4A),
@@ -201,6 +211,7 @@ impl Default for Theme {
                 panel_padding: 8.0,
                 box_padding: 6.0,
                 item_spacing: egui::vec2(8.0, 6.0),
+                row_gap: 3.0,
                 button_padding: egui::vec2(8.0, 4.0),
                 interact_height: 22.0,
                 indent: 12.0,
@@ -244,6 +255,14 @@ impl Theme {
         ctx.set_theme(egui::Theme::Dark);
         ctx.set_style_of(egui::Theme::Dark, self.style());
         self.apply_fonts(ctx);
+        ctx.data_mut(|data| data.insert_temp(colors_id(), self.colors.clone()));
+    }
+
+    /// The colours of the theme last applied to `ctx`, for widgets egui's
+    /// style has no colour for, or Graphite's if none has been.
+    pub fn applied_colors(ctx: &egui::Context) -> Colors {
+        ctx.data(|data| data.get_temp::<Colors>(colors_id()))
+            .unwrap_or_else(|| Self::default().colors)
     }
 
     /// egui's dark style with this theme's values in place of its own.
@@ -433,6 +452,10 @@ impl Theme {
             self.colors.data_blue,
         ]
     }
+}
+
+fn colors_id() -> egui::Id {
+    egui::Id::new("copcat_theme_colors")
 }
 
 /// The same margin on every side, rounded to whole points as egui wants.

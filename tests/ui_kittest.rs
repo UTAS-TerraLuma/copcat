@@ -151,7 +151,7 @@ fn viewer_should_load_the_fixture_and_draw_it() {
 
     // The open time changes every run; hide it from the snapshot.
     let (_, open_time) = value_after(&harness, "Open time").expect("an Open time row");
-    harness.mask(open_time);
+    common::mask_shown(&mut harness, open_time);
     // So is the fixture's absolute path, wherever it's shown in full.
     let fixture = common::fixture().to_str().unwrap().to_owned();
     let path_boxes: Vec<_> = harness
@@ -159,7 +159,7 @@ fn viewer_should_load_the_fixture_and_draw_it() {
         .map(|node| node.rect())
         .collect();
     for rect in path_boxes {
-        harness.mask(rect);
+        common::mask_shown(&mut harness, rect);
     }
 
     harness.snapshot("viewer_fixture_top_class");

@@ -8,7 +8,7 @@ use crate::cloud::CloudInfo;
 use crate::format::format_count;
 use crate::renderer::PointRenderer;
 
-use super::widgets::{legend_color, mono, stat_grid, stat_row};
+use super::widgets::{legend_color, mono, prop_control, stat_grid, stat_row, stat_row_with};
 use crate::app::commands::Command;
 use crate::app::session::{FAILED_COLOR, FETCHING_COLOR, LOADED_COLOR, QUEUED_COLOR, Session};
 use crate::app::settings::DiagnosticsSettings;
@@ -84,13 +84,18 @@ fn streaming_stats(ui: &mut egui::Ui, session: &Session, renderer: &PointRendere
         .on_hover_text("Points kept on the GPU, and the nodes they're in");
 
         if let Some(error) = &session.last_error {
-            ui.colored_label(ui.visuals().error_fg_color, "Failed");
-            ui.add(egui::Label::new(mono(format!("{} nodes", session.failed.len()))).truncate())
-                .on_hover_text("Nodes that failed to load. Retry in the status bar asks again.");
-            ui.end_row();
-            ui.colored_label(ui.visuals().error_fg_color, "Last error");
-            ui.add(egui::Label::new(error.as_str()).wrap());
-            ui.end_row();
+            let error_color = ui.visuals().error_fg_color;
+            stat_row_with(ui, egui::RichText::new("Failed").color(error_color), |ui| {
+                let failed = mono(format!("{} nodes", session.failed.len()));
+                ui.horizontal(|ui| ui.add(egui::Label::new(failed).truncate()))
+                    .inner
+            })
+            .on_hover_text("Nodes that failed to load. Retry in the status bar asks again.");
+            stat_row_with(
+                ui,
+                egui::RichText::new("Last error").color(error_color),
+                |ui| ui.add(egui::Label::new(error.as_str()).wrap()),
+            );
         }
     });
 }
@@ -110,10 +115,12 @@ fn timings(ui: &mut egui::Ui, info: &CloudInfo) {
 
 /// The debug node bounds, and their legend.
 fn bounds_ui(ui: &mut egui::Ui, settings: &mut DiagnosticsSettings) {
-    ui.checkbox(&mut settings.show_bounds, "Show node bounds")
-        .on_hover_text("Draw the octree cube of each node that's wanted or downloading");
+    prop_control(ui, "show_bounds", |ui| {
+        ui.checkbox(&mut settings.show_bounds, "Show node bounds")
+            .on_hover_text("Draw the octree cube of each node that's wanted or downloading");
+    });
     if settings.show_bounds {
-        ui.indent("bounds_options", |ui| {
+        prop_control(ui, "bounds_options", |ui| {
             ui.checkbox(&mut settings.show_loaded_bounds, "Include loaded nodes");
             ui.horizontal_wrapped(|ui| {
                 for (label, color) in [

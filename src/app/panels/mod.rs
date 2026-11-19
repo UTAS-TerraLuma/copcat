@@ -19,4 +19,4 @@ pub(crate) use display::{display_ui, performance_ui};
 pub(crate) use heights::{HeightsAction, heights_ui};
 pub(crate) use status::status_bar;
 pub(crate) use view::view_ui;
-pub(crate) use widgets::section;
+pub(crate) use widgets::{NumberField, prop_control, prop_row, section};
