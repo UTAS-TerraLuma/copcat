@@ -7,6 +7,16 @@ use eframe::egui::emath;
 
 use crate::theme::Theme;
 
+/// The share of a settings box's width left of the split, for labels. The
+/// rest, a bit over half as in Blender, is for controls.
+pub(crate) const LABEL_SHARE: f32 = 0.4;
+
+/// Where the box being drawn spans, so rows in indented parts of it (such
+/// as collapsing sections) still split at the same x.
+fn section_span_id() -> egui::Id {
+    egui::Id::new("copcat_settings_section_span")
+}
+
 /// One section of the Point cloud window, in a box filling its width.
 pub(crate) fn section<R>(
     ui: &mut egui::Ui,
@@ -17,18 +27,206 @@ pub(crate) fn section<R>(
         .box_frame()
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
+            ui.spacing_mut().item_spacing.y = theme.spacing.row_gap;
+            let span = ui.max_rect().x_range();
+            ui.data_mut(|data| data.insert_temp(section_span_id(), span));
             add_contents(ui)
         })
         .inner
 }
 
-/// A striped two-column grid of read-only values, whose rows are added with
-/// [`stat_row`].
+/// The x of a row's label column's left edge, the split, and the right edge
+/// of its control column.
+struct Columns {
+    label_left: f32,
+    split: f32,
+    right: f32,
+}
+
+fn columns(ui: &egui::Ui) -> Columns {
+    let own = ui.max_rect().x_range();
+    // The box this row is in, unless the row is somewhere else.
+    let span = ui
+        .data(|data| data.get_temp::<egui::Rangef>(section_span_id()))
+        .filter(|span| span.min <= own.min + 0.5 && own.max <= span.max + 0.5)
+        .unwrap_or(own);
+    let pixels_per_point = ui.pixels_per_point();
+    let split = span.min + LABEL_SHARE * span.span();
+    // On a whole pixel, so every row's edge lands on the same one.
+    let split = (split * pixels_per_point).round() / pixels_per_point;
+    Columns {
+        label_left: own.min,
+        split: split.max(own.min),
+        right: own.max,
+    }
+}
+
+/// A settings row as in Blender's properties: `label` right-aligned left of
+/// the split, and the control `add_control` adds right of it, filling the
+/// rest of the width. The control is labelled by `label` for AccessKit.
+pub(crate) fn prop_row(
+    ui: &mut egui::Ui,
+    label: &str,
+    add_control: impl FnOnce(&mut egui::Ui) -> egui::Response,
+) -> egui::Response {
+    let label_response = label_cell(ui, label, egui::RichText::new(label).weak());
+    prop_control(ui, ("prop_control", label), add_control).labelled_by(label_response.id)
+}
+
+/// A row's label, right-aligned against the split, level with the first
+/// line of its control. Takes no room: the control column's height sets the
+/// row's.
+fn label_cell(ui: &mut egui::Ui, id_salt: &str, label: egui::RichText) -> egui::Response {
+    let Columns {
+        label_left, split, ..
+    } = columns(ui);
+    let top = ui.cursor().top();
+    let height = ui.spacing().interact_size.y;
+    let gap = ui.spacing().item_spacing.x;
+    let rect = egui::Rect::from_min_max(
+        egui::pos2(label_left, top),
+        egui::pos2((split - gap).max(label_left), top + height),
+    );
+    let mut label_ui = ui.new_child(
+        egui::UiBuilder::new()
+            .id_salt(("prop_label", id_salt))
+            .max_rect(rect)
+            .layout(egui::Layout::right_to_left(egui::Align::Center)),
+    );
+    // Cut short with "…" rather than pushing the split, the whole label on
+    // hover.
+    label_ui.add(egui::Label::new(label).truncate())
+}
+
+/// A row with nothing left of the split, such as a checkbox, whose text is
+/// beside it in the control column.
+pub(crate) fn prop_control<R>(
+    ui: &mut egui::Ui,
+    id_salt: impl egui::AsIdSalt,
+    add_control: impl FnOnce(&mut egui::Ui) -> R,
+) -> R {
+    let Columns {
+        label_left,
+        split,
+        right,
+    } = columns(ui);
+    let top = ui.cursor().top();
+    let height = ui.spacing().interact_size.y;
+    let rect = egui::Rect::from_min_max(
+        egui::pos2(split, top),
+        egui::pos2(right, ui.max_rect().bottom().max(top + height)),
+    );
+    let mut control_ui = ui.new_child(
+        egui::UiBuilder::new()
+            .id_salt(id_salt)
+            .max_rect(rect)
+            .layout(egui::Layout::top_down(egui::Align::Min)),
+    );
+    let inner = add_control(&mut control_ui);
+    let bottom = control_ui.min_rect().bottom().max(top + height);
+    ui.advance_cursor_after_rect(egui::Rect::from_min_max(
+        egui::pos2(label_left, top),
+        egui::pos2(right, bottom),
+    ));
+    inner
+}
+
+/// A row of buttons, one per option, filling the width and joined into one
+/// control: a toggle between a few choices. Returns which was clicked.
+pub(crate) fn segmented(ui: &mut egui::Ui, options: &[(&str, bool)]) -> Option<usize> {
+    let height = ui.spacing().interact_size.y;
+    let gap = 1.0;
+    let count = options.len().max(1) as f32;
+    let width = ui.available_width();
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::hover());
+    let segment_width = (width - gap * (count - 1.0)) / count;
+    let radius = ui.visuals().widgets.inactive.corner_radius;
+    let mut clicked = None;
+    for (index, &(label, selected)) in options.iter().enumerate() {
+        // Edges on whole pixels, the last at the column's edge exactly.
+        let pixels_per_point = ui.pixels_per_point();
+        let on_pixel = |x: f32| (x * pixels_per_point).round() / pixels_per_point;
+        let left = rect.left() + index as f32 * (segment_width + gap);
+        let right = if index + 1 == options.len() {
+            rect.right()
+        } else {
+            on_pixel(left + segment_width)
+        };
+        let left = if index == 0 {
+            rect.left()
+        } else {
+            on_pixel(left)
+        };
+        let segment = egui::Rect::from_min_max(
+            egui::pos2(left, rect.top()),
+            egui::pos2(right, rect.bottom()),
+        );
+        let response = ui.interact(
+            segment,
+            ui.id().with(("segment", label)),
+            egui::Sense::click(),
+        );
+        response.widget_info(|| {
+            egui::WidgetInfo::selected(
+                egui::WidgetType::RadioButton,
+                ui.is_enabled(),
+                selected,
+                label,
+            )
+        });
+        if response.clicked() {
+            clicked = Some(index);
+        }
+        if ui.is_rect_visible(segment) {
+            let visuals = ui.visuals();
+            let state = ui.style().interact(&response);
+            let (fill, text_color) = if selected {
+                (visuals.selection.bg_fill, visuals.selection.stroke.color)
+            } else {
+                (state.bg_fill, state.text_color())
+            };
+            let corners = egui::CornerRadius {
+                nw: if index == 0 { radius.nw } else { 0 },
+                sw: if index == 0 { radius.sw } else { 0 },
+                ne: if index + 1 == options.len() {
+                    radius.ne
+                } else {
+                    0
+                },
+                se: if index + 1 == options.len() {
+                    radius.se
+                } else {
+                    0
+                },
+            };
+            ui.painter().rect_filled(segment, corners, fill);
+            // Narrow padding: two segments share a column a bit over half
+            // the panel.
+            let padding = ui.spacing().button_padding.x / 2.0;
+            let galley = egui::WidgetText::from(label).into_galley(
+                ui,
+                Some(egui::TextWrapMode::Truncate),
+                (segment_width - 2.0 * padding).max(0.0),
+                egui::TextStyle::Button,
+            );
+            let at = egui::Align2::CENTER_CENTER
+                .align_size_within_rect(galley.size(), segment)
+                .min;
+            ui.painter().galley(at, galley, text_color);
+        }
+    }
+    clicked
+}
+
+/// A striped table of read-only values, whose rows are added with
+/// [`stat_row`], split at the same x as the settings rows.
 pub(crate) fn stat_grid(ui: &mut egui::Ui, id: &str, add_rows: impl FnOnce(&mut egui::Ui)) {
-    egui::Grid::new(id)
-        .num_columns(2)
-        .striped(true)
-        .show(ui, add_rows);
+    ui.push_id(id, |ui| {
+        // Stripes touching, as in a table.
+        ui.spacing_mut().item_spacing.y = 0.0;
+        ui.data_mut(|data| data.insert_temp(ui.id().with("rows"), 0_usize));
+        add_rows(ui);
+    });
 }
 
 /// A row of a [`stat_grid`]: the label in secondary text, then the value,
@@ -39,16 +237,42 @@ pub(crate) fn stat_row(
     label: &str,
     value: impl Into<egui::WidgetText>,
 ) -> egui::Response {
-    ui.weak(label);
-    let value = ui
-        .horizontal(|ui| {
-            // The value's cell fills the row, so the stripes run across the
-            // whole box, however short the value.
-            ui.set_min_width(ui.available_width());
-            ui.add(egui::Label::new(value).truncate())
-        })
-        .inner;
-    ui.end_row();
+    let value = value.into();
+    stat_row_with(ui, egui::RichText::new(label).weak(), |ui| {
+        ui.horizontal(|ui| ui.add(egui::Label::new(value).truncate()))
+            .inner
+    })
+}
+
+/// A row of a [`stat_grid`] with its own label style and value widget.
+pub(crate) fn stat_row_with(
+    ui: &mut egui::Ui,
+    label: egui::RichText,
+    add_value: impl FnOnce(&mut egui::Ui) -> egui::Response,
+) -> egui::Response {
+    let rows_id = ui.id().with("rows");
+    let index = ui.data_mut(|data| {
+        let rows = data.get_temp_mut_or_default::<usize>(rows_id);
+        *rows += 1;
+        *rows - 1
+    });
+    let top = ui.cursor().top();
+    let background = ui.painter().add(egui::Shape::Noop);
+    let salt = label.text().to_owned();
+    label_cell(ui, &salt, label);
+    let value = prop_control(ui, ("stat_value", salt.as_str()), add_value);
+    if index % 2 == 1 {
+        let Columns {
+            label_left, right, ..
+        } = columns(ui);
+        let rect = egui::Rect::from_min_max(
+            egui::pos2(label_left, top),
+            egui::pos2(right, ui.min_rect().bottom()),
+        );
+        let fill = ui.visuals().faint_bg_color;
+        ui.painter()
+            .set(background, egui::epaint::RectShape::filled(rect, 0.0, fill));
+    }
     value
 }
 
@@ -57,56 +281,63 @@ pub(crate) fn mono(text: impl Into<String>) -> egui::RichText {
     egui::RichText::new(text).monospace()
 }
 
-/// How wide `text` is on one line, in `style` unless it says otherwise.
-pub(crate) fn text_width(
-    ui: &egui::Ui,
-    text: impl Into<egui::WidgetText>,
-    style: egui::TextStyle,
-) -> f32 {
-    text.into()
-        .into_galley(ui, Some(egui::TextWrapMode::Extend), f32::INFINITY, style)
-        .size()
-        .x
-}
-
-/// A two-column grid of settings, labels on the left. Grids given the same
-/// `label_width` line their controls up.
-pub(crate) fn settings_grid(
+/// A drop-down for picking one of a few values, showing `selected` and
+/// filling the width. Darker than number fields, as in Blender, so the two
+/// read apart. `add_options` adds a selectable button per value. Label it
+/// with `labelled_by` on the response (`prop_row` does).
+pub(crate) fn choice_combo(
     ui: &mut egui::Ui,
-    id: &str,
-    label_width: f32,
-    add_rows: impl FnOnce(&mut egui::Ui),
-) {
-    egui::Grid::new(id)
-        .num_columns(2)
-        .min_col_width(label_width)
-        .show(ui, add_rows);
-}
-
-/// A small drop-down for picking one of a few values, showing `selected`,
-/// wide enough for the longest of `labels`. `add_options` adds a selectable
-/// button per value. Label it with `labelled_by` on the response.
-pub(crate) fn choice_combo<'l>(
-    ui: &mut egui::Ui,
-    id_salt: &str,
-    selected: &str,
-    labels: impl IntoIterator<Item = &'l str>,
+    id_salt: impl egui::AsIdSalt,
+    selected: impl Into<egui::WidgetText>,
     add_options: impl FnOnce(&mut egui::Ui),
 ) -> egui::Response {
-    let longest = labels
-        .into_iter()
-        .map(|label| text_width(ui, label, egui::TextStyle::Button))
-        .fold(0.0, f32::max);
-    let spacing = ui.spacing();
-    let fits =
-        longest + spacing.icon_width + spacing.item_spacing.x + 2.0 * spacing.button_padding.x;
-    // Narrower if that's all there's room for.
-    let width = ui.available_width().min(spacing.combo_width.max(fits));
-    egui::ComboBox::from_id_salt(id_salt)
-        .selected_text(selected)
-        .width(width)
-        .show_ui(ui, add_options)
-        .response
+    let colors = Theme::applied_colors(ui.ctx());
+    ui.scope(|ui| {
+        let widgets = &mut ui.visuals_mut().widgets;
+        widgets.inactive.weak_bg_fill = colors.dropdown;
+        widgets.hovered.weak_bg_fill = colors.dropdown_hover;
+        widgets.open.weak_bg_fill = colors.dropdown_hover;
+        // As tall as a number field.
+        let content = text_height(ui, egui::TextStyle::Button).max(ui.spacing().icon_width);
+        ui.spacing_mut().button_padding.y = padding_to_fit(ui, content);
+        egui::ComboBox::from_id_salt(id_salt)
+            .selected_text(selected)
+            .width(ui.available_width())
+            .truncate()
+            .icon(chevron)
+            .show_ui(ui, add_options)
+            .response
+    })
+    .inner
+}
+
+/// How tall a line of text in `style` is laid out.
+fn text_height(ui: &egui::Ui, style: egui::TextStyle) -> f32 {
+    egui::WidgetText::from("Ag")
+        .into_galley(ui, Some(egui::TextWrapMode::Extend), f32::INFINITY, style)
+        .size()
+        .y
+}
+
+/// Padding above and below `content` that makes a widget exactly the
+/// interact height.
+fn padding_to_fit(ui: &egui::Ui, content: f32) -> f32 {
+    ((ui.spacing().interact_size.y - content) / 2.0).max(0.0)
+}
+
+/// A drop-down's small downward chevron.
+fn chevron(ui: &egui::Ui, rect: egui::Rect, visuals: &egui::style::WidgetVisuals, _open: bool) {
+    let centre = rect.center();
+    let half_width = (rect.width() * 0.25).round();
+    let half_height = half_width * 0.5;
+    ui.painter().line(
+        vec![
+            centre + egui::vec2(-half_width, -half_height),
+            centre + egui::vec2(0.0, half_height),
+            centre + egui::vec2(half_width, -half_height),
+        ],
+        egui::Stroke::new(1.5, visuals.fg_stroke.color),
+    );
 }
 
 /// How far a drag goes to cross a number field's whole range, in points
@@ -210,6 +441,9 @@ impl<'a> NumberField<'a> {
             state.expansion = 0.0;
         }
         ui.spacing_mut().interact_size.x = width;
+        // No taller than the arrows, so every row is one height.
+        let content = text_height(ui, ui.style().drag_value_text_style.clone());
+        ui.spacing_mut().button_padding.y = padding_to_fit(ui, content);
 
         // No DragValue dragging of its own: its speed only steps the value
         // with the arrow keys while typing, and through AccessKit.
@@ -330,6 +564,10 @@ impl egui::Widget for NumberField<'_> {
         let height = ui.spacing().interact_size.y;
         let arrow_width = (height * 0.8).round();
         let width = ui.available_width().max(2.0 * arrow_width + height);
+        // Where the whole field will be, to know before drawing it whether
+        // the pointer is over it.
+        let field_rect = egui::Rect::from_min_size(ui.cursor().min, egui::vec2(width, height));
+        let pointer_over = ui.rect_contains_pointer(field_rect);
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 0.0;
             // Drawn once it's known whether any part is hovered.
@@ -339,7 +577,8 @@ impl egui::Widget for NumberField<'_> {
             let mut changed = false;
             let value = (self.get_set)(None);
             let decrease_name = format!("Decrease {}", self.name);
-            let decrease = arrow(ui, arrow_width, false, value > low, &decrease_name);
+            let decrease = arrow(ui, arrow_width, &decrease_name);
+            let can_decrease = value > low;
             if decrease.clicked() {
                 (self.get_set)(Some(stepped(value, self.step, false, &self.range)));
                 changed = true;
@@ -349,7 +588,8 @@ impl egui::Widget for NumberField<'_> {
                 .inner;
             let value = (self.get_set)(None);
             let increase_name = format!("Increase {}", self.name);
-            let increase = arrow(ui, arrow_width, true, value < high, &increase_name);
+            let increase = arrow(ui, arrow_width, &increase_name);
+            let can_increase = value < high;
             if increase.clicked() {
                 (self.get_set)(Some(stepped(value, self.step, true, &self.range)));
                 changed = true;
@@ -377,18 +617,37 @@ impl egui::Widget for NumberField<'_> {
                     egui::StrokeKind::Inside,
                 ),
             );
+            // The arrows only show with the pointer over the field, as in
+            // Blender, or when tabbed to; not while typing. They're there to
+            // click either way.
+            let typing = middle.has_focus() && !middle.dragged();
+            let show = ui.is_enabled()
+                && !typing
+                && (pointer_over || hovered || decrease.has_focus() || increase.has_focus());
+            if show {
+                paint_arrow(ui, &decrease, false, can_decrease);
+                paint_arrow(ui, &increase, true, can_increase);
+            }
             middle
         })
         .inner
     }
 }
 
-/// One of a number field's arrows, dimmed when it can't go further that way.
-fn arrow(ui: &mut egui::Ui, width: f32, right: bool, can_move: bool, name: &str) -> egui::Response {
+/// Room for one of a number field's arrows, a button for AccessKit, drawn
+/// with [`paint_arrow`] when it shows.
+fn arrow(ui: &mut egui::Ui, width: f32, name: &str) -> egui::Response {
     let height = ui.spacing().interact_size.y;
-    let (rect, response) = ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::click());
+    let (_, response) = ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::click());
     response
         .widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), name));
+    response
+}
+
+/// One of a number field's arrows, dimmed when it can't go further that way.
+fn paint_arrow(ui: &egui::Ui, response: &egui::Response, right: bool, can_move: bool) {
+    let rect = response.rect;
+    let height = rect.height();
     if ui.is_rect_visible(rect) {
         let visuals = ui.visuals();
         let color = if !can_move {
@@ -412,7 +671,6 @@ fn arrow(ui: &mut egui::Ui, width: f32, right: bool, can_move: bool, name: &str)
             egui::Stroke::NONE,
         ));
     }
-    response
 }
 
 /// How many decimals show a value rounded to `precision`.
@@ -547,6 +805,163 @@ pub(crate) fn legend_color([r, g, b, _]: [f32; 4]) -> egui::Color32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use egui::accesskit::Role;
+    use egui_kittest::kittest::{NodeT, Queryable};
+
+    /// A settings box `width` wide, with rows at its top level and inside a
+    /// collapsing section, which indents them.
+    fn rows_harness(width: f32, pixels_per_point: f32) -> egui_kittest::Harness<'static> {
+        let mut values = [1.0_f64, 2.0, 3.0];
+        let mut ticked = false;
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(width, 400.0))
+            .with_pixels_per_point(pixels_per_point)
+            .build_ui(move |ui| {
+                let theme = Theme::default();
+                theme.apply(ui.ctx());
+                section(ui, &theme, |ui| {
+                    let [a, b, c] = &mut values;
+                    prop_row(ui, "Short", |ui| {
+                        ui.add(NumberField::new(a, 0.0..=10.0, "Short"))
+                    });
+                    prop_row(ui, "A much longer label than fits", |ui| {
+                        choice_combo(ui, "combo", "Choice", |ui| {
+                            ui.label("Option");
+                        })
+                    });
+                    prop_control(ui, "tick", |ui| ui.checkbox(&mut ticked, "Tick"));
+                    egui::CollapsingHeader::new("More")
+                        .default_open(true)
+                        .show(ui, |ui| {
+                            prop_row(ui, "Inner", |ui| {
+                                ui.add(NumberField::new(b, 0.0..=10.0, "Inner"))
+                            });
+                        });
+                    prop_row(ui, "Last", |ui| {
+                        ui.add(NumberField::new(c, 0.0..=10.0, "Last"))
+                    });
+                });
+            });
+        harness.run();
+        harness
+    }
+
+    fn rects(harness: &egui_kittest::Harness<'_>, role: Role) -> Vec<egui::Rect> {
+        harness
+            .query_all_by_role(role)
+            .map(|node| node.rect())
+            .collect()
+    }
+
+    /// Each number field's whole extent, from its left arrow to its right.
+    fn number_field_rects(harness: &egui_kittest::Harness<'_>) -> Vec<egui::Rect> {
+        let arrow =
+            |prefix: &str, name: &str| harness.get_by_label(&format!("{prefix} {name}")).rect();
+        harness
+            .query_all_by_role(Role::SpinButton)
+            .map(|field| {
+                let name = field
+                    .accesskit_node()
+                    .label()
+                    .expect("a labelled number field");
+                arrow("Decrease", &name).union(arrow("Increase", &name))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn rows_should_split_at_one_x_at_any_width_and_scale() {
+        for (width, pixels_per_point) in [(300.0, 1.0), (300.0, 2.0), (520.0, 1.5)] {
+            let harness = rows_harness(width, pixels_per_point);
+            let case = format!("{width} wide at {pixels_per_point}x");
+            let controls: Vec<_> = number_field_rects(&harness)
+                .into_iter()
+                .chain(rects(&harness, Role::ComboBox))
+                .collect();
+            assert_eq!(controls.len(), 4, "{case}");
+            for rect in &controls {
+                assert_eq!(rect.height(), controls[0].height(), "{case}: {controls:?}");
+            }
+            let split = controls[0].left();
+            let right = controls[0].right();
+            for rect in &controls {
+                assert_eq!(rect.left(), split, "{case}: {controls:?}");
+                assert_eq!(rect.right(), right, "{case}: {controls:?}");
+            }
+            // A bit over half the width is for controls.
+            let share = (right - split) / width;
+            assert!((0.5..0.65).contains(&share), "{case}: {share}");
+            let checkbox = rects(&harness, Role::CheckBox);
+            assert_eq!(checkbox[0].left(), split, "{case}");
+
+            // Labels end just left of the split, the long one cut short
+            // rather than pushing it.
+            let label_rights: Vec<_> = ["Short", "A much", "Inner", "Last"]
+                .into_iter()
+                .map(|label| {
+                    harness
+                        .query_all_by_role(Role::Label)
+                        .find(|node| node.value().is_some_and(|text| text.starts_with(label)))
+                        .unwrap_or_else(|| panic!("{case}: no label {label}"))
+                        .rect()
+                        .right()
+                })
+                .collect();
+            assert_eq!(label_rights.len(), 4, "{case}");
+            for right_edge in &label_rights {
+                assert_eq!(*right_edge, label_rights[0], "{case}: {label_rights:?}");
+                let gap = split - right_edge;
+                assert!(gap > 0.0 && gap <= 12.0, "{case}: gap {gap}");
+            }
+        }
+    }
+
+    /// The arrows painted: the only triangles a lone number field draws.
+    fn arrows_painted(harness: &egui_kittest::Harness<'_>) -> usize {
+        harness
+            .output()
+            .shapes
+            .iter()
+            .filter(|clipped| {
+                matches!(&clipped.shape, egui::Shape::Path(path) if path.closed && path.points.len() == 3)
+            })
+            .count()
+    }
+
+    #[test]
+    fn number_field_arrows_should_show_only_under_the_pointer_and_still_step() {
+        let mut value = 2.0_f64;
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(300.0, 100.0))
+            .build_ui(move |ui| {
+                ui.add(NumberField::new(&mut value, 0.0..=10.0, "Size").step(0.5));
+            });
+        harness.run();
+        let field = harness.get_by_role(Role::SpinButton).rect();
+        assert_eq!(arrows_painted(&harness), 0, "hidden at rest");
+        // Still there for AccessKit.
+        let increase = harness.get_by_label("Increase Size").rect();
+        assert!(harness.query_by_label("Decrease Size").is_some());
+
+        harness.hover_at(field.center());
+        harness.run();
+        assert_eq!(arrows_painted(&harness), 2, "shown under the pointer");
+        // The value doesn't move when the arrows show.
+        assert_eq!(harness.get_by_role(Role::SpinButton).rect(), field);
+
+        harness.get_by_label("Increase Size").click();
+        harness.run();
+        let spin = harness.get_by_role(Role::SpinButton);
+        assert_eq!(spin.accesskit_node().numeric_value(), Some(2.5));
+        assert!(
+            increase.right() > field.right(),
+            "the arrow is right of the value"
+        );
+
+        harness.hover_at(egui::pos2(150.0, 90.0));
+        harness.run();
+        assert_eq!(arrows_painted(&harness), 0, "hidden again");
+    }
 
     #[test]
     fn arrows_should_step_to_the_next_multiple_of_the_step() {

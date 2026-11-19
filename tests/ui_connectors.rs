@@ -318,14 +318,14 @@ fn a_static_stac_catalog_should_browse_down_to_a_cloud_and_open_it() {
     harness.run_ok();
     // The open time changes every run, and the server's port too.
     let (_, open_time) = value_after(&harness, "Open time").expect("an Open time row");
-    harness.mask(open_time);
+    common::mask_shown(&mut harness, open_time);
     let with_port: Vec<_> = harness
         .query_all_by_role(Role::Label)
         .filter(|node| node.value().is_some_and(|text| text.contains("127.0.0.1")))
         .map(|node| node.rect())
         .collect();
     for rect in with_port {
-        harness.mask(rect);
+        common::mask_shown(&mut harness, rect);
     }
     harness.snapshot("connector_static_stac_fixture");
 }

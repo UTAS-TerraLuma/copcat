@@ -219,7 +219,7 @@ fn circle_tool_should_open_a_subcloud_where_it_was_dragged() {
     }
     drop(labels);
     for rect in masks {
-        harness.mask(rect);
+        common::mask_shown(&mut harness, rect);
     }
     harness.snapshot("subcloud_circle_over_building");
 }

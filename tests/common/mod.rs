@@ -94,6 +94,28 @@ pub fn read_png(path: &Path) -> Rgb {
     }
 }
 
+/// Masks `rect` in the next snapshot, only the part above the status bar
+/// (its "points drawn" label). A settings row scrolled out of the panel
+/// still has a rect, and a mask over it would land on the status bar.
+pub fn mask_shown<State>(harness: &mut egui_kittest::Harness<'_, State>, rect: eframe::egui::Rect) {
+    use egui_kittest::kittest::Queryable;
+    let status_top = harness
+        .query_all_by_role(eframe::egui::accesskit::Role::Label)
+        .filter(|node| {
+            node.value()
+                .is_some_and(|text| text.ends_with("points drawn"))
+        })
+        .map(|node| node.rect().top())
+        .next();
+    let shown = match status_top {
+        Some(top) => rect.intersect(eframe::egui::Rect::everything_above(top)),
+        None => rect,
+    };
+    if shown.is_positive() {
+        harness.mask(shown);
+    }
+}
+
 pub fn write_png(path: &Path, image: &Rgb) {
     let file = File::create(path).unwrap();
     let mut encoder = png::Encoder::new(BufWriter::new(file), image.width, image.height);

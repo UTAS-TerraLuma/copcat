@@ -48,6 +48,19 @@ fn viewer(
     Harness<'static, impl eframe::App + use<>>,
     mpsc::Receiver<()>,
 ) {
+    viewer_at_scale(user_dir, workspace, source, 1.0)
+}
+
+/// [`viewer`] at a UI scale of `pixels_per_point`.
+fn viewer_at_scale(
+    user_dir: &Path,
+    workspace: &Path,
+    source: Option<String>,
+    pixels_per_point: f32,
+) -> (
+    Harness<'static, impl eframe::App + use<>>,
+    mpsc::Receiver<()>,
+) {
     let locations = copcat::ConfigLocations {
         user_dir: Some(user_dir.to_path_buf()),
         workspace: Some(workspace.to_path_buf()),
@@ -55,7 +68,7 @@ fn viewer(
     let (wake, woken) = mpsc::channel();
     let harness = Harness::builder()
         .with_size(egui::vec2(960.0, 700.0))
-        .with_pixels_per_point(1.0)
+        .with_pixels_per_point(pixels_per_point)
         .wgpu()
         .build_eframe(move |cc| {
             cc.egui_ctx.set_request_repaint_callback(move |_| {
@@ -491,6 +504,122 @@ fn number_fields_should_step_take_typed_values_and_clamp() {
     click(&mut harness, "Performance");
     type_into(&mut harness, "Point budget", "750 k", egui::Key::Enter);
     assert_eq!(field_value(&harness, "Point budget"), 750_000.0);
+}
+
+#[test]
+fn settings_rows_should_split_at_one_x_through_the_panel() {
+    if !has_adapter() {
+        common::skip_or_fail_without_gpu("couldn't find a GPU: no wgpu adapters");
+        return;
+    }
+    for pixels_per_point in [1.0, 1.5] {
+        let _gpu = ONE_VIEWER_AT_A_TIME
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let scratch = common::scratch_dir("settings_rows_should_split_at_one_x");
+        let fixture = common::fixture().to_str().unwrap().to_owned();
+        let (mut harness, woken) = viewer_at_scale(
+            &scratch.join("home"),
+            &scratch.join("nowhere"),
+            Some(fixture),
+            pixels_per_point,
+        );
+        wait_for_display_section(&mut harness, &woken);
+        // Every kind of row: adaptive sizes with Advanced open, and the
+        // collapsing sections, which indent their rows.
+        choose(&mut harness, "Point size", "Adaptive");
+        for header in ["Advanced", "Sources", "Performance"] {
+            harness.get_by_label(header).scroll_to_me();
+            harness.run_ok();
+            click(&mut harness, header);
+        }
+        assert_rows_line_up(&harness, pixels_per_point);
+    }
+}
+
+/// Asserts the settings panel's controls share one left edge (the split)
+/// and one right edge, checkboxes start at the split, and labels end just
+/// left of it.
+fn assert_rows_line_up(harness: &Harness<'_, impl eframe::App>, pixels_per_point: f32) {
+    use egui::accesskit::Role;
+    // The settings panel is the right-hand third of the window.
+    let in_panel = |rect: &egui::Rect| rect.left() > 600.0;
+    let rects = |role: Role| -> Vec<egui::Rect> {
+        harness
+            .query_all_by_role(role)
+            .map(|node| node.rect())
+            .filter(in_panel)
+            .collect()
+    };
+    // Number fields from arrow to arrow.
+    let number_fields: Vec<egui::Rect> = harness
+        .query_all_by_role(Role::SpinButton)
+        .filter(|node| in_panel(&node.rect()))
+        .map(|node| {
+            let name = node.accesskit_node().label().expect("a labelled field");
+            let arrow = |side: &str| harness.get_by_label(&format!("{side} {name}")).rect();
+            arrow("Decrease").union(arrow("Increase"))
+        })
+        .collect();
+    let combos = rects(Role::ComboBox);
+    let case = format!("at {pixels_per_point}x");
+    // Size: Fill, Min, Max, EDL Strength, Radius; Save image Width,
+    // Height; Point budget, Spacing.
+    assert_eq!(number_fields.len(), 9, "{case}: {number_fields:?}");
+    // Colour, Point size, Draw at, and a source per height.
+    assert!(combos.len() >= 4, "{case}: {combos:?}");
+    let controls: Vec<_> = number_fields.iter().chain(&combos).copied().collect();
+    let split = controls[0].left();
+    let right = controls[0].right();
+    for rect in &controls {
+        assert_eq!(rect.left(), split, "{case}: controls {controls:?}");
+        assert_eq!(rect.right(), right, "{case}: controls {controls:?}");
+    }
+
+    let checkboxes = rects(Role::CheckBox);
+    // Eye-dome lighting, Orthographic for axis views, Match view.
+    assert!(checkboxes.len() >= 3, "{case}: {checkboxes:?}");
+    for rect in &checkboxes {
+        assert_eq!(rect.left(), split, "{case}: checkboxes {checkboxes:?}");
+    }
+    let projection = rects(Role::RadioButton);
+    assert_eq!(projection.len(), 2, "{case}: {projection:?}");
+    assert_eq!(projection[0].left(), split, "{case}: Perspective");
+    assert_eq!(projection[1].right(), right, "{case}: Orthographic");
+
+    let labels = [
+        "Colour",
+        "Point size",
+        "Fill",
+        "Min (px)",
+        "Max (px)",
+        "Strength",
+        "Radius (px)",
+        "Projection",
+        "Draw at",
+        "Width",
+        "Point budget",
+        "Spacing (px)",
+    ];
+    let label_rights: Vec<f32> = labels
+        .iter()
+        .map(|label| {
+            harness
+                .query_all_by_role(Role::Label)
+                .find(|node| node.value().as_deref() == Some(*label) && in_panel(&node.rect()))
+                .unwrap_or_else(|| panic!("{case}: no label {label}"))
+                .rect()
+                .right()
+        })
+        .collect();
+    for right_edge in &label_rights {
+        assert_eq!(
+            *right_edge, label_rights[0],
+            "{case}: label right edges {label_rights:?}"
+        );
+        let gap = split - right_edge;
+        assert!(gap > 0.0 && gap <= 12.0, "{case}: label gap {gap}");
+    }
 }
 
 /// Clicks what's labelled `label` and lets the UI settle.

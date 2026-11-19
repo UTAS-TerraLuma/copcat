@@ -14,6 +14,7 @@ use crate::lod;
 use crate::subcloud::Footprint;
 
 use super::commands::{Command, Keymap};
+use super::panels::{NumberField, prop_control, prop_row};
 use super::scene::point_style;
 use super::session::Session;
 use super::settings::{ColorMode, ExportSettings, PointSizeMode, ViewSettings};
@@ -187,18 +188,21 @@ pub(crate) fn export_ui(
     commands: &mut Vec<Command>,
 ) {
     ui.strong("Save image");
-    ui.horizontal_wrapped(|ui| {
-        ui.add_enabled_ui(!settings.match_view, |ui| {
-            for (side, label) in settings.size.iter_mut().zip(["Width", "Height"]) {
-                let label = ui.weak(label);
+    ui.add_enabled_ui(!settings.match_view, |ui| {
+        for (side, label) in settings.size.iter_mut().zip(["Width", "Height"]) {
+            prop_row(ui, label, |ui| {
                 ui.add(
-                    egui::DragValue::new(side)
-                        .range(1..=context.max_size)
-                        .suffix(" px"),
+                    NumberField::new(side, 1..=context.max_size, label)
+                        .step(1.0)
+                        .precision(1.0)
+                        .logarithmic()
+                        .formatter(|value| format!("{value:.0} px"))
+                        .parser(|text| text.trim().trim_end_matches("px").trim().parse().ok()),
                 )
-                .labelled_by(label.id);
-            }
-        });
+            });
+        }
+    });
+    prop_control(ui, "match_view", |ui| {
         ui.checkbox(&mut settings.match_view, "Match view")
             .on_hover_text(
                 "Save the 3D view as it is on screen, at its size in physical pixels. \
@@ -207,7 +211,10 @@ pub(crate) fn export_ui(
             );
     });
 
-    ui.horizontal_wrapped(|ui| {
+    // Two buttons sharing the box's width, as Blender lays out operators.
+    ui.columns(2, |columns| {
+        let ui = &mut columns[0];
+        let full_width = |ui: &egui::Ui| egui::vec2(ui.available_width(), 0.0);
         let save_hint = with_shortcut(
             ui,
             keymap,
@@ -216,11 +223,15 @@ pub(crate) fn export_ui(
              bigger image than the view gets more detail, not stretched pixels.",
         );
         let save = ui
-            .add_enabled(!export.is_busy(), egui::Button::new("Save PNG…"))
+            .add_enabled(
+                !export.is_busy(),
+                egui::Button::new("Save PNG…").min_size(full_width(ui)),
+            )
             .on_hover_text(save_hint);
         if save.clicked() {
             commands.push(Command::SaveImage);
         }
+        let ui = &mut columns[1];
         let copy_hint = if context.in_subcloud {
             "Copy a command that renders this view from the command line. It shows the \
              whole cloud from this camera: it can't clip to the subcloud."
@@ -228,7 +239,7 @@ pub(crate) fn export_ui(
             "Copy a command that renders this view from the command line"
         };
         if ui
-            .button("Copy as command")
+            .add(egui::Button::new("Copy as command").min_size(full_width(ui)))
             .on_hover_text(copy_hint)
             .clicked()
         {
