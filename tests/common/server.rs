@@ -14,14 +14,17 @@
 //! query is ignored when finding the file, but logged.
 //!
 //! [`FileServer::fail_ranges`] makes range requests starting in some bytes
-//! fail with 503, to test how the viewer handles nodes that don't load.
+//! fail with 503, to test how the viewer handles nodes that don't load;
+//! [`FileServer::fail_all`] fails every request, like a server that's gone;
+//! and [`FileServer::hold`] keeps requests waiting until released, to see
+//! what the viewer shows before any reply.
 
 use std::io::{BufRead, BufReader, Write};
 use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::ops::Range;
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
 
 /// One request the server answered.
@@ -41,6 +44,10 @@ pub struct FileServer {
     log: Arc<Mutex<Vec<Logged>>>,
     /// Range requests whose first byte is in here get 503.
     failing: Arc<Mutex<Option<Range<u64>>>>,
+    /// Every request gets 503.
+    fail_all: Arc<AtomicBool>,
+    /// While true, requests wait before being answered.
+    held: Arc<(Mutex<bool>, Condvar)>,
     thread: Option<JoinHandle<()>>,
 }
 
@@ -54,10 +61,14 @@ impl FileServer {
         let stop = Arc::new(AtomicBool::new(false));
         let log = Arc::new(Mutex::new(Vec::new()));
         let failing = Arc::new(Mutex::new(None));
+        let fail_all = Arc::new(AtomicBool::new(false));
+        let held = Arc::new((Mutex::new(false), Condvar::new()));
         let thread = {
             let stop = stop.clone();
             let log = log.clone();
             let failing = failing.clone();
+            let fail_all = fail_all.clone();
+            let held = held.clone();
             thread::spawn(move || {
                 for stream in listener.incoming() {
                     if stop.load(Ordering::SeqCst) {
@@ -67,8 +78,18 @@ impl FileServer {
                     let root = root.clone();
                     let log = log.clone();
                     let failing = failing.lock().unwrap().clone();
+                    let fail_all = fail_all.clone();
+                    let held = held.clone();
                     thread::spawn(move || {
-                        if let Some(entry) = handle(stream, &root, addr, failing) {
+                        let gate = || {
+                            let (lock, released) = &*held;
+                            let mut waiting = lock.lock().unwrap();
+                            while *waiting {
+                                waiting = released.wait(waiting).unwrap();
+                            }
+                            fail_all.load(Ordering::SeqCst)
+                        };
+                        if let Some(entry) = handle(stream, &root, addr, failing, gate) {
                             log.lock().unwrap().push(entry);
                         }
                     });
@@ -80,8 +101,22 @@ impl FileServer {
             stop,
             log,
             failing,
+            fail_all,
+            held,
             thread: Some(thread),
         }
+    }
+
+    /// From now on, answers every request with 503, or none if `false`.
+    pub fn fail_all(&self, fail: bool) {
+        self.fail_all.store(fail, Ordering::SeqCst);
+    }
+
+    /// Keeps requests waiting from now on, until called with `false`.
+    pub fn hold(&self, hold: bool) {
+        let (lock, released) = &*self.held;
+        *lock.lock().unwrap() = hold;
+        released.notify_all();
     }
 
     /// From now on, answers range requests whose first byte is in `bytes`
@@ -104,6 +139,7 @@ impl FileServer {
 impl Drop for FileServer {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::SeqCst);
+        self.hold(false);
         // Wake the accept loop so it sees `stop`.
         let _ = TcpStream::connect(self.addr);
         if let Some(thread) = self.thread.take() {
@@ -117,6 +153,8 @@ fn handle(
     root: &Path,
     addr: SocketAddr,
     failing: Option<Range<u64>>,
+    // Waits while the server is held, then says whether to fail.
+    gate: impl FnOnce() -> bool,
 ) -> Option<Logged> {
     let mut reader = BufReader::new(stream.try_clone().ok()?);
     let mut request_line = String::new();
@@ -146,15 +184,28 @@ fn handle(
         None => (target.to_owned(), None),
     };
     let base = format!("http://{addr}");
-    let status = respond(
-        stream,
-        root,
-        &base,
-        &method,
-        &path,
-        range.as_deref(),
-        failing,
-    );
+    let status = if gate() {
+        let mut stream = stream;
+        let _ = stream.write_all(
+            b"HTTP/1.1 503 Service Unavailable
+Connection: close
+Content-Length: 0
+
+",
+        );
+        let _ = stream.shutdown(Shutdown::Write);
+        503
+    } else {
+        respond(
+            stream,
+            root,
+            &base,
+            &method,
+            &path,
+            range.as_deref(),
+            failing,
+        )
+    };
     Some(Logged {
         method,
         path,

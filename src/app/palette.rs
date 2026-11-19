@@ -50,6 +50,7 @@ use super::ViewerApp;
 use super::commands::{Command, Keymap};
 use super::open_ui::clean_source;
 use super::thumbnails::{self, Thumbnails};
+use crate::cache::DiskCache;
 use crate::theme::Theme;
 
 /// What a provider gets to know about the app, to build its items.
@@ -225,6 +226,18 @@ impl Listing {
     }
 }
 
+/// How a list fetched in the background is getting on, beside the
+/// breadcrumb.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Status {
+    /// Fetching, with this many items so far.
+    Loading(usize),
+    /// Fetching again behind the list showing.
+    Updating,
+    /// A quiet note, with more on hover.
+    Note { text: String, hover: String },
+}
+
 /// A source of palette items. See the module docs.
 pub(crate) trait Provider: Send {
     /// Shown above the field while this provider's list is showing.
@@ -253,6 +266,13 @@ pub(crate) trait Provider: Send {
     /// have arrived.
     fn fetching(&self) -> Option<usize> {
         None
+    }
+
+    /// What the line above the field says about the list, at its right.
+    fn status(&self) -> Option<Status> {
+        self.fetching()
+            .filter(|&count| count > 0)
+            .map(Status::Loading)
     }
 
     /// A command to run as the palette leaves this list, whether by going
@@ -532,6 +552,9 @@ pub(crate) struct Palette {
     /// The query the selection was made for: a new query resets it.
     selected_for: Option<String>,
     pub(crate) selected: Option<usize>,
+    /// The selection as of the last frame and its item's title, so it can
+    /// follow the item when a list fetched again moves it.
+    selected_item: Option<(usize, String)>,
     /// Sub-lists and prompts above the root, and the query to restore on
     /// leaving each.
     levels: Vec<(Level, String)>,
@@ -606,6 +629,11 @@ impl Palette {
             self.effects.extend(preview.clone());
         }
         self.previewed = preview;
+    }
+
+    /// Keeps thumbnails in `cache` between sessions, if given.
+    pub(crate) fn set_thumbnail_cache(&mut self, cache: Option<DiskCache>) {
+        self.thumbnails.set_cache(cache);
     }
 
     /// Offers `source` first among the recent sources.
@@ -696,6 +724,17 @@ impl Palette {
             },
         };
         let stale = self.selected_for.as_deref() != Some(self.query.as_str());
+        if !stale
+            && let Some((at, title)) = &self.selected_item
+            && self.selected == Some(*at)
+            && view.items.get(*at).is_none_or(|item| &item.title != title)
+            && let Some(moved) = view
+                .items
+                .iter()
+                .position(|item| &item.title == title && item.enabled)
+        {
+            self.selected = Some(moved);
+        }
         let invalid = self
             .selected
             .is_none_or(|at| !view.items.get(at).is_some_and(|item| item.enabled));
@@ -709,6 +748,9 @@ impl Palette {
             self.selected = current.or_else(|| first_enabled(&view.items));
             self.selected_for = Some(self.query.clone());
         }
+        self.selected_item = self
+            .selected
+            .and_then(|at| Some((at, view.items.get(at)?.title.clone())));
         self.preview_selected(&view.items);
         view
     }
@@ -940,11 +982,9 @@ impl Palette {
         let colors = &theme.colors;
         let provider = self.browsing();
         let can_refresh = provider.is_some_and(|provider| provider.can_refresh());
-        let fetched = provider
-            .and_then(|provider| provider.fetching())
-            .filter(|&count| count > 0);
+        let status = provider.and_then(|provider| provider.status());
         let label = ui.label(egui::RichText::new(breadcrumb).color(colors.text_secondary));
-        if !can_refresh && fetched.is_none() {
+        if !can_refresh && status.is_none() {
             return false;
         }
         // On the label's line, at the right, without making it taller.
@@ -967,10 +1007,23 @@ impl Palette {
                 .on_hover_text("Fetch this list again")
                 .clicked();
         }
-        if let Some(count) = fetched {
-            right.label(small(&format!("Loading… {count} so far")));
+        let spinner = |right: &mut egui::Ui| {
             let size = right.text_style_height(&egui::TextStyle::Small);
             right.add(egui::Spinner::new().size(size));
+        };
+        match status {
+            Some(Status::Loading(count)) => {
+                right.label(small(&format!("Loading… {count} so far")));
+                spinner(&mut right);
+            }
+            Some(Status::Updating) => {
+                right.label(small("Updating…"));
+                spinner(&mut right);
+            }
+            Some(Status::Note { text, hover }) => {
+                right.label(small(&text)).on_hover_text(hover);
+            }
+            None => {}
         }
         clicked
     }

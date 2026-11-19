@@ -123,3 +123,4 @@ subcloud" before one has been drawn.
 | Add STAC source… | | `sources.add_stac` |
 | Add folder source… | | `sources.add_folder` |
 | Remove data source… | | `sources.remove` |
+| Clear data source cache | | `sources.clear_cache` |

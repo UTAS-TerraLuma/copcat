@@ -9,16 +9,22 @@
 //! Sources come from the settings files' `connectors`, plus the workspace
 //! folder as an implicit folder source. Listings are fetched on threads into
 //! [`Feed`]s that [`ConnectorHub`] keeps for the session, so browsing back
-//! into something shows it at once. The commands here add and remove
-//! sources in the user settings file.
+//! into something shows it at once. STAC listings are also kept on disk
+//! ([`crate::cache::stac`]) once fetched whole, so they show at once in the
+//! next session too, while they're fetched again behind them. The commands
+//! here add and remove sources in the user settings file, and clear the
+//! cache.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, PoisonError, mpsc};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError, mpsc};
+use std::time::SystemTime;
 
 use eframe::egui;
 use serde_json::json;
 
+use crate::cache::stac::CachedListing;
+use crate::cache::{Caches, Clock, Removed, StacCache};
 use crate::config::{self, ConnectorList, Connectors};
 use crate::folder_scan::{self, Limits};
 use crate::format::file_name;
@@ -26,7 +32,7 @@ use crate::stac::{self, Entry, Href, Item};
 
 use super::ViewerApp;
 use super::commands::{Command, ConnectorCommand};
-use super::feed::{Chunk, Feed, FeedProvider, Load, More};
+use super::feed::{AUTO_LOAD_LIMIT, Chunk, Feed, FeedProvider, Load, More};
 use super::open_ui::clean_source;
 use super::palette::{
     Browse, Env, ItemAction, ListProvider, Listing, PaletteItem, PaletteMode, Provider,
@@ -233,39 +239,65 @@ pub(crate) fn folder_rows(root: &Path, scan: &folder_scan::Scan) -> Vec<PaletteI
 }
 
 /// Makes the providers for data sources, keeping what they fetch for the
-/// session. Cheap to clone; the clones share it.
+/// session, and STAC listings on disk if there's a cache. Cheap to clone;
+/// the clones share it.
 #[derive(Clone)]
 pub(crate) struct ConnectorHub {
     ctx: egui::Context,
     client: stac::Client,
     feeds: Arc<Mutex<HashMap<String, Arc<Feed>>>>,
+    /// `None` when the viewer has no settings directory (as in tests).
+    caches: Option<Caches>,
+    clock: Clock,
 }
 
+/// What a new feed shows until it's fetched: rows, and when they were
+/// fetched.
+type Seed = Option<(Vec<PaletteItem>, SystemTime)>;
+
 impl ConnectorHub {
-    pub(crate) fn new(ctx: egui::Context) -> Self {
+    pub(crate) fn new(ctx: egui::Context, caches: Option<Caches>, clock: Clock) -> Self {
+        if let Some(caches) = caches.clone() {
+            // Old and excess files from earlier sessions; nothing waits on it.
+            std::thread::spawn(move || caches.prune());
+        }
         Self {
             ctx,
             client: stac::Client::new(),
             feeds: Arc::default(),
+            caches,
+            clock,
         }
     }
 
-    /// The provider listing the feed kept as `key`, made with `start` if
-    /// there's none yet.
+    fn stac_cache(&self) -> Option<&StacCache> {
+        self.caches.as_ref().map(|caches| &caches.stac)
+    }
+
+    fn feeds(&self) -> MutexGuard<'_, HashMap<String, Arc<Feed>>> {
+        self.feeds.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// The provider listing the feed kept as `key`; if there's none yet,
+    /// one made with `start`, showing `seed` until it's fetched.
     fn feed(
         &self,
         key: String,
         title: impl Into<String>,
+        seed: impl FnOnce() -> Seed,
         start: impl Fn() -> Load + Send + Sync + 'static,
     ) -> Box<dyn Provider> {
         let feed = self
-            .feeds
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
+            .feeds()
             .entry(key)
             .or_insert_with(|| {
                 let ctx = self.ctx.clone();
-                Feed::new(Arc::new(move || ctx.request_repaint()), start)
+                let wake = Arc::new(move || ctx.request_repaint());
+                let feed = Feed::with_options(wake, AUTO_LOAD_LIMIT, self.clock.clone(), start);
+                if let Some((items, fetched)) = seed() {
+                    feed.seed(items, fetched);
+                }
+                feed
             })
             .clone();
         Box::new(FeedProvider::new(title, feed))
@@ -290,23 +322,13 @@ impl ConnectorHub {
     /// What's at the root of `source`.
     pub(crate) fn browse(&self, source: &DataSource) -> Box<dyn Provider> {
         match &source.kind {
-            SourceKind::Stac(url) => {
-                let hub = self.clone();
-                let url = url.clone();
-                self.feed(format!("stac-root:{url}"), &source.name, move || {
-                    let hub = hub.clone();
-                    let url = url.clone();
-                    Box::new(move || {
-                        let page = hub.client.browse_root(&url).map_err(|e| e.0)?;
-                        Ok(hub.stac_chunk(page))
-                    })
-                })
-            }
+            SourceKind::Stac(url) => self.stac_listing(url, None, &source.name),
             SourceKind::Folder(path) => {
                 let path = path.clone();
                 self.feed(
                     format!("folder:{}", path.display()),
                     &source.name,
+                    || None,
                     move || {
                         let path = path.clone();
                         Box::new(move || {
@@ -322,26 +344,46 @@ impl ConnectorHub {
         }
     }
 
-    /// A STAC node's listing.
-    fn stac_node(&self, title: &str, url: &str) -> Box<dyn Provider> {
+    /// A listing in the STAC source at `source`: its root, or the node at
+    /// `node`. Shows the listing kept on disk at once, if there is one.
+    fn stac_listing(&self, source: &str, node: Option<&str>, title: &str) -> Box<dyn Provider> {
+        let source = source.to_owned();
+        let node = node.map(str::to_owned);
+        let listing = node.clone().unwrap_or_else(|| source.clone());
+        let seed = || {
+            let cached = self.stac_cache()?.load(&source, &listing)?;
+            let rows = cached
+                .entries
+                .iter()
+                .map(|entry| self.stac_row(&source, entry))
+                .collect();
+            Some((rows, cached.fetched))
+        };
+        let key = stac_key(&source, &listing);
         let hub = self.clone();
-        let url = url.to_owned();
-        self.feed(format!("stac:{url}"), title, move || {
+        let (source, node, listing) = (source.clone(), node.clone(), listing.clone());
+        self.feed(key, title, seed, move || {
             let hub = hub.clone();
-            let url = url.clone();
+            let (source, node) = (source.clone(), node.clone());
+            let recorder = Recorder::new(&hub, &source, &listing);
             Box::new(move || {
-                let page = hub.client.browse(&url).map_err(|e| e.0)?;
-                Ok(hub.stac_chunk(page))
+                let page = match &node {
+                    Some(node) => hub.client.browse(node),
+                    None => hub.client.browse_root(&source),
+                }
+                .map_err(|e| e.0)?;
+                Ok(hub.stac_chunk(&source, page, recorder))
             })
         })
     }
 
     /// A page of STAC entries as rows, with how to fetch the rest.
-    fn stac_chunk(&self, page: stac::Page) -> Chunk {
+    fn stac_chunk(&self, source: &str, page: stac::Page, recorder: Recorder) -> Chunk {
+        recorder.add(&page);
         let items = page
             .entries
             .iter()
-            .map(|entry| self.stac_row(entry))
+            .map(|entry| self.stac_row(source, entry))
             .collect();
         let more = page.more.map(|more| {
             let detail = match more.known_items() {
@@ -350,31 +392,112 @@ impl ConnectorHub {
                 None => "the next page".to_owned(),
             };
             let hub = self.clone();
+            let source = source.to_owned();
             More {
                 detail,
                 load: Box::new(move || {
                     let page = hub.client.more(&more).map_err(|e| e.0)?;
-                    Ok(hub.stac_chunk(page))
+                    Ok(hub.stac_chunk(&source, page, recorder))
                 }),
             }
         });
         Chunk { items, more }
     }
 
-    fn stac_row(&self, entry: &Entry) -> PaletteItem {
+    fn stac_row(&self, source: &str, entry: &Entry) -> PaletteItem {
         match entry {
             Entry::Node(node) => {
                 let hub = self.clone();
+                let source = source.to_owned();
                 let (title, url) = (node.title.clone(), node.url.clone());
                 PaletteItem::new(
                     node.title.clone(),
-                    ItemAction::Browse(Browse::new(move || hub.stac_node(&title, &url))),
+                    ItemAction::Browse(Browse::new(move || {
+                        hub.stac_listing(&source, Some(&url), &title)
+                    })),
                 )
                 .with_detail(node.kind.clone())
             }
             Entry::Item(item) => item_row(item),
             Entry::Unavailable { title, reason } => disabled(title.clone()).with_detail(reason),
         }
+    }
+
+    /// Forgets the STAC source at `url`: its listings on disk and this
+    /// session.
+    pub(crate) fn forget_stac_source(&self, url: &str) {
+        let prefix = stac_key(url, "");
+        self.feeds().retain(|key, _| !key.starts_with(&prefix));
+        if let Some(cache) = self.stac_cache() {
+            cache.remove_source(url);
+        }
+    }
+
+    /// Empties the disk cache, and forgets what's been fetched this
+    /// session. Returns what was removed from disk, listings then
+    /// thumbnails, or `None` without a cache.
+    pub(crate) fn clear_cache(&self) -> Option<(Removed, Removed)> {
+        self.feeds().clear();
+        let caches = self.caches.as_ref()?;
+        Some((caches.stac.clear(), caches.thumbnails.clear()))
+    }
+}
+
+/// The key of a STAC listing's feed: starting with the source, so a
+/// source's feeds can be found to forget them.
+fn stac_key(source: &str, listing: &str) -> String {
+    format!("stac:{source}\n{listing}")
+}
+
+/// Collects a STAC listing's pages as they arrive, and writes them to the
+/// disk cache once the listing is whole: every page fetched, or as many as
+/// are fetched by themselves ([`AUTO_LOAD_LIMIT`]). Pages fetched after
+/// that with "Load more…" aren't kept: the next session shows the first
+/// [`AUTO_LOAD_LIMIT`]. A listing that fails part way isn't written, so the
+/// cache never holds part of one.
+#[derive(Clone)]
+struct Recorder {
+    cache: Option<StacCache>,
+    clock: Clock,
+    source: String,
+    listing: String,
+    /// `None` once written.
+    entries: Arc<Mutex<Option<Vec<Entry>>>>,
+}
+
+impl Recorder {
+    fn new(hub: &ConnectorHub, source: &str, listing: &str) -> Self {
+        Self {
+            cache: hub.stac_cache().cloned(),
+            clock: hub.clock.clone(),
+            source: source.to_owned(),
+            listing: listing.to_owned(),
+            entries: Arc::new(Mutex::new(Some(Vec::new()))),
+        }
+    }
+
+    fn add(&self, page: &stac::Page) {
+        let Some(cache) = &self.cache else {
+            return;
+        };
+        let mut kept = self.entries.lock().unwrap_or_else(PoisonError::into_inner);
+        let Some(entries) = kept.as_mut() else {
+            return;
+        };
+        entries.extend(page.entries.iter().cloned());
+        let whole = page.more.is_none();
+        if !whole && entries.len() < AUTO_LOAD_LIMIT {
+            return;
+        }
+        let entries = kept.take().unwrap_or_default();
+        drop(kept);
+        cache.store(&CachedListing {
+            source: self.source.clone(),
+            listing: self.listing.clone(),
+            fetched: (self.clock)(),
+            entries,
+            truncated: !whole,
+        });
     }
 }
 
@@ -591,6 +714,7 @@ impl ViewerApp {
             }
             ConnectorCommand::Save(source) => self.save_source(source),
             ConnectorCommand::Delete(list, name) => self.delete_source(list, &name),
+            ConnectorCommand::ClearCache => self.clear_source_cache(),
         }
     }
 
@@ -671,9 +795,25 @@ impl ViewerApp {
         let Some(file) = self.user_settings_file() else {
             return;
         };
+        let removed_url = self.sources.iter().find_map(|source| match &source.kind {
+            SourceKind::Stac(url) if source.name == name && list == ConnectorList::Stac => {
+                Some(url.clone())
+            }
+            _ => None,
+        });
         match config::remove_connector(&file, list, name) {
             Ok(_) => {
                 self.reload_config();
+                // Its cached listings go too, unless a source left (in the
+                // workspace file) browses the same URL.
+                if let Some(url) = removed_url
+                    && !self
+                        .sources
+                        .iter()
+                        .any(|source| source.kind == SourceKind::Stac(url.clone()))
+                {
+                    self.connector_hub.forget_stac_source(&url);
+                }
                 self.user_config.inform(format!(
                     "Removed the data source \"{name}\" from {}",
                     file.display()
@@ -683,6 +823,28 @@ impl ViewerApp {
                 .user_config
                 .warn(format!("{}: {problem}", file.display())),
         }
+    }
+
+    /// Empties the data source cache, saying what went.
+    fn clear_source_cache(&mut self) {
+        let message = match self.connector_hub.clear_cache() {
+            Some((listings, thumbnails)) => {
+                let count = |n: usize, one: &str, many: &str| match n {
+                    1 => format!("1 {one}"),
+                    n => format!("{n} {many}"),
+                };
+                format!(
+                    "Cleared the data source cache: {} and {} ({:.1} MB)",
+                    count(listings.files, "list", "lists"),
+                    count(thumbnails.files, "thumbnail", "thumbnails"),
+                    (listings.bytes + thumbnails.bytes) as f64 / (1024.0 * 1024.0)
+                )
+            }
+            None => "Forgot the data source lists fetched this session (there's no cache on disk \
+                     in this session)"
+                .to_owned(),
+        };
+        self.user_config.inform(message);
     }
 
     /// The user settings file, warning if there's none.
@@ -842,6 +1004,58 @@ mod tests {
             "stac.example"
         );
         assert_eq!(default_stac_name(Some(""), "nonsense"), "STAC source");
+    }
+
+    fn recorder(cache: &StacCache) -> Recorder {
+        Recorder {
+            cache: Some(cache.clone()),
+            clock: crate::cache::system_clock(),
+            source: "https://s.example/".to_owned(),
+            listing: "https://s.example/items".to_owned(),
+            entries: Arc::new(Mutex::new(Some(Vec::new()))),
+        }
+    }
+
+    fn page(ids: std::ops::Range<usize>, more: bool) -> stac::Page {
+        stac::Page {
+            entries: ids
+                .map(|id| Entry::Unavailable {
+                    title: format!("{id}"),
+                    reason: String::new(),
+                })
+                .collect(),
+            more: more.then(stac::More::default),
+        }
+    }
+
+    #[test]
+    fn a_listing_should_be_cached_only_once_whole() {
+        let temp = tempfile::tempdir().unwrap();
+        let cache = StacCache::new(temp.path().to_path_buf(), crate::cache::system_clock());
+        let load = || cache.load("https://s.example/", "https://s.example/items");
+        let recorder = recorder(&cache);
+        recorder.add(&page(0..2, true));
+        assert_eq!(load(), None, "part of a list isn't kept");
+        recorder.add(&page(2..3, false));
+        let kept = load().expect("the whole list");
+        assert_eq!(kept.entries.len(), 3);
+        assert!(!kept.truncated);
+    }
+
+    #[test]
+    fn a_listing_should_be_cached_at_the_limit_and_not_again_after_it() {
+        let temp = tempfile::tempdir().unwrap();
+        let cache = StacCache::new(temp.path().to_path_buf(), crate::cache::system_clock());
+        let recorder = recorder(&cache);
+        recorder.add(&page(0..600, true));
+        recorder.add(&page(600..1200, true));
+        let load = || cache.load("https://s.example/", "https://s.example/items");
+        let kept = load().expect("as much as is fetched by itself");
+        assert_eq!(kept.entries.len(), 1200);
+        assert!(kept.truncated);
+        // "Load more…" past the limit doesn't grow it.
+        recorder.add(&page(1200..1300, false));
+        assert_eq!(load().unwrap().entries.len(), 1200);
     }
 
     #[test]
