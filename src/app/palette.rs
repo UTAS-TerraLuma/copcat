@@ -25,6 +25,12 @@
 //! - [`ItemAction::Local`] asks the provider showing it to do something to
 //!   its own list ([`Provider::act`]), such as fetching the next page.
 //!
+//! An item can also have a [`PaletteItem::preview`] command, run whenever
+//! the selection lands on it, and a provider can ask for a command to run
+//! when the palette leaves its list ([`Provider::leave`]): together they let
+//! the theme selector show each theme as the arrow keys reach it, and put
+//! back the one that was showing if nothing is chosen.
+//!
 //! A connector (a STAC catalog's collections, then a collection's items,
 //! then an item's COPC assets; or the files in a folder) is a provider whose
 //! items `Browse` into further providers, ending in items that
@@ -67,6 +73,12 @@ pub(crate) struct PaletteItem {
     pub(crate) action: ItemAction,
     /// The URL of a small picture to show at the left of the row.
     pub(crate) thumbnail: Option<String>,
+    /// Run when the selection moves onto the item, to show what choosing it
+    /// would do.
+    pub(crate) preview: Option<Command>,
+    /// What's in effect now, such as the theme showing: selected when the
+    /// list opens.
+    pub(crate) current: bool,
 }
 
 /// What choosing an item does.
@@ -137,6 +149,8 @@ impl PaletteItem {
             enabled: true,
             action,
             thumbnail: None,
+            preview: None,
+            current: false,
         }
     }
 
@@ -147,6 +161,16 @@ impl PaletteItem {
 
     pub(crate) fn with_thumbnail(mut self, url: Option<String>) -> Self {
         self.thumbnail = url;
+        self
+    }
+
+    pub(crate) fn with_preview(mut self, command: Command) -> Self {
+        self.preview = Some(command);
+        self
+    }
+
+    pub(crate) fn with_current(mut self, current: bool) -> Self {
+        self.current = current;
         self
     }
 
@@ -164,6 +188,8 @@ impl PaletteItem {
             enabled: (env.can_run)(&command),
             action,
             thumbnail: None,
+            preview: None,
+            current: false,
         }
     }
 }
@@ -226,6 +252,13 @@ pub(crate) trait Provider: Send {
     /// While more items are still being fetched in the background, how many
     /// have arrived.
     fn fetching(&self) -> Option<usize> {
+        None
+    }
+
+    /// A command to run as the palette leaves this list, whether by going
+    /// back, closing or choosing an item (whose command runs after it): to
+    /// undo what items' previews did.
+    fn leave(&mut self) -> Option<Command> {
         None
     }
 }
@@ -510,6 +543,12 @@ pub(crate) struct Palette {
     /// was set by the palette, not typed, so the cursor may be anywhere.
     cursor_to_end: bool,
     thumbnails: Thumbnails,
+    /// Previews, and providers' commands on leaving, to run in order before
+    /// any command chosen.
+    effects: Vec<Command>,
+    /// The preview last run, so it runs once each time the selection lands
+    /// on its item.
+    previewed: Option<Command>,
 }
 
 impl Palette {
@@ -520,7 +559,7 @@ impl Palette {
     /// Shows the palette at its root, in `mode`, with an empty filter.
     pub(crate) fn open(&mut self, mode: PaletteMode) {
         self.open = true;
-        self.levels.clear();
+        self.leave_levels();
         self.query = match mode {
             PaletteMode::Commands => ">".to_owned(),
             PaletteMode::Open => String::new(),
@@ -531,9 +570,42 @@ impl Palette {
 
     pub(crate) fn close(&mut self) {
         self.open = false;
-        self.levels.clear();
+        self.leave_levels();
         self.query.clear();
         self.selected_for = None;
+    }
+
+    /// Leaves every level above the root, top first.
+    fn leave_levels(&mut self) {
+        while let Some((level, _)) = self.levels.pop() {
+            self.leave(level);
+        }
+    }
+
+    /// Queues what `level`'s provider asks to run on leaving it.
+    fn leave(&mut self, level: Level) {
+        if let Level::Browse(mut provider) = level {
+            self.effects.extend(provider.leave());
+        }
+        self.previewed = None;
+    }
+
+    /// The previews and leaving commands queued since last asked, in order.
+    pub(crate) fn take_effects(&mut self) -> Vec<Command> {
+        std::mem::take(&mut self.effects)
+    }
+
+    /// Queues the selected item's preview, if the selection has just
+    /// landed on it.
+    fn preview_selected(&mut self, items: &[PaletteItem]) {
+        let preview = self
+            .selected
+            .and_then(|at| items.get(at))
+            .and_then(|item| item.preview.clone());
+        if preview.is_some() && preview != self.previewed {
+            self.effects.extend(preview.clone());
+        }
+        self.previewed = preview;
     }
 
     /// Offers `source` first among the recent sources.
@@ -628,9 +700,16 @@ impl Palette {
             .selected
             .is_none_or(|at| !view.items.get(at).is_some_and(|item| item.enabled));
         if stale || invalid {
-            self.selected = first_enabled(&view.items);
+            // The current item until something's typed, then the best match.
+            let current = view
+                .items
+                .iter()
+                .position(|item| item.current && item.enabled)
+                .filter(|_| self.query.trim().is_empty());
+            self.selected = current.or_else(|| first_enabled(&view.items));
             self.selected_for = Some(self.query.clone());
         }
+        self.preview_selected(&view.items);
         view
     }
 
@@ -638,6 +717,7 @@ impl Palette {
     pub(crate) fn move_selection(&mut self, items: &[PaletteItem], delta: isize) {
         self.selected = step_selection(items, self.selected, delta);
         self.scroll_to_selected = true;
+        self.preview_selected(items);
     }
 
     /// Chooses `item`: returns the command to run, if it runs one (closing
@@ -669,7 +749,8 @@ impl Palette {
     /// Esc: up a level, or closed at the root.
     pub(crate) fn back(&mut self) {
         match self.levels.pop() {
-            Some((_, query)) => {
+            Some((level, query)) => {
+                self.leave(level);
                 self.query = query;
                 self.selected_for = None;
                 self.cursor_to_end = true;
@@ -712,6 +793,8 @@ impl ViewerApp {
     /// Draws the palette, if it's open, and queues the command chosen in it.
     pub(super) fn palette_ui(&mut self, ctx: &egui::Context) {
         if !self.palette.is_open() {
+            // Closed by a command since: put back what it previewed.
+            self.pending.extend(self.palette.take_effects());
             return;
         }
         let mut palette = std::mem::take(&mut self.palette);
@@ -721,6 +804,9 @@ impl ViewerApp {
             keymap: &self.keymap,
         };
         let chosen = palette.show(ctx, &self.theme, &env);
+        // Previews and undoing them first, so a theme chosen wins over the
+        // one put back on leaving the list.
+        self.pending.extend(palette.take_effects());
         self.palette = palette;
         self.pending.extend(chosen);
     }
@@ -1012,6 +1098,7 @@ fn same_size_rows(ui: &mut egui::Ui) {
 mod tests {
     use super::*;
     use crate::app::Mode;
+    use crate::app::settings::ColorMode;
     use crate::camera::ViewPreset;
 
     fn env_with<'a>(can_run: &'a dyn Fn(&Command) -> bool, keymap: &'a Keymap) -> Env<'a> {
@@ -1504,6 +1591,113 @@ mod tests {
             let hover = Some(first[1].center());
             assert_eq!(row_rects(&theme, 2, hover), first, "{button_size} pt");
         }
+    }
+
+    /// Items that preview a colour mode each, the second current, putting
+    /// back RGB on leaving.
+    struct Previews;
+
+    impl Provider for Previews {
+        fn title(&self) -> String {
+            "Previews".to_owned()
+        }
+
+        fn items(&mut self, _query: &str, _env: &Env<'_>) -> Listing {
+            let modes = [ColorMode::Height, ColorMode::Rgb, ColorMode::Classification];
+            Listing::ready(
+                modes
+                    .into_iter()
+                    .map(|mode| {
+                        PaletteItem::new(format!("{mode:?}"), ItemAction::Run(Command::ResetView))
+                            .with_preview(Command::SetColorMode(mode))
+                            .with_current(mode == ColorMode::Rgb)
+                    })
+                    .collect(),
+            )
+        }
+
+        fn leave(&mut self) -> Option<Command> {
+            Some(Command::SetColorMode(ColorMode::Rgb))
+        }
+    }
+
+    fn previews() -> Palette {
+        let mut palette = Palette::default();
+        palette.open(PaletteMode::Open);
+        palette.browse(Box::new(Previews));
+        palette
+    }
+
+    #[test]
+    fn the_current_item_should_be_selected_and_previewed_once() {
+        let mut palette = previews();
+        view_of(&mut palette);
+        assert_eq!(palette.selected, Some(1));
+        view_of(&mut palette);
+        assert_eq!(
+            palette.take_effects(),
+            [Command::SetColorMode(ColorMode::Rgb)]
+        );
+    }
+
+    #[test]
+    fn moving_the_selection_should_preview_each_item_it_reaches() {
+        let mut palette = previews();
+        let view = view_of(&mut palette);
+        palette.take_effects();
+        palette.move_selection(&view.items, 1);
+        view_of(&mut palette);
+        palette.move_selection(&view.items, -2);
+        assert_eq!(
+            palette.take_effects(),
+            [
+                Command::SetColorMode(ColorMode::Classification),
+                Command::SetColorMode(ColorMode::Height),
+            ]
+        );
+    }
+
+    #[test]
+    fn leaving_a_list_should_run_its_leave_command() {
+        for leave in [Palette::back, Palette::close] {
+            let mut palette = previews();
+            view_of(&mut palette);
+            palette.take_effects();
+            leave(&mut palette);
+            assert_eq!(
+                palette.take_effects(),
+                [Command::SetColorMode(ColorMode::Rgb)]
+            );
+        }
+        // Reopening the palette leaves the list too.
+        let mut palette = previews();
+        palette.open(PaletteMode::Commands);
+        assert_eq!(
+            palette.take_effects(),
+            [Command::SetColorMode(ColorMode::Rgb)]
+        );
+    }
+
+    #[test]
+    fn choosing_should_leave_the_list_before_its_command_runs() {
+        let mut palette = previews();
+        let view = view_of(&mut palette);
+        palette.move_selection(&view.items, 1);
+        palette.take_effects();
+        assert_eq!(enter(&mut palette), Some(Command::ResetView));
+        assert_eq!(
+            palette.take_effects(),
+            [Command::SetColorMode(ColorMode::Rgb)]
+        );
+        assert!(!palette.is_open());
+    }
+
+    #[test]
+    fn typing_should_select_the_best_match_not_the_current_item() {
+        let mut palette = previews();
+        let view = type_text(&mut palette, "class");
+        assert_eq!(titles(&view.items), ["Classification"]);
+        assert_eq!(palette.selected, Some(0));
     }
 
     #[test]

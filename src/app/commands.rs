@@ -57,6 +57,12 @@ pub(crate) enum Command {
     QuickOpen,
     /// Open, reload or save the settings files.
     Settings(SettingsCommand),
+    /// Show the built-in theme with this id, for now: the theme selector
+    /// previews the theme under its selection with this.
+    PreviewTheme(&'static str),
+    /// Switch to the built-in theme with this id and save it to the user
+    /// settings file.
+    SetTheme(&'static str),
     /// Browse, add or remove data sources (connectors).
     Connector(ConnectorCommand),
 }
@@ -89,14 +95,17 @@ pub(crate) enum SettingsCommand {
     Reload,
     /// Write the display and performance settings into the user file.
     SaveDisplayDefaults,
+    /// List the themes in the palette, previewing the one selected.
+    SelectTheme,
 }
 
 impl SettingsCommand {
-    pub(crate) const ALL: [Self; 4] = [
+    pub(crate) const ALL: [Self; 5] = [
         Self::OpenUser,
         Self::OpenWorkspace,
         Self::Reload,
         Self::SaveDisplayDefaults,
+        Self::SelectTheme,
     ];
 }
 
@@ -269,7 +278,12 @@ impl Command {
                     "Save current display settings as defaults",
                     None,
                 ),
+                SettingsCommand::SelectTheme => {
+                    info("settings.select_theme", "Select theme…", None)
+                }
             },
+            Self::PreviewTheme(_) => info("settings.preview_theme", "Preview theme", None),
+            Self::SetTheme(_) => info("settings.set_theme", "Set theme", None),
             Self::Connector(command) => match command {
                 ConnectorCommand::AddStac => info("sources.add_stac", "Add STAC source…", None),
                 ConnectorCommand::AddFolder => {
@@ -372,6 +386,8 @@ mod tests {
     fn every_command() -> Vec<Command> {
         let mut commands = Command::all();
         commands.push(Command::OpenSource("site.copc.laz".to_owned()));
+        commands.push(Command::PreviewTheme("graphite-light"));
+        commands.push(Command::SetTheme("graphite-light"));
         commands.extend(
             [
                 ConnectorCommand::Browse("S".to_owned()),

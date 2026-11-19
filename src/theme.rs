@@ -1,6 +1,7 @@
 //! The viewer's look: every colour, font, size, gap and corner radius of the
-//! UI chrome, in one place. `Theme::default()` is Graphite, a dark theme with
-//! rounded panels over a near-black gutter.
+//! UI chrome, in one place. `Theme::default()` is Graphite Dark, with rounded
+//! panels over a near-black gutter; `Theme::graphite_light()` is its light
+//! counterpart. [`THEMES`] lists the built-in themes.
 //!
 //! This styles the chrome and the 3D view's background. The point colour
 //! ramps are data, set by the renderer.
@@ -59,7 +60,7 @@ pub struct Colors {
     /// The faintest text, such as the controls help. Only on panels and
     /// headers: it's too low in contrast on fields.
     pub text_tertiary: Color32,
-    /// Pressed and selected controls, selected text, and slider fills.
+    /// Selected controls, selected text, and slider fills.
     pub active: Color32,
     /// Text and marks drawn on `active`.
     pub active_ink: Color32,
@@ -80,6 +81,18 @@ pub struct Colors {
     pub data_green: Color32,
     /// The Z axis, and blue channels.
     pub data_blue: Color32,
+    /// A subcloud's shape and handles, on the map and while it's drawn in
+    /// the 3D view.
+    pub subcloud: Color32,
+    /// Text drawn on `subcloud`.
+    pub subcloud_ink: Color32,
+    /// The see-through backing behind `text` drawn over the 3D view.
+    pub overlay: Color32,
+    /// Widgets while pressed or dragged, such as a slider's handle.
+    pub pressed: Color32,
+    /// Strong text, spinners, and text on `pressed`. egui uses one colour
+    /// for all three.
+    pub strong_text: Color32,
 }
 
 /// The two typefaces and the text sizes.
@@ -158,10 +171,10 @@ pub struct Shape {
 }
 
 impl Default for Theme {
-    /// Graphite.
+    /// Graphite Dark.
     fn default() -> Self {
         Self {
-            name: "Graphite".to_owned(),
+            name: "Graphite Dark".to_owned(),
             colors: Colors {
                 gutter: Color32::from_rgb(0x0A, 0x0A, 0x0A),
                 panel: Color32::from_rgb(0x26, 0x26, 0x26),
@@ -188,6 +201,11 @@ impl Default for Theme {
                 data_red: Color32::from_rgb(0xE5, 0x67, 0x5A),
                 data_green: Color32::from_rgb(0x6C, 0xC0, 0x5A),
                 data_blue: Color32::from_rgb(0x6E, 0xA8, 0xFE),
+                subcloud: Color32::from_rgb(0xFF, 0xD2, 0x50),
+                subcloud_ink: Color32::BLACK,
+                overlay: Color32::from_black_alpha(160),
+                pressed: Color32::from_rgb(0x3F, 0x6F, 0xC4),
+                strong_text: Color32::from_rgb(0xFF, 0xFF, 0xFF),
             },
             fonts: Fonts {
                 ui: FontChoice {
@@ -231,9 +249,90 @@ impl Default for Theme {
     }
 }
 
-/// Every built-in theme: the name a settings file gives (lowercase), and
-/// how to make it. Adding a theme is one more entry.
-pub const THEMES: &[(&str, MakeTheme)] = &[("graphite", Theme::default)];
+impl Theme {
+    /// Graphite Light: Graphite's light counterpart, with the same fonts,
+    /// spacing and shapes. Light greys rather than an inverted Graphite, with
+    /// the accent, message and data colours darkened to read on them.
+    pub fn graphite_light() -> Self {
+        let dark = Self::default();
+        Self {
+            name: "Graphite Light".to_owned(),
+            colors: Colors {
+                gutter: Color32::from_rgb(0xD2, 0xD2, 0xD2),
+                panel: Color32::from_rgb(0xF2, 0xF2, 0xF2),
+                header: Color32::from_rgb(0xE6, 0xE6, 0xE6),
+                box_fill: Color32::from_rgb(0xE8, 0xE8, 0xE8),
+                // Light, to match the chrome, but mid enough that pale
+                // points and the eye-dome lighting's dark outlines both show.
+                viewport: Color32::from_rgb(0xC6, 0xC8, 0xCB),
+                control: Color32::from_rgb(0xFA, 0xFA, 0xFA),
+                field: Color32::from_rgb(0xFF, 0xFF, 0xFF),
+                // Darker than the box, as dark's is, to tell it from a field.
+                dropdown: Color32::from_rgb(0xD6, 0xD6, 0xD6),
+                dropdown_hover: Color32::from_rgb(0xCC, 0xCC, 0xCC),
+                hover: Color32::from_rgb(0xDA, 0xDA, 0xDA),
+                stroke: Color32::from_rgb(0xD6, 0xD6, 0xD6),
+                strong_stroke: Color32::from_rgb(0xAC, 0xAC, 0xAC),
+                text: Color32::from_rgb(0x1E, 0x1E, 0x1E),
+                text_secondary: Color32::from_rgb(0x55, 0x55, 0x55),
+                text_tertiary: Color32::from_rgb(0x69, 0x69, 0x69),
+                // A pale accent with dark text, as in light editors' lists:
+                // rows draw their titles in `text` whatever their state.
+                active: Color32::from_rgb(0xB4, 0xCC, 0xF0),
+                active_ink: Color32::from_rgb(0x11, 0x11, 0x11),
+                active_text: Color32::from_rgb(0x1F, 0x57, 0xB8),
+                selection: Color32::from_rgb(0xB3, 0x53, 0x00),
+                info: Color32::from_rgb(0x1F, 0x57, 0xB8),
+                warn: Color32::from_rgb(0x7A, 0x4F, 0x00),
+                error: Color32::from_rgb(0xA5, 0x1D, 0x16),
+                data_red: Color32::from_rgb(0xD9, 0x47, 0x3B),
+                data_green: Color32::from_rgb(0x3E, 0x9E, 0x2E),
+                data_blue: Color32::from_rgb(0x3F, 0x84, 0xE8),
+                // Graphite's yellow vanishes on light grey.
+                subcloud: Color32::from_rgb(0x96, 0x59, 0x06),
+                subcloud_ink: Color32::WHITE,
+                overlay: Color32::from_rgba_unmultiplied(0xF2, 0xF2, 0xF2, 224),
+                // Deeper than `active`. Pale, as egui draws strong text in
+                // the colour of text on it.
+                pressed: Color32::from_rgb(0x9D, 0xBC, 0xEB),
+                strong_text: Color32::from_rgb(0x00, 0x00, 0x00),
+            },
+            shape: Shape {
+                popup_shadow: Shadow {
+                    color: Color32::from_black_alpha(40),
+                    ..dark.shape.popup_shadow
+                },
+                ..dark.shape
+            },
+            ..dark
+        }
+    }
+}
+
+/// A built-in theme.
+#[derive(Clone, Copy, Debug)]
+pub struct BuiltInTheme {
+    /// What a settings file calls it: lowercase, words joined by `-`.
+    pub id: &'static str,
+    pub make: MakeTheme,
+}
+
+/// Every built-in theme, as the theme selector lists them. Adding a theme
+/// is one more entry.
+pub const THEMES: &[BuiltInTheme] = &[
+    BuiltInTheme {
+        id: "graphite-dark",
+        make: Theme::default,
+    },
+    BuiltInTheme {
+        id: "graphite-light",
+        make: Theme::graphite_light,
+    },
+];
+
+/// Old ids still read from settings files, and the theme each means.
+/// `graphite` was Graphite Dark's before there was a light theme.
+const ALIASES: &[(&str, &str)] = &[("graphite", "graphite-dark")];
 
 /// Builds a built-in theme.
 pub type MakeTheme = fn() -> Theme;
@@ -241,19 +340,47 @@ pub type MakeTheme = fn() -> Theme;
 impl Theme {
     /// The built-in theme a settings file calls `name`, ignoring case.
     pub fn by_name(name: &str) -> Option<Self> {
+        let name = name.trim();
+        let name = ALIASES
+            .iter()
+            .find(|(alias, _)| alias.eq_ignore_ascii_case(name))
+            .map_or(name, |(_, id)| id);
         THEMES
             .iter()
-            .find(|(known, _)| known.eq_ignore_ascii_case(name.trim()))
-            .map(|(_, make)| make())
+            .find(|theme| theme.id.eq_ignore_ascii_case(name))
+            .map(|theme| (theme.make)())
+    }
+
+    /// The id of the built-in theme this is, if it's one.
+    pub fn id(&self) -> Option<&'static str> {
+        THEMES
+            .iter()
+            .find(|theme| (theme.make)().name == self.name)
+            .map(|theme| theme.id)
+    }
+
+    /// Whether this is a dark theme, by its panels: egui's own defaults (and
+    /// the OS title bar) follow.
+    pub fn is_dark(&self) -> bool {
+        relative_luminance(self.colors.panel) < 0.5
     }
 
     /// Styles every widget, window and panel `ctx` draws from now on. Cheap
     /// enough to call again whenever the theme changes: fonts are only
     /// reloaded when the font choices differ from the last call's.
     pub fn apply(&self, ctx: &egui::Context) {
-        // Graphite is dark, and stays so whatever the OS prefers.
-        ctx.set_theme(egui::Theme::Dark);
-        ctx.set_style_of(egui::Theme::Dark, self.style());
+        // The theme's own darkness, whatever the OS prefers.
+        let egui_theme = if self.is_dark() {
+            egui::Theme::Dark
+        } else {
+            egui::Theme::Light
+        };
+        ctx.set_theme(egui_theme);
+        // Both of egui's styles, so this one shows even if something else
+        // later switches egui between them, as egui_kittest does.
+        let style = self.style();
+        ctx.set_style_of(egui::Theme::Dark, style.clone());
+        ctx.set_style_of(egui::Theme::Light, style);
         self.apply_fonts(ctx);
         ctx.data_mut(|data| data.insert_temp(colors_id(), self.colors.clone()));
     }
@@ -300,7 +427,13 @@ impl Theme {
         let c = &self.colors;
         let widget_radius = CornerRadius::same(self.shape.widget_radius);
         let panel_radius = CornerRadius::same(self.shape.panel_radius);
-        let mut visuals = egui::Visuals::dark();
+        // egui's defaults for what isn't set here (such as code backgrounds)
+        // follow the theme's darkness.
+        let mut visuals = if self.is_dark() {
+            egui::Visuals::dark()
+        } else {
+            egui::Visuals::light()
+        };
 
         let widgets = &mut visuals.widgets;
         // Labels, separators, grid lines and indent guides.
@@ -319,10 +452,10 @@ impl Theme {
         widgets.hovered.bg_stroke = Stroke::new(1.0, c.strong_stroke);
         widgets.hovered.fg_stroke.color = c.text;
         // Pressed, or focused by keyboard.
-        widgets.active.bg_fill = c.active;
-        widgets.active.weak_bg_fill = c.active;
+        widgets.active.bg_fill = c.pressed;
+        widgets.active.weak_bg_fill = c.pressed;
         widgets.active.bg_stroke = Stroke::new(1.0, c.active_text);
-        widgets.active.fg_stroke.color = c.active_ink;
+        widgets.active.fg_stroke.color = c.strong_text;
         // A combo box with its list open. egui also fills the topmost
         // window's title bar with `weak_bg_fill`, so it's the header colour.
         widgets.open.bg_fill = c.control;
@@ -458,6 +591,26 @@ fn colors_id() -> egui::Id {
     egui::Id::new("copcat_theme_colors")
 }
 
+/// WCAG's relative luminance of an opaque colour, from 0 (black) to 1.
+pub fn relative_luminance(color: Color32) -> f32 {
+    let linear = |channel: u8| {
+        let c = f32::from(channel) / 255.0;
+        if c <= 0.04045 {
+            c / 12.92
+        } else {
+            ((c + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    0.2126 * linear(color.r()) + 0.7152 * linear(color.g()) + 0.0722 * linear(color.b())
+}
+
+/// WCAG's contrast ratio between two opaque colours, from 1 to 21.
+#[cfg(test)]
+fn contrast_ratio(a: Color32, b: Color32) -> f32 {
+    let (a, b) = (relative_luminance(a), relative_luminance(b));
+    (a.max(b) + 0.05) / (a.min(b) + 0.05)
+}
+
 /// The same margin on every side, rounded to whole points as egui wants.
 fn margin(points: f32) -> Margin {
     Margin::same(points.round() as i8)
@@ -497,17 +650,134 @@ mod tests {
     }
 
     #[test]
-    fn themes_should_be_found_by_name_ignoring_case() {
-        assert_eq!(Theme::by_name("Graphite").unwrap().name, "Graphite");
-        assert!(Theme::by_name("solarized").is_none());
+    fn every_theme_should_be_found_by_its_id() {
+        for theme in THEMES {
+            let found = Theme::by_name(theme.id).expect(theme.id);
+            assert_eq!(found, (theme.make)());
+            assert_eq!(found.id(), Some(theme.id));
+            assert_eq!(Theme::by_name(&theme.id.to_uppercase()), Some(found));
+        }
     }
 
     #[test]
-    fn theme_names_should_be_lowercase_and_match_their_theme() {
-        for (name, make) in THEMES {
-            assert_eq!(*name, name.to_lowercase());
-            assert_eq!(make().name.to_lowercase(), *name);
+    fn graphite_should_still_mean_graphite_dark() {
+        assert_eq!(Theme::by_name("graphite"), Some(Theme::default()));
+        assert_eq!(Theme::by_name(" Graphite "), Some(Theme::default()));
+    }
+
+    #[test]
+    fn an_unknown_theme_should_not_be_found() {
+        assert!(Theme::by_name("solarized").is_none());
+        assert!(Theme::by_name("").is_none());
+    }
+
+    #[test]
+    fn theme_ids_should_be_lowercase_words_and_follow_their_names() {
+        for theme in THEMES {
+            let name = (theme.make)().name;
+            assert_eq!(theme.id, name.to_lowercase().replace(' ', "-"));
         }
+    }
+
+    #[test]
+    fn graphite_dark_should_be_the_default_and_dark() {
+        assert_eq!(THEMES[0].id, "graphite-dark");
+        assert!(Theme::default().is_dark());
+        assert!(!Theme::graphite_light().is_dark());
+    }
+
+    /// Fails with every pair below `min`: (what, on what, ratio).
+    fn check_contrast(theme: &Theme, min: f32, pairs: &[(&str, Color32, &str, Color32)]) {
+        let low: Vec<_> = pairs
+            .iter()
+            .map(|&(fg_name, fg, bg_name, bg)| (fg_name, bg_name, contrast_ratio(fg, bg)))
+            .filter(|&(.., ratio)| ratio < min)
+            .collect();
+        assert!(low.is_empty(), "{}: below {min}:1: {low:?}", theme.name);
+    }
+
+    #[test]
+    fn text_should_meet_wcag_aa_contrast_in_every_theme() {
+        for built_in in THEMES {
+            let theme = (built_in.make)();
+            let c = &theme.colors;
+            let backgrounds = [
+                ("panel", c.panel),
+                ("header", c.header),
+                ("box", c.box_fill),
+                ("field", c.field),
+                ("control", c.control),
+            ];
+            // Body and secondary text: 4.5:1 wherever text sits.
+            let mut body = Vec::new();
+            for (bg_name, bg) in backgrounds {
+                for (fg_name, fg) in [("text", c.text), ("text_secondary", c.text_secondary)] {
+                    body.push((fg_name, fg, bg_name, bg));
+                }
+            }
+            body.push(("text", c.text, "hover", c.hover));
+            body.push(("active_ink", c.active_ink, "active", c.active));
+            body.push(("strong_text", c.strong_text, "pressed", c.pressed));
+            for (bg_name, bg) in backgrounds {
+                body.push(("strong_text", c.strong_text, bg_name, bg));
+            }
+            // The status bar's text sits on the gutter.
+            body.push(("text_secondary", c.text_secondary, "gutter", c.gutter));
+            // Links on panels and in settings boxes.
+            for (bg_name, bg) in [("panel", c.panel), ("box", c.box_fill)] {
+                body.push(("active_text", c.active_text, bg_name, bg));
+            }
+            // Messages: the settings bar is a header, the status bar the
+            // gutter, and errors also show on panels.
+            for (bg_name, bg) in [
+                ("panel", c.panel),
+                ("header", c.header),
+                ("gutter", c.gutter),
+            ] {
+                body.push(("warn", c.warn, bg_name, bg));
+                body.push(("error", c.error, bg_name, bg));
+            }
+            check_contrast(&theme, 4.5, &body);
+
+            // Secondary UI: 3:1. The faintest text is only on panels and
+            // headers; messages also show in settings boxes.
+            check_contrast(
+                &theme,
+                3.0,
+                &[
+                    ("text_tertiary", c.text_tertiary, "panel", c.panel),
+                    ("text_tertiary", c.text_tertiary, "header", c.header),
+                    ("warn", c.warn, "box", c.box_fill),
+                    ("error", c.error, "box", c.box_fill),
+                    // The palette draws the selected row's title in `text`.
+                    // Graphite Dark's is 3.8:1 (and its detail, in
+                    // `text_secondary`, 2.1:1).
+                    ("text", c.text, "active", c.active),
+                ],
+            );
+            // Graphics on the 3D view: the gizmo's black letters on the axis
+            // colours, and the subcloud's labels.
+            let mut marks: Vec<_> = theme
+                .axis_colors()
+                .into_iter()
+                .map(|axis| ("gizmo letter", Color32::BLACK, "axis", axis))
+                .collect();
+            marks.push(("subcloud_ink", c.subcloud_ink, "subcloud", c.subcloud));
+            check_contrast(&theme, 4.5, &marks);
+        }
+    }
+
+    #[test]
+    fn the_subcloud_should_stand_out_from_the_light_viewport() {
+        let c = Theme::graphite_light().colors;
+        assert!(contrast_ratio(c.subcloud, c.viewport) >= 3.0);
+    }
+
+    #[test]
+    fn contrast_ratio_should_match_wcag() {
+        let ratio = contrast_ratio(Color32::BLACK, Color32::WHITE);
+        assert!((ratio - 21.0).abs() < 1e-3, "{ratio}");
+        assert_eq!(contrast_ratio(Color32::RED, Color32::RED), 1.0);
     }
 
     #[test]
