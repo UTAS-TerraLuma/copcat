@@ -3,9 +3,8 @@
 ## Icon
 
 `icon.png` (256 px) and `icon.ico` (16, 24, 32, 48, 64, 128 and 256 px, each
-stored as a PNG) are Copcat's icon: a cat's head drawn as points coloured by
-height, blue at the chin up to amber at the ear tips, on a dark rounded square.
-Below 48 px the cat is drawn solid, since the points would blur together.
+stored as a PNG) are Copcat's icon, a placeholder for now: three points
+coloured like a height ramp (blue, teal and amber) on a dark rounded square.
 
 Both are generated, not drawn by hand. To change the icon, edit
 `examples/make_icon.rs` and run:
