@@ -44,9 +44,10 @@ copcat open path/to/cloud.copc.laz
 copcat open https://example.com/cloud.copc.laz
 ```
 
-You can also start `copcat-viewer` on its own and use **Open…** in its toolbar to
-choose a file (Ctrl+O) or type a URL (Ctrl+L), or press Ctrl+P to browse a STAC
-catalog or a folder of clouds (see [Data sources](#data-sources)).
+Or run `copcat` on its own to open an empty viewer window, then use **Open…** in
+its toolbar to choose a file (Ctrl+O) or type a URL (Ctrl+L), or press Ctrl+P to
+browse a STAC catalog or a folder of clouds (see [Data sources](#data-sources)).
+Starting `copcat-viewer` directly does the same.
 
 ## Elevation and height above ground
 

@@ -10,17 +10,22 @@ use std::process::{Command, ExitCode, Stdio};
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
-#[command(version, about = "Command line for the Copcat point cloud viewer")]
+#[command(
+    version,
+    about = "Command line for the Copcat point cloud viewer",
+    after_help = "With no command, opens an empty viewer window, like `copcat open`."
+)]
 struct Cli {
     #[command(subcommand)]
-    command: Commands,
+    command: Option<Commands>,
 }
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Open a COPC point cloud (a URL or a file path) in a new viewer window.
+    /// Open a COPC point cloud (a URL or a file path) in a new viewer window,
+    /// or an empty window to open one from.
     Open {
-        source: String,
+        source: Option<String>,
         #[command(flatten)]
         heights: copcat::HeightSettings,
     },
@@ -35,9 +40,10 @@ enum Commands {
 
 fn main() -> ExitCode {
     let result = match Cli::parse().command {
-        Commands::Open { source, heights } => open(&source, &heights),
-        Commands::Render(args) => copcat::render(&args),
-        Commands::Update => update(),
+        None => open(None, &copcat::HeightSettings::default()),
+        Some(Commands::Open { source, heights }) => open(source.as_deref(), &heights),
+        Some(Commands::Render(args)) => copcat::render(&args),
+        Some(Commands::Update) => update(),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -48,11 +54,14 @@ fn main() -> ExitCode {
     }
 }
 
-/// Starts `copcat-viewer` on `source` and returns without waiting for it.
-fn open(source: &str, heights: &copcat::HeightSettings) -> Result<(), String> {
+/// Starts `copcat-viewer`, on `source` if there is one, and returns without
+/// waiting for it.
+fn open(source: Option<&str>, heights: &copcat::HeightSettings) -> Result<(), String> {
     let viewer = sibling_path("copcat-viewer")?;
     let mut command = Command::new(&viewer);
-    command.arg(source);
+    if let Some(source) = source {
+        command.arg(source);
+    }
     // `=` so a dimension name can't be read as a flag.
     command.arg(format!("--elevation={}", heights.elevation));
     command.arg(format!("--hag={}", heights.hag));
@@ -79,7 +88,10 @@ fn open(source: &str, heights: &copcat::HeightSettings) -> Result<(), String> {
     let child = command
         .spawn()
         .map_err(|e| format!("couldn't start {}: {e}", viewer.display()))?;
-    println!("Opened {source} in the viewer (pid {}).", child.id());
+    match source {
+        Some(source) => println!("Opened {source} in the viewer (pid {}).", child.id()),
+        None => println!("Opened the viewer (pid {}).", child.id()),
+    }
     Ok(())
 }
 
