@@ -153,7 +153,13 @@ fn launcher_dir(env: Env, home: &Path) -> Option<PathBuf> {
 #[cfg(any(test, windows))]
 fn start_menu_dir(env: Env) -> Option<PathBuf> {
     let appdata = PathBuf::from(env("APPDATA")?);
-    Some(appdata.join(r"Microsoft\Windows\Start Menu\Programs"))
+    Some(
+        appdata
+            .join("Microsoft")
+            .join("Windows")
+            .join("Start Menu")
+            .join("Programs"),
+    )
 }
 
 fn remove_files(files: &[PathBuf]) -> Result<Vec<PathBuf>, String> {

@@ -30,9 +30,15 @@ fn the_start_menu_is_under_appdata() {
     let env = env_of(&[("APPDATA", r"C:\Users\me\AppData\Roaming")]);
     assert_eq!(
         start_menu_dir(&env),
-        Some(PathBuf::from(
-            r"C:\Users\me\AppData\Roaming\Microsoft\Windows\Start Menu\Programs"
-        ))
+        // Joined part by part, so the test also holds where it runs with
+        // `/` between them (Linux CI).
+        Some(
+            Path::new(r"C:\Users\me\AppData\Roaming")
+                .join("Microsoft")
+                .join("Windows")
+                .join("Start Menu")
+                .join("Programs")
+        )
     );
     assert_eq!(start_menu_dir(&env_of(&[])), None);
 }
