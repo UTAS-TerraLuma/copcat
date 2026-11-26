@@ -656,6 +656,16 @@ impl Palette {
         self.cursor_to_end = true;
     }
 
+    /// Shows the palette asking for `prompt`'s text, above open mode's
+    /// root, as choosing an item that prompts would.
+    pub(crate) fn ask(&mut self, prompt: ArgPrompt) {
+        self.open(PaletteMode::Open);
+        self.levels
+            .push((Level::Prompt(prompt), std::mem::take(&mut self.query)));
+        self.selected_for = None;
+        self.cursor_to_end = true;
+    }
+
     /// Whether a sub-list or prompt is showing.
     pub(crate) fn is_drilled_in(&self) -> bool {
         !self.levels.is_empty()
@@ -1478,6 +1488,20 @@ mod tests {
             Some(Command::OpenSource(
                 "https://example.com/a.copc.laz".to_owned()
             ))
+        );
+        assert!(!palette.is_open());
+    }
+
+    #[test]
+    fn ask_should_open_straight_into_a_prompt() {
+        let mut palette = Palette::default();
+        palette.ask(OPEN_URL_PROMPT);
+        assert!(palette.is_open());
+        assert_eq!(palette.breadcrumb().as_deref(), Some("Open URL"));
+        type_text(&mut palette, " \"C:\\data\\site 1.copc.laz\" ");
+        assert_eq!(
+            enter(&mut palette),
+            Some(Command::OpenSource(r"C:\data\site 1.copc.laz".to_owned()))
         );
         assert!(!palette.is_open());
     }

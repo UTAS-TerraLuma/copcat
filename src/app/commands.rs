@@ -25,8 +25,11 @@ pub(crate) enum Command {
     OpenSource(String),
     /// Choose a file to open.
     OpenFileDialog,
-    /// Type a URL or path to open.
+    /// Type a URL or path to open, in the command palette.
     OpenUrlDialog,
+    /// List the data sources in the command palette, to browse one or add
+    /// a STAC source.
+    BrowseSources,
     /// Switch modes. Subcloud mode returns to the last subcloud drawn.
     SetMode(Mode),
     /// Pick a subcloud tool: the next drag on the explore view draws this
@@ -34,6 +37,9 @@ pub(crate) enum Command {
     SubcloudTool(ShapeKind),
     /// Put the subcloud tool down without drawing.
     CancelSubcloudTool,
+    /// Drop the subcloud and go back to Explore mode, its camera where it
+    /// was.
+    CloseSubcloud,
     /// Look along one of the 3D view camera's axes.
     SetView(ViewPreset),
     SetProjection(Projection),
@@ -76,8 +82,6 @@ pub(crate) enum ConnectorCommand {
     AddFolder,
     /// Choose a data source to remove from the user settings.
     Remove,
-    /// Show the data source with this name in the palette.
-    Browse(String),
     /// Add a data source to the user settings file.
     Save(NewSource),
     /// Remove the data source with this name from the user settings file.
@@ -149,11 +153,12 @@ impl Command {
         let mut commands = vec![
             Self::OpenFileDialog,
             Self::OpenUrlDialog,
+            Self::BrowseSources,
             Self::SetMode(Mode::Explore),
             Self::SetMode(Mode::Subcloud),
         ];
         commands.extend(ShapeKind::ALL.map(Self::SubcloudTool));
-        commands.push(Self::CancelSubcloudTool);
+        commands.extend([Self::CancelSubcloudTool, Self::CloseSubcloud]);
         commands.extend(ViewPreset::ALL.map(Self::SetView));
         commands.extend([
             Self::SetProjection(Projection::Perspective),
@@ -203,6 +208,7 @@ impl Command {
             Self::OpenSource(_) => info("file.open_source", "Open source", None),
             Self::OpenFileDialog => info("file.open", "Open file…", command_key(Key::O)),
             Self::OpenUrlDialog => info("file.open_url", "Open URL…", command_key(Key::L)),
+            Self::BrowseSources => info("sources.list", "Browse data sources…", None),
             Self::SetMode(Mode::Explore) => info("mode.explore", "Explore mode", None),
             Self::SetMode(Mode::Subcloud) => info("mode.subcloud", "Return to the subcloud", None),
             Self::SubcloudTool(ShapeKind::Line) => {
@@ -218,6 +224,7 @@ impl Command {
             Self::CancelSubcloudTool => {
                 info("subcloud.cancel_tool", "Cancel the subcloud tool", None)
             }
+            Self::CloseSubcloud => info("subcloud.close", "Close the subcloud", None),
             // Numpad-style view keys, as in Blender, with Ctrl for the
             // opposite view.
             Self::SetView(preset) => match preset {
@@ -296,7 +303,6 @@ impl Command {
                 ConnectorCommand::ClearCache => {
                     info("sources.clear_cache", "Clear data source cache", None)
                 }
-                ConnectorCommand::Browse(_) => info("sources.browse", "Browse data source", None),
                 ConnectorCommand::Save(_) => info("sources.save", "Save data source", None),
                 ConnectorCommand::Delete(..) => info("sources.delete", "Delete data source", None),
             },
@@ -396,7 +402,6 @@ mod tests {
         commands.push(Command::SetTheme("graphite-light"));
         commands.extend(
             [
-                ConnectorCommand::Browse("S".to_owned()),
                 ConnectorCommand::Save(NewSource {
                     name: "S".to_owned(),
                     kind: super::super::connectors::SourceKind::Stac("https://s/".to_owned()),

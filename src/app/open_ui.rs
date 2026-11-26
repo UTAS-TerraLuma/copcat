@@ -1,11 +1,10 @@
-//! Opening a cloud: the toolbar's Open menu, the idle screen's buttons, the
-//! file dialog and the Open URL dialog. Each asks for a [`Command`] rather
-//! than opening anything itself.
+//! Opening a cloud: the menu bar, the idle screen's buttons and the file
+//! dialog. Each asks for a [`Command`] rather than opening anything itself;
+//! a URL is asked for in the command palette.
 
 use eframe::egui;
 
-use super::commands::{Command, ConnectorCommand, Keymap};
-use super::connectors::{DataSource, SourceKind};
+use super::commands::{Command, Keymap};
 
 /// What the file dialog offers. COPC files end `.copc.laz`, which the
 /// dialog can't match as one extension, so it shows every `.laz`.
@@ -17,52 +16,65 @@ pub(crate) fn command_button(
     keymap: &Keymap,
     command: &Command,
 ) -> egui::Response {
-    let mut button = egui::Button::new(command.title());
+    titled_button(ui, keymap, command.title(), command)
+}
+
+/// The menu bar along the top of the window: File, for `.copcat` files
+/// still to come, and Open, which opens a file or URL or browses the data
+/// sources.
+pub(crate) fn menu_bar(ui: &mut egui::Ui, keymap: &Keymap, commands: &mut Vec<Command>) {
+    egui::MenuBar::new().ui(ui, |ui| {
+        ui.menu_button("File", |ui| {
+            let later = "Coming later: a .copcat file will keep a view, the cloud and its \
+                         settings, to open again";
+            for title in ["Open .copcat file…", "Save .copcat file…"] {
+                ui.add_enabled(false, egui::Button::new(title))
+                    .on_disabled_hover_text(later);
+            }
+        });
+        ui.menu_button("Open", |ui| {
+            let items = [
+                (
+                    "From file…",
+                    Command::OpenFileDialog,
+                    "Choose a COPC file on disk",
+                ),
+                (
+                    "From URL…",
+                    Command::OpenUrlDialog,
+                    "Paste the URL or path of a COPC file",
+                ),
+                (
+                    "From STAC…",
+                    Command::BrowseSources,
+                    "Browse a data source to a cloud, or add a STAC catalog",
+                ),
+            ];
+            for (title, command, hover) in items {
+                if titled_button(ui, keymap, title, &command)
+                    .on_hover_text(hover)
+                    .clicked()
+                {
+                    commands.push(command);
+                    ui.close();
+                }
+            }
+        });
+    });
+}
+
+/// A button titled `title` for `command`, with the command's shortcut.
+fn titled_button(
+    ui: &mut egui::Ui,
+    keymap: &Keymap,
+    title: &str,
+    command: &Command,
+) -> egui::Response {
+    let mut button = egui::Button::new(title);
     if let Some(shortcut) = keymap.shortcut(command.id()) {
         button = button.shortcut_text(ui.ctx().format_shortcut(&shortcut));
     }
     ui.add(button)
-}
-
-/// The toolbar's Open menu: open a file or URL, or browse a data source in
-/// the palette.
-pub(crate) fn open_menu(
-    ui: &mut egui::Ui,
-    keymap: &Keymap,
-    sources: &[DataSource],
-    commands: &mut Vec<Command>,
-) {
-    ui.menu_button("Open…", |ui| {
-        for command in [Command::OpenFileDialog, Command::OpenUrlDialog] {
-            if command_button(ui, keymap, &command).clicked() {
-                commands.push(command);
-                ui.close();
-            }
-        }
-        ui.separator();
-        ui.label(egui::RichText::new("Data sources").weak());
-        for source in sources {
-            let kind = match source.kind {
-                SourceKind::Stac(_) => "STAC",
-                SourceKind::Folder(_) => "Folder",
-            };
-            let button = egui::Button::new(&source.name).shortcut_text(kind);
-            if ui.add(button).clicked() {
-                commands.push(Command::Connector(ConnectorCommand::Browse(
-                    source.name.clone(),
-                )));
-                ui.close();
-            }
-        }
-        for command in [ConnectorCommand::AddStac, ConnectorCommand::AddFolder] {
-            if command_button(ui, keymap, &Command::Connector(command.clone())).clicked() {
-                commands.push(Command::Connector(command));
-                ui.close();
-            }
-        }
-    })
-    .response
-    .on_hover_text("Open a COPC file, stream one from a URL, or browse a data source");
 }
 
 /// What the main area shows before a cloud is open: how to open one.
@@ -89,48 +101,6 @@ pub(crate) fn pick_file() -> Option<String> {
         .add_filter("All files", &["*"])
         .pick_file()
         .map(|path| path.display().to_string())
-}
-
-/// The Open URL dialog, while `text` is `Some`. Returns the command to
-/// open what was typed, once the user asks to, and closes the dialog then
-/// or when it's cancelled.
-pub(crate) fn url_dialog(ctx: &egui::Context, text: &mut Option<String>) -> Option<Command> {
-    let typed = text.as_mut()?;
-    let mut open = None;
-    let mut cancel = false;
-    let modal = egui::Modal::new(egui::Id::new("open_url_dialog")).show(ctx, |ui| {
-        ui.set_width(480.0_f32.min(ctx.content_rect().width() - 64.0));
-        ui.heading("Open URL");
-        let label = ui.label("COPC URL or file path");
-        let field = ui
-            .add(
-                egui::TextEdit::singleline(typed)
-                    .hint_text("https://… or C:\\path\\to\\file.copc.laz")
-                    .desired_width(f32::INFINITY),
-            )
-            .labelled_by(label.id);
-        // Ready to type into as soon as it opens.
-        if ui.memory(|memory| memory.focused().is_none()) {
-            field.request_focus();
-        }
-        let entered = field.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
-        let source = clean_source(typed);
-        ui.horizontal(|ui| {
-            let open_clicked = ui
-                .add_enabled(source.is_some(), egui::Button::new("Open"))
-                .clicked();
-            if (open_clicked || entered)
-                && let Some(source) = source
-            {
-                open = Some(Command::OpenSource(source));
-            }
-            cancel = ui.button("Cancel").clicked();
-        });
-    });
-    if open.is_some() || cancel || modal.should_close() {
-        *text = None;
-    }
-    open
 }
 
 /// `text` as a source to open: trimmed, and without the quotes a copied

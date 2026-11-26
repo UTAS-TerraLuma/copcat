@@ -7,10 +7,13 @@ use crate::camera::OrbitCamera;
 use crate::lod;
 use crate::subcloud::{self, ShapeKind, Subcloud};
 use crate::subcloud_map::{MapFrame, SubcloudMap};
+use crate::theme::Theme;
 
 use super::camera_input::camera_controls;
+use super::commands::Command;
 use super::scene::{Scene, ViewArea, show_gizmo};
 use super::session::Views;
+use super::tool_strip::{Icon, icon_button};
 
 /// Subcloud mode's state, which lasts while the cloud is open.
 pub(crate) struct SubcloudMode {
@@ -71,8 +74,15 @@ impl SubcloudMode {
         self.reframe = Some(Reframe::Aim);
     }
 
-    /// The left panel: subcloud settings above the map.
-    pub(crate) fn map_panel(&mut self, ui: &mut egui::Ui) -> MapFrame {
+    /// The left panel: subcloud settings above the map, and a button at
+    /// its top right to close the subcloud, which pushes
+    /// [`Command::CloseSubcloud`] to `commands`.
+    pub(crate) fn map_panel(
+        &mut self,
+        ui: &mut egui::Ui,
+        theme: &Theme,
+        commands: &mut Vec<Command>,
+    ) -> MapFrame {
         ui.horizontal(|ui| {
             ui.label("Shape");
             for shape in ShapeKind::ALL {
@@ -84,6 +94,16 @@ impl SubcloudMode {
                     self.reframe = Some(Reframe::Fit);
                 }
             }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let side = ui.spacing().interact_size.y;
+                let close = Command::CloseSubcloud;
+                if icon_button(ui, theme, side, Icon::Close, close.title())
+                    .on_hover_text(close.title())
+                    .clicked()
+                {
+                    commands.push(close);
+                }
+            });
         });
         self.shape_controls(ui);
 

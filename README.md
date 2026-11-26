@@ -44,9 +44,10 @@ copcat open path/to/cloud.copc.laz
 copcat open https://example.com/cloud.copc.laz
 ```
 
-Or run `copcat` on its own to open an empty viewer window, then use **Open…** in
-its toolbar to choose a file (Ctrl+O) or type a URL (Ctrl+L), or press Ctrl+P to
-browse a STAC catalog or a folder of clouds (see [Data sources](#data-sources)).
+Or run `copcat` on its own to open an empty viewer window, then use the **Open**
+menu to choose a file (**From file…**, Ctrl+O), paste a URL (**From URL…**, Ctrl+L)
+or browse a STAC catalog or a folder of clouds (**From STAC…**, or Ctrl+P; see
+[Data sources](#data-sources)).
 Starting `copcat-viewer` directly does the same.
 
 ## Elevation and height above ground
@@ -179,9 +180,11 @@ commands are:
 | --- | --- | --- |
 | `file.open` | Open file… | Ctrl+O |
 | `file.open_url` | Open URL… | Ctrl+L |
+| `sources.list` | Browse data sources… | |
 | `mode.explore`, `mode.subcloud` | Explore or Subcloud mode | |
 | `subcloud.tool_line`, `subcloud.tool_circle`, `subcloud.tool_square` | Draw a line, circle or square subcloud | |
 | `subcloud.cancel_tool` | Cancel the subcloud tool | Esc while a tool is picked |
+| `subcloud.close` | Close the subcloud, back to Explore mode | |
 | `view.top`, `view.bottom` | View from top, bottom | 7, Ctrl+7 |
 | `view.front`, `view.back` | View from front, back | 1, Ctrl+1 |
 | `view.right`, `view.left` | View from right, left | 3, Ctrl+3 |
@@ -240,7 +243,8 @@ Data sources (connectors) let you browse to a cloud without leaving the viewer. 
 Ctrl+P (quick open): each source is listed by name, marked **STAC source** or
 **Folder source**. Choose one to browse into it, type to filter, and press Enter on a
 cloud to open it. Esc, or Backspace in an empty field, goes back up a level. The
-**Open…** menu lists the sources too, and opens quick open at the one you pick.
+**Open > From STAC…** menu item lists the sources too, with **Add STAC source…**
+at the foot.
 
 - **STAC sources** browse a [STAC](https://stacspec.org) catalog: its catalogs and
   collections, then their items, showing each item's title and date. Choosing an item
@@ -298,8 +302,8 @@ list stays, with a note saying how old it is, such as "Offline: showing the list
 
 Copcat started without a settings directory (as in its tests) keeps nothing on disk.
 
-Add and remove sources from the command palette (Ctrl+Shift+P), or from the
-**Open…** menu. These change your user settings file, keeping its other keys (it's
+Add and remove sources from the command palette (Ctrl+Shift+P); **Open > From
+STAC…** can add a STAC source too. These change your user settings file, keeping its other keys (it's
 rewritten as plain JSON, so comments are lost), and take effect at once:
 
 - **Add STAC source…** asks for the catalog's URL, checks it's a STAC catalog, then

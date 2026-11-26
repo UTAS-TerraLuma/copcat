@@ -20,6 +20,7 @@ use crate::theme::Theme;
 
 use super::scene::ViewArea;
 use super::session::Session;
+use super::tool_strip::STRIP_RESERVED_WIDTH;
 
 /// Points around the circle drawn as a preview.
 const CIRCLE_SEGMENTS: usize = 64;
@@ -144,7 +145,8 @@ impl SubcloudTool {
             ShapeKind::Square => "Drag on the cloud to draw a square: from its centre to its edge",
         };
         let font = egui::TextStyle::Body.resolve(ui.style());
-        let text_pos = area.rect.left_top() + egui::vec2(12.0, 12.0);
+        // Right of the tools' strip.
+        let text_pos = area.rect.left_top() + egui::vec2(STRIP_RESERVED_WIDTH + 12.0, 12.0);
         let galley = painter.layout_no_wrap(
             format!("{hint} · Esc: cancel"),
             font.clone(),

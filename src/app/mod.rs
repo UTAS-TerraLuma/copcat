@@ -11,7 +11,9 @@
 //! - [`subcloud_mode`]: Subcloud mode's map panel and 3D view.
 //! - [`subcloud_tool`]: drawing a subcloud on the explore view.
 //! - [`export_ui`]: the Save image section and its job.
-//! - [`open_ui`]: the Open menu and the Open URL dialog.
+//! - [`open_ui`]: the menu bar, and opening a file.
+//! - [`tool_strip`]: the subcloud tools floating over the explore view, and
+//!   icon buttons.
 //! - [`connectors`]: data sources (STAC catalogs and folders) to browse to
 //!   clouds in, and [`feed`], their listings fetched in the background.
 //! - [`palette`]: the command palette (Ctrl+Shift+P) and quick open (Ctrl+P).
@@ -34,6 +36,7 @@ mod subcloud_mode;
 mod subcloud_tool;
 mod thumbnails;
 mod toasts;
+mod tool_strip;
 mod user_config;
 
 use std::mem;
@@ -50,7 +53,7 @@ use crate::heights::{HeightKind, HeightSettings};
 use crate::loader::{Event, Loader};
 use crate::lod::{self, Octree};
 use crate::renderer::PointRenderer;
-use crate::subcloud::{self, Footprint, ShapeKind, Subcloud};
+use crate::subcloud::{self, Footprint, Subcloud};
 use crate::theme::Theme;
 
 use commands::{Command, Keymap};
@@ -95,8 +98,6 @@ pub struct ViewerApp {
     /// Commands asked for this frame, by buttons and shortcuts. They run
     /// together once the frame is laid out, when the 3D view's size is known.
     pending: Vec<Command>,
-    /// The Open URL dialog's text, while it's showing.
-    url_dialog: Option<String>,
     /// The command palette, and the sources opened this session.
     palette: Palette,
     /// Makes the data sources' listings, and keeps them for the session.
@@ -108,7 +109,8 @@ pub struct ViewerApp {
     view_size_px: [u32; 2],
 }
 
-/// What the main area shows. Switched from the top bar.
+/// What the main area shows. Switched from the command palette, by drawing a
+/// subcloud, or by closing it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum Mode {
     /// The whole cloud in one 3D view.
@@ -181,7 +183,6 @@ impl ViewerApp {
             keymap: Keymap::default(),
             user_config: UserConfig::new(config_locations),
             pending: Vec::new(),
-            url_dialog: None,
             palette,
             connector_hub: ConnectorHub::new(cc.egui_ctx.clone(), caches, cache::system_clock()),
             sources: Vec::new(),
@@ -266,67 +267,6 @@ impl ViewerApp {
         }
     }
 
-    /// The toolbar: the modes, the subcloud tools and the Open menu.
-    fn top_bar(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
-            let is_open = matches!(self.state, LoadState::Open(_));
-            ui.add_enabled_ui(is_open, |ui| {
-                let explore = ui
-                    .selectable_label(self.mode == Mode::Explore, "Explore")
-                    .on_hover_text("Look around the whole cloud");
-                if explore.clicked() {
-                    self.pending.push(Command::SetMode(Mode::Explore));
-                }
-                let subcloud = ui
-                    .add_enabled(
-                        self.subcloud.is_some(),
-                        egui::Button::selectable(self.mode == Mode::Subcloud, "Subcloud"),
-                    )
-                    .on_hover_text("Back to the subcloud you drew last")
-                    .on_disabled_hover_text(
-                        "Draw a subcloud first: pick Line, Circle or Square, then drag on \
-                         the cloud",
-                    );
-                if subcloud.clicked() {
-                    self.pending.push(Command::SetMode(Mode::Subcloud));
-                }
-                // Subcloud mode has its own shape buttons on the map.
-                if self.mode == Mode::Explore {
-                    ui.separator();
-                    self.tool_buttons(ui);
-                }
-            });
-            ui.separator();
-            open_ui::open_menu(ui, &self.keymap, &self.sources, &mut self.pending);
-        });
-    }
-
-    /// Line, Circle and Square: pick one, then drag on the explore view to
-    /// draw that subcloud. Clicking the picked one again puts it down.
-    fn tool_buttons(&mut self, ui: &mut egui::Ui) {
-        ui.label("Draw subcloud");
-        for shape in ShapeKind::ALL {
-            let picked = self.tool.picked() == Some(shape);
-            let how = match shape {
-                ShapeKind::Line => "from one end to the other",
-                ShapeKind::Circle | ShapeKind::Square => "from its centre to its edge",
-            };
-            let response = ui
-                .selectable_label(picked, shape.label())
-                .on_hover_text(format!(
-                    "{}. Then drag on the cloud to draw it, {how}. Esc cancels.",
-                    shape.description()
-                ));
-            if response.clicked() {
-                self.pending.push(if picked {
-                    Command::CancelSubcloudTool
-                } else {
-                    Command::SubcloudTool(shape)
-                });
-            }
-        }
-    }
-
     /// The 3D view's camera: Subcloud mode's while it's showing, else
     /// Explore's.
     fn active_camera(&mut self) -> &mut OrbitCamera {
@@ -344,6 +284,7 @@ impl ViewerApp {
             Command::OpenSource(_)
             | Command::OpenFileDialog
             | Command::OpenUrlDialog
+            | Command::BrowseSources
             | Command::ToggleDiagnostics
             | Command::Settings(_)
             | Command::PreviewTheme(_)
@@ -355,6 +296,7 @@ impl ViewerApp {
             // There's nothing to return to until a subcloud has been drawn.
             Command::SetMode(Mode::Subcloud) => is_open && self.subcloud.is_some(),
             Command::CancelSubcloudTool => self.tool.is_active(),
+            Command::CloseSubcloud => self.subcloud.is_some(),
             Command::SetMode(Mode::Explore)
             | Command::SubcloudTool(_)
             | Command::SetView(_)
@@ -387,7 +329,8 @@ impl ViewerApp {
                     self.run(ctx, Command::OpenSource(source));
                 }
             }
-            Command::OpenUrlDialog => self.url_dialog = Some(String::new()),
+            Command::OpenUrlDialog => self.palette.ask(palette::OPEN_URL_PROMPT),
+            Command::BrowseSources => self.browse_sources(),
             Command::SetMode(mode) => {
                 self.mode = mode;
                 self.tool.cancel();
@@ -402,6 +345,12 @@ impl ViewerApp {
                 self.tool.pick(shape, line_width);
             }
             Command::CancelSubcloudTool => self.tool.cancel(),
+            Command::CloseSubcloud => {
+                // The explore camera was left where it was.
+                self.subcloud = None;
+                self.mode = Mode::Explore;
+                self.tool.cancel();
+            }
             Command::SetView(preset) => self.active_camera().set_view(preset),
             Command::SetProjection(projection) => {
                 self.active_camera().set_projection(projection);
@@ -557,16 +506,18 @@ impl eframe::App for ViewerApp {
         self.poll_loader();
 
         // Digits typed into text fields, or the palette, aren't shortcuts.
-        if !ui.ctx().text_edit_focused() && self.url_dialog.is_none() && !self.palette.is_open() {
+        if !ui.ctx().text_edit_focused() && !self.palette.is_open() {
             let pressed = ui.input_mut(|input| self.keymap.consume(input));
             self.pending.extend(pressed);
         }
 
         // Panels are separated by gaps, not lines.
-        egui::Panel::top("top_bar")
+        egui::Panel::top("menu_bar")
             .frame(self.theme.header_frame())
             .show_separator_line(false)
-            .show(ui, |ui| self.top_bar(ui));
+            .show(ui, |ui| {
+                open_ui::menu_bar(ui, &self.keymap, &mut self.pending)
+            });
         egui::Panel::bottom("status_bar")
             .frame(self.theme.status_bar_frame())
             .show_separator_line(false)
@@ -593,7 +544,9 @@ impl eframe::App for ViewerApp {
                     .resizable(true)
                     .default_size(380.0)
                     .min_size(200.0)
-                    .show(ui, |ui| subcloud_mode.map_panel(ui));
+                    .show(ui, |ui| {
+                        subcloud_mode.map_panel(ui, &self.theme, &mut self.pending)
+                    });
                 Some(panel.inner)
             }
             _ => None,
@@ -643,8 +596,13 @@ impl eframe::App for ViewerApp {
                                 subcloud_mode.view(ui, &mut scene, map_frame);
                             }
                             _ => {
-                                drawn =
-                                    explore_view(ui, &mut scene, &mut self.camera, &mut self.tool);
+                                drawn = explore_view(
+                                    ui,
+                                    &mut scene,
+                                    &mut self.camera,
+                                    &mut self.tool,
+                                    &mut self.pending,
+                                );
                             }
                         }
                     }
@@ -696,9 +654,6 @@ impl eframe::App for ViewerApp {
             None => {}
         }
 
-        if let Some(command) = open_ui::url_dialog(ui.ctx(), &mut self.url_dialog) {
-            self.pending.push(command);
-        }
         self.palette_ui(ui.ctx());
         for command in mem::take(&mut self.pending) {
             self.run(ui.ctx(), command);

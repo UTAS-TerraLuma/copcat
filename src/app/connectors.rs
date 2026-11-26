@@ -1,5 +1,6 @@
 //! Data sources (connectors): places to browse to clouds from without
-//! leaving the viewer, in quick open (Ctrl+P) and the Open menu.
+//! leaving the viewer, in quick open (Ctrl+P) and from the menu bar's
+//! Open > From STAC….
 //!
 //! - A **STAC source** browses a STAC catalog or API ([`crate::stac`]):
 //!   catalogs and collections, then items, then an item's COPC assets.
@@ -671,22 +672,34 @@ impl ViewerApp {
         self.palette.set_connectors(rows);
     }
 
+    /// Lists the data sources in the palette, each browsing into itself,
+    /// then a row to add a STAC source, there even with no sources.
+    pub(super) fn browse_sources(&mut self) {
+        let mut items = self.connector_hub.source_rows(&self.sources);
+        let hub = self.connector_hub.clone();
+        let taken = self.source_names(ConnectorList::Stac);
+        let add = Command::Connector(ConnectorCommand::AddStac);
+        items.push(
+            PaletteItem::new(
+                add.title(),
+                ItemAction::Browse(Browse::new(move || {
+                    Box::new(AddStacProvider {
+                        hub: hub.clone(),
+                        taken: taken.clone(),
+                    })
+                })),
+            )
+            .with_detail("a STAC catalog or API, by URL"),
+        );
+        self.palette.open(PaletteMode::Open);
+        self.palette.browse(Box::new(ListProvider {
+            title: "Data sources".to_owned(),
+            items,
+        }));
+    }
+
     pub(super) fn run_connector_command(&mut self, command: ConnectorCommand) {
         match command {
-            ConnectorCommand::Browse(name) => {
-                let Some(source) = self
-                    .sources
-                    .iter()
-                    .find(|source| source.name == name)
-                    .cloned()
-                else {
-                    self.user_config
-                        .warn(format!("there's no data source called {name:?}"));
-                    return;
-                };
-                self.palette.open(PaletteMode::Open);
-                self.palette.browse(self.connector_hub.browse(&source));
-            }
             ConnectorCommand::AddStac => {
                 let provider = AddStacProvider {
                     hub: self.connector_hub.clone(),

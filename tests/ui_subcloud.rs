@@ -1,7 +1,7 @@
 //! Drawing a subcloud from Explore mode in the real viewer, driven by
 //! egui_kittest: load the fixture, look straight down, pick the circle tool,
 //! drag a circle over the building and check the subcloud view opens with
-//! that circle and its map.
+//! that circle and its map, then close it.
 //!
 //! Needs a GPU adapter, real or software; without one the test prints
 //! SKIPPED and passes, unless `COPCAT_REQUIRE_GPU` is set. Update the
@@ -130,28 +130,44 @@ fn circle_tool_should_open_a_subcloud_where_it_was_dragged() {
         });
     wait_until_loaded(&mut harness, &woken);
 
-    // Nothing to return to before a subcloud is drawn.
-    assert!(
-        harness
-            .get_by_label("Subcloud")
-            .accesskit_node()
-            .is_disabled(),
-        "Subcloud should wait for a subcloud to be drawn"
-    );
+    // Nothing to close before a subcloud is drawn.
+    assert!(harness.query_by_label(CLOSE).is_none());
 
     // Top view, from its default shortcut (the panel has no view buttons).
     harness.key_press(egui::Key::Num7);
     harness.run_ok();
+    // The tools float over the top-left of the 3D view.
+    let view = harness.get_by_label("3D view").rect();
+    for tool in ["Line", "Circle", "Square"] {
+        let button = harness.get_by_role_and_label(egui::accesskit::Role::Button, tool);
+        assert!(view.contains_rect(button.rect()), "{tool} is off the view");
+        assert!(button.rect().center().x < view.left() + 60.0, "{tool}");
+        assert_eq!(picked(&harness, tool), Some(false), "{tool}");
+    }
     harness.get_by_label("Circle").click();
     harness.run_ok();
     assert_eq!(
-        harness.get_by_label("Circle").accesskit_node().toggled(),
-        Some(egui::accesskit::Toggled::True),
+        picked(&harness, "Circle"),
+        Some(true),
         "the circle tool should be picked"
     );
 
+    // A drag that starts on the strip goes to the strip, not the view: it
+    // draws nothing, and the circle tool stays picked.
+    let square = harness.get_by_label("Square").rect().center();
+    harness.drag_at(square);
+    harness.run_ok();
+    for step in 1..=4 {
+        harness.hover_at(square + (view.center() - square) * (step as f32 / 4.0));
+        harness.run_ok();
+    }
+    harness.drop_at(view.center());
+    harness.run_ok();
+    assert!(harness.query_by_label("Subcloud map").is_none());
+    assert_eq!(picked(&harness, "Circle"), Some(true));
+    assert_eq!(picked(&harness, "Square"), Some(false));
+
     // Drag from the building's middle out to the radius, eastwards.
-    let view = harness.get_by_label("3D view").rect();
     let centre = top_view_screen(view, BUILDING_CENTRE);
     let edge = top_view_screen(view, (BUILDING_CENTRE.0 + CIRCLE_RADIUS, BUILDING_CENTRE.1));
     harness.hover_at(centre);
@@ -170,10 +186,11 @@ fn circle_tool_should_open_a_subcloud_where_it_was_dragged() {
         harness.query_by_label("Subcloud map").is_some(),
         "the map panel should be showing"
     );
-    assert_eq!(
-        harness.get_by_label("Subcloud").accesskit_node().toggled(),
-        Some(egui::accesskit::Toggled::True),
-        "Subcloud mode should be on"
+    assert!(
+        harness
+            .query_by_role_and_label(egui::accesskit::Role::Button, CLOSE)
+            .is_some(),
+        "the map's panel should have a close button"
     );
     // ...and the circle where it was drawn, give or take a pixel's worth.
     let centre_text = label_starting(&harness, "Centre ").expect("a Centre label");
@@ -222,4 +239,35 @@ fn circle_tool_should_open_a_subcloud_where_it_was_dragged() {
         common::mask_shown(&mut harness, rect);
     }
     common::snapshot(&mut harness, "subcloud_circle_over_building");
+
+    // The close button, at the top right of the map's panel, goes back to
+    // Explore mode with no subcloud to return to.
+    let map = harness.get_by_label("Subcloud map").rect();
+    let close = harness.get_by_role_and_label(egui::accesskit::Role::Button, CLOSE);
+    assert!(close.rect().top() < map.top(), "above the map");
+    assert!(
+        (close.rect().right() - map.right()).abs() < 2.0,
+        "at the panel's right"
+    );
+    close.click();
+    harness.run_ok();
+    assert!(harness.query_by_label("Subcloud map").is_none());
+    assert!(harness.query_by_label(CLOSE).is_none());
+    assert_eq!(
+        picked(&harness, "Circle"),
+        Some(false),
+        "back in Explore mode"
+    );
+    // The 3D view is the explore view, as wide as before.
+    let explore = harness.get_by_label("3D view").rect();
+    assert_eq!(explore, view);
+}
+
+/// The close button's name and tooltip.
+const CLOSE: &str = "Close the subcloud";
+
+/// Whether the tool button `name` is picked, if it's showing.
+fn picked(harness: &Harness<'_, impl eframe::App>, name: &str) -> Option<bool> {
+    let button = harness.query_by_role_and_label(egui::accesskit::Role::Button, name)?;
+    Some(button.accesskit_node().toggled() == Some(egui::accesskit::Toggled::True))
 }

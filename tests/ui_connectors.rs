@@ -512,6 +512,90 @@ fn add_stac_source_should_save_it_and_list_it_in_quick_open() {
     assert_eq!(row_enabled(&harness, "Fixture catalog"), None);
 }
 
+/// Opens the menu bar's Open > From STAC….
+fn open_from_stac(harness: &mut Harness<'_, impl eframe::App>) {
+    harness.get_by_role_and_label(Role::Button, "Open").click();
+    harness.run_ok();
+    harness.get_by_label_contains("From STAC").click();
+    harness.run_ok();
+}
+
+#[test]
+fn open_from_stac_should_list_the_sources_to_browse_or_add_one() {
+    let Some(_gpu) = lock_gpu() else { return };
+    let server = FileServer::serve(common::data_dir());
+    let scratch = common::scratch_dir("open_from_stac_should_list_the_sources");
+    let surveys = scratch.join("surveys");
+    fs::create_dir_all(&surveys).unwrap();
+    let user_dir = user_settings(
+        &scratch,
+        serde_json::json!({
+            "stac": [{ "name": "Fixture catalog", "url": server.url("stac/static/") }],
+            "folders": [{ "name": "Surveys", "path": surveys.to_str().unwrap() }],
+        }),
+    );
+    let (mut harness, woken) = viewer(&user_dir, &scratch.join("nowhere"));
+
+    open_from_stac(&mut harness);
+    assert!(
+        harness.query_by_label("Data sources").is_some(),
+        "the breadcrumb"
+    );
+    let listed = rows(&harness);
+    for start in [
+        "Fixture catalog STAC source",
+        "Surveys Folder source",
+        "Add STAC source…",
+    ] {
+        assert!(
+            listed.iter().any(|row| row.starts_with(start)),
+            "no {start:?} in {listed:#?}"
+        );
+    }
+
+    // Picking a source browses into it, and Esc comes back to the list.
+    enter(&mut harness);
+    wait_for_row(&mut harness, &woken, "Fixture survey");
+    assert!(
+        harness.query_by_label("Fixture catalog").is_some(),
+        "the breadcrumb"
+    );
+    press(&mut harness, Modifiers::NONE, Key::Escape);
+    assert!(harness.query_by_label("Data sources").is_some());
+
+    // The last row asks for a new STAC source's URL.
+    type_text(&mut harness, "add stac");
+    enter(&mut harness);
+    assert!(
+        harness.query_by_label("Add STAC source").is_some(),
+        "the breadcrumb"
+    );
+}
+
+#[test]
+fn open_from_stac_should_offer_to_add_a_source_when_there_are_none() {
+    let Some(_gpu) = lock_gpu() else { return };
+    let scratch = common::scratch_dir("open_from_stac_should_offer_to_add_a_source");
+    let user_dir = user_settings(&scratch, serde_json::json!({}));
+    let (mut harness, _woken) = viewer(&user_dir, &scratch.join("nowhere"));
+
+    open_from_stac(&mut harness);
+    let listed = rows(&harness);
+    assert!(
+        listed.iter().any(|row| row.starts_with("Add STAC source…")),
+        "{listed:#?}"
+    );
+    assert!(
+        !listed.iter().any(|row| row.contains(" source · ")),
+        "no sources: {listed:#?}"
+    );
+    enter(&mut harness);
+    assert!(
+        harness.query_by_label("Add STAC source").is_some(),
+        "the breadcrumb"
+    );
+}
+
 /// Copies the directory `from` into `to`, recursively.
 fn copy_dir(from: &Path, to: &Path) {
     fs::create_dir_all(to).unwrap();

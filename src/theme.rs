@@ -540,7 +540,7 @@ impl Theme {
             .outer_margin(self.panel_outer_margin())
     }
 
-    /// A panel that's a header strip, such as the toolbar.
+    /// A panel that's a header strip, such as the menu bar.
     pub fn header_frame(&self) -> egui::Frame {
         self.panel_frame().fill(self.colors.header)
     }

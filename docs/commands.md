@@ -49,6 +49,7 @@ subcloud" before one has been drawn.
 |---|---|---|
 | Open file… | Ctrl+O | `file.open` |
 | Open URL… | Ctrl+L | `file.open_url` |
+| Browse data sources… | | `sources.list` |
 
 ### Mode
 
@@ -65,6 +66,7 @@ subcloud" before one has been drawn.
 | Draw a circle subcloud | | `subcloud.tool_circle` |
 | Draw a square subcloud | | `subcloud.tool_square` |
 | Cancel the subcloud tool | Esc, while a tool is picked | `subcloud.cancel_tool` |
+| Close the subcloud | | `subcloud.close` |
 
 ### View
 

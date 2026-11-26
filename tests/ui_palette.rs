@@ -324,3 +324,107 @@ fn palette_should_ask_for_open_urls_argument_itself() {
     wait_for_fixture(&mut harness, &woken);
     assert!(palette_text(&harness).is_none());
 }
+
+#[test]
+fn menu_bar_should_have_file_and_open_menus() {
+    if !has_adapter() {
+        common::skip_or_fail_without_gpu("couldn't find a GPU: no wgpu adapters");
+        return;
+    }
+    let _gpu = ONE_VIEWER_AT_A_TIME
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let (mut harness, _woken) = idle_viewer();
+
+    // File only holds what's to come, greyed out.
+    harness.get_by_role_and_label(Role::Button, "File").click();
+    harness.run_ok();
+    for item in ["Open .copcat file…", "Save .copcat file…"] {
+        assert!(
+            harness.get_by_label(item).accesskit_node().is_disabled(),
+            "{item} should wait for .copcat files"
+        );
+    }
+    press(&mut harness, Modifiers::NONE, Key::Escape);
+
+    harness.get_by_role_and_label(Role::Button, "Open").click();
+    harness.run_ok();
+    for item in ["From file…", "From URL…", "From STAC…"] {
+        assert!(
+            !harness
+                .get_by_label_contains(item)
+                .accesskit_node()
+                .is_disabled(),
+            "{item}"
+        );
+    }
+    let from_url = format!(
+        "{:?}",
+        harness.get_by_label_contains("From URL").accesskit_node()
+    );
+    assert!(from_url.contains("Ctrl+L"), "{from_url}");
+    let from_file = format!(
+        "{:?}",
+        harness.get_by_label_contains("From file").accesskit_node()
+    );
+    assert!(from_file.contains("Ctrl+O"), "{from_file}");
+}
+
+#[test]
+fn open_from_url_should_ask_for_it_in_the_palette() {
+    if !has_adapter() {
+        common::skip_or_fail_without_gpu("couldn't find a GPU: no wgpu adapters");
+        return;
+    }
+    let _gpu = ONE_VIEWER_AT_A_TIME
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let (mut harness, woken) = idle_viewer();
+
+    harness.get_by_role_and_label(Role::Button, "Open").click();
+    harness.run_ok();
+    harness.get_by_label_contains("From URL").click();
+    harness.run_ok();
+    // The palette, asking for just the URL in its own field.
+    assert_eq!(palette_text(&harness).as_deref(), Some(""));
+    assert!(
+        harness.query_by_label("Open URL").is_some(),
+        "the breadcrumb"
+    );
+    assert!(
+        harness.query_by_label_contains("From URL").is_none(),
+        "the menu closed"
+    );
+
+    // A copied path keeps its quotes; they're taken off.
+    let fixture = fixture_path();
+    type_text(&mut harness, &format!("\"{fixture}\""));
+    assert!(has_row(&harness, &format!("Open URL: \"{fixture}\"")));
+    press(&mut harness, Modifiers::NONE, Key::Enter);
+    wait_for_fixture(&mut harness, &woken);
+    assert!(palette_text(&harness).is_none());
+}
+
+#[test]
+fn ctrl_l_should_ask_for_a_url_in_the_palette() {
+    if !has_adapter() {
+        common::skip_or_fail_without_gpu("couldn't find a GPU: no wgpu adapters");
+        return;
+    }
+    let _gpu = ONE_VIEWER_AT_A_TIME
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let (mut harness, _woken) = idle_viewer();
+
+    press(&mut harness, Modifiers::COMMAND, Key::L);
+    assert_eq!(palette_text(&harness).as_deref(), Some(""));
+    assert!(
+        harness.query_by_label("Open URL").is_some(),
+        "the breadcrumb"
+    );
+    // Esc goes back to quick open, then closes.
+    press(&mut harness, Modifiers::NONE, Key::Escape);
+    assert!(harness.query_by_label("Open URL").is_none());
+    press(&mut harness, Modifiers::NONE, Key::Escape);
+    assert!(palette_text(&harness).is_none());
+}

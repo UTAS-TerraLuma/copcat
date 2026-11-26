@@ -12,9 +12,11 @@ use crate::subcloud::{Footprint, Subcloud};
 use crate::theme::Theme;
 
 use super::camera_input::camera_controls;
+use super::commands::Command;
 use super::session::{Session, Views};
 use super::settings::{DiagnosticsSettings, MapStyleSettings, PointSizeMode, ViewSettings};
 use super::subcloud_tool::SubcloudTool;
+use super::tool_strip::tool_strip;
 
 /// Gap between the 3D view's edges and the gizmo, in logical pixels.
 const OVERLAY_MARGIN: f32 = 10.0;
@@ -223,14 +225,16 @@ impl ViewArea {
     }
 }
 
-/// Explore mode: the whole cloud in one 3D view. With a subcloud tool
-/// picked, dragging draws a subcloud instead of orbiting; returns it once
-/// the drag ends.
+/// Explore mode: the whole cloud in one 3D view, with the subcloud tools
+/// floating over it. With a tool picked, dragging draws a subcloud instead
+/// of orbiting; returns it once the drag ends. The tools' buttons push
+/// their commands to `commands`.
 pub(crate) fn explore_view(
     ui: &mut egui::Ui,
     scene: &mut Scene<'_>,
     camera: &mut OrbitCamera,
     tool: &mut SubcloudTool,
+    commands: &mut Vec<Command>,
 ) -> Option<Subcloud> {
     let area = ViewArea::allocate(ui);
     let drawing = tool.is_active();
@@ -256,6 +260,7 @@ pub(crate) fn explore_view(
     let texture_id = scene.render_main(&area, camera, None);
     area.paint(ui, texture_id, scene.image_aspect, scene.theme);
     tool.paint(ui, &area, camera, scene.theme);
+    tool_strip(ui, scene.theme, area.rect, tool.picked(), commands);
     drawn
 }
 
