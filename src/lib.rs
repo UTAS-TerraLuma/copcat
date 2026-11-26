@@ -13,6 +13,7 @@ mod format;
 mod gizmo;
 mod heights;
 mod http_source;
+pub mod integrate;
 mod loader;
 mod lod;
 mod pick;
@@ -41,10 +42,18 @@ pub use summary::{CloudSummary, SummaryPoint, read_cloud};
 /// Settings come from the user's and the workspace's settings files (see
 /// [`ConfigLocations::from_env`]).
 pub fn run_viewer(initial_source: Option<String>, heights: HeightSettings) -> eframe::Result {
+    let mut viewport = egui::ViewportBuilder::default()
+        .with_title("Copcat")
+        .with_inner_size([1280.0, 800.0]);
+    if let Some(icon) = window_icon() {
+        viewport = viewport.with_icon(icon);
+    }
+    if cfg!(all(unix, not(target_os = "macos"))) {
+        // Matches the desktop entry `copcat integrate` writes.
+        viewport = viewport.with_app_id(integrate::APP_ID);
+    }
     let mut options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_title("Copcat")
-            .with_inner_size([1280.0, 800.0]),
+        viewport,
         ..Default::default()
     };
     // egui asks for 8192 pixel textures at most; Save image can draw as big
@@ -72,6 +81,18 @@ pub fn run_viewer(initial_source: Option<String>, heights: HeightSettings) -> ef
             Ok(Box::new(app))
         }),
     )
+}
+
+/// The window's icon, from `assets/icon.png`.
+fn window_icon() -> Option<egui::IconData> {
+    let image = image::load_from_memory_with_format(integrate::ICON_PNG, image::ImageFormat::Png)
+        .ok()?
+        .into_rgba8();
+    Some(egui::IconData {
+        width: image.width(),
+        height: image.height(),
+        rgba: image.into_raw(),
+    })
 }
 
 /// The viewer as an [`eframe::App`], for UI tests that drive it without a

@@ -36,14 +36,35 @@ enum Commands {
     Render(Box<copcat::RenderArgs>),
     /// Update Copcat to the latest release.
     Update,
+    /// Add the viewer to the Start Menu (Windows) or the app launcher
+    /// (Linux), or take it out.
+    ///
+    /// Copcat does this once on its own the first time it runs. Run this to
+    /// add it again (for example after moving the programs); it replaces
+    /// what's there.
+    Integrate {
+        /// Take it out instead. Copcat won't add it again on its own.
+        #[arg(long)]
+        remove: bool,
+    },
 }
 
 fn main() -> ExitCode {
-    let result = match Cli::parse().command {
+    let command = Cli::parse().command;
+    // Not for `render`, which scripts run, nor `integrate`, which does it
+    // anyway (or is undoing it).
+    if !matches!(
+        command,
+        Some(Commands::Render(_) | Commands::Integrate { .. })
+    ) {
+        copcat::integrate::register_on_first_run();
+    }
+    let result = match command {
         None => open(None, &copcat::HeightSettings::default()),
         Some(Commands::Open { source, heights }) => open(source.as_deref(), &heights),
         Some(Commands::Render(args)) => copcat::render(&args),
         Some(Commands::Update) => update(),
+        Some(Commands::Integrate { remove }) => integrate(remove),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -125,6 +146,44 @@ fn update() -> Result<(), String> {
         Ok(())
     } else {
         Err(format!("copcat-update failed ({status})"))
+    }
+}
+
+/// Adds the viewer to the launcher, or with `remove` takes it out.
+fn integrate(remove: bool) -> Result<(), String> {
+    use copcat::integrate::{Integration, LAUNCHER, SUPPORTED};
+
+    if !SUPPORTED {
+        println!(
+            "Adding Copcat to the app launcher isn't supported on {} yet. Nothing was changed.",
+            std::env::consts::OS
+        );
+        return Ok(());
+    }
+    let integration = Integration::from_env()?;
+    if remove {
+        let removed = integration.remove()?;
+        if removed.is_empty() {
+            println!("Copcat wasn't in {LAUNCHER}. Nothing to remove; looked for:");
+            print_paths(&integration.files());
+        } else {
+            println!("Removed Copcat from {LAUNCHER}:");
+            print_paths(&removed);
+        }
+    } else {
+        let written = integration.install()?;
+        println!(
+            "Added Copcat to {LAUNCHER}, starting {}:",
+            integration.viewer.display()
+        );
+        print_paths(&written);
+    }
+    Ok(())
+}
+
+fn print_paths(paths: &[PathBuf]) {
+    for path in paths {
+        println!("  {}", path.display());
     }
 }
 

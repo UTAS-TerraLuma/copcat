@@ -17,5 +17,7 @@ struct Args {
 fn main() -> eframe::Result {
     // `cargo run -- <url-or-path>` loads a cloud on startup.
     let args = Args::parse();
+    // Once ever: adds the viewer to the Start Menu or the app launcher.
+    copcat::integrate::register_on_first_run();
     copcat::run_viewer(args.source, args.heights)
 }

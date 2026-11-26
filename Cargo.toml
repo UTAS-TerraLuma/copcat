@@ -26,6 +26,9 @@ ureq = { version = "3", default-features = false, features = ["rustls"] }
 url = "2.5.8"
 
 [target.'cfg(windows)'.dependencies]
+# Already in the tree through wgpu-hal; writes Start Menu shortcuts
+# (src/integrate/shortcut.rs).
+windows = { version = "0.62", features = ["Win32_System_Com", "Win32_UI_Shell"] }
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_UI_HiDpi",

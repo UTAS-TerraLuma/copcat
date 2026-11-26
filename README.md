@@ -22,7 +22,8 @@ curl --proto '=https' --tlsv1.2 -LsSf https://github.com/UTAS-TerraLuma/copcat/r
 
 This installs `copcat`, `copcat-viewer` and `copcat-update` into `~/.local/bin`
 (`%USERPROFILE%\.local\bin` on Windows), or `$XDG_BIN_HOME` if it's set, and adds that
-folder to `PATH`. Open a new terminal afterwards.
+folder to `PATH`. Open a new terminal afterwards. The first time Copcat runs, it adds
+itself to the Start Menu or your app launcher; see [Start Menu and app launchers](#start-menu-and-app-launchers).
 
 The Windows binaries aren't code signed, so the first time `copcat-viewer.exe` runs,
 SmartScreen may show "Windows protected your PC". Click "More info", then "Run anyway".
@@ -34,6 +35,36 @@ copcat update
 ```
 
 Running the installer again also installs the latest release over the old one.
+
+## Start Menu and app launchers
+
+The first time `copcat` or `copcat-viewer` runs, it adds the viewer to your launcher,
+for you only (no admin rights needed), so you can start it by typing "Copcat":
+
+- Windows: a `Copcat` shortcut in the Start Menu
+  (`%APPDATA%\Microsoft\Windows\Start Menu\Programs\Copcat.lnk`), which Start search,
+  PowerToys Run and Raycast find.
+- Linux: a desktop entry, `~/.local/share/applications/copcat.desktop` (under
+  `$XDG_DATA_HOME` if it's set), and its icon in
+  `~/.local/share/icons/hicolor/256x256/apps/copcat.png`, for GNOME, KDE, rofi and
+  other launchers that read desktop entries.
+
+It does this once. It notes that it has in `~/.copcat/launcher-registered.txt` (in
+`COPCAT_CONFIG_DIR` if that's set), and doesn't do it again on its own, so if you
+delete the shortcut it stays deleted. `copcat render` never does it, and setting
+`COPCAT_NO_AUTO_INTEGRATE` to anything turns it off.
+
+Add it again (it replaces what's there, which is how to fix it after moving the
+programs), or take it out:
+
+```sh
+copcat integrate
+copcat integrate --remove
+```
+
+There's no uninstaller: to uninstall, run `copcat integrate --remove` first, then delete
+the programs from `~/.local/bin`. macOS isn't supported yet; there, `copcat integrate`
+does nothing.
 
 ## Usage
 
