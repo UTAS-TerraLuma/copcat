@@ -45,10 +45,21 @@ copcat open https://example.com/cloud.copc.laz
 ```
 
 Or run `copcat` on its own to open an empty viewer window, then use the **Open**
-menu to choose a file (**From file…**, Ctrl+O), paste a URL (**From URL…**, Ctrl+L)
-or browse a STAC catalog or a folder of clouds (**From STAC…**, or Ctrl+P; see
-[Data sources](#data-sources)).
-Starting `copcat-viewer` directly does the same.
+menu to choose a file (**From file…**), paste a URL (**From URL…**) or browse a STAC
+catalog (**From STAC…**; see [Data sources](#data-sources)). Starting
+`copcat-viewer` directly does the same.
+
+Two keyboard shortcuts get you everywhere else:
+
+- **Ctrl+O, quick open**: type a path or URL to open it, pick a cloud opened this
+  session or one of your STAC sources, or choose **From file…**, **From URL…** or
+  **From STAC…**.
+- **Ctrl+P, the command palette** (also **View > Command palette**): search the
+  viewer's commands and run one: the projection, colour, eye-dome lighting, saving
+  an image, the settings, the data sources and more.
+
+In either, Up and Down move through the list, Enter chooses, and Esc goes back a level
+or closes. See [docs/commands.md](docs/commands.md) for every command.
 
 ## Elevation and height above ground
 
@@ -98,6 +109,12 @@ paste the command it copies. Run `copcat render --help` for the camera and style
 options.
 
 ## Settings
+
+**File > Settings…** (or **Settings…** in the command palette) opens the Settings
+window: the theme, the default rendering settings (colour, point size, eye-dome
+lighting and level of detail, as under **Rendering** in the Point cloud window, and
+there even with no cloud open) with **Save current rendering settings as defaults**
+below them, and buttons that open the settings files to edit by hand.
 
 The viewer reads its settings from JSON files, as VS Code and Zed do:
 
@@ -155,9 +172,6 @@ Every key, with its default:
   "connectors": {
     "stac": [
       { "name": "NatureScan", "url": "https://stacapi.naturescan.earth/" }
-    ],
-    "folders": [
-      { "name": "My project", "path": "D:/data/project" }
     ]
   }
 }
@@ -173,14 +187,17 @@ mode's settings wait to be used in that mode.
 A shortcut is modifiers and a key joined by `+`, in any case: `Ctrl+Shift+P`, `F5`,
 `Alt+Up`, `Ctrl++`. `Ctrl` means Cmd on a Mac. Keys are egui's names: letters,
 digits, `F1` to `F35`, `Up`, `PageDown`, `Escape`, `Space`, `Minus` and so on.
-Giving a command a shortcut another command has takes it from that command. The
-commands are:
+Giving a command a shortcut another command has takes it from that command. Every
+command can be bound, including those the command palette doesn't list (the modes,
+the subcloud tools and the views from each side). The commands are:
 
 | Id | Command | Default |
 | --- | --- | --- |
-| `file.open` | Open file… | Ctrl+O |
-| `file.open_url` | Open URL… | Ctrl+L |
-| `sources.list` | Browse data sources… | |
+| `palette.commands` | Command palette | Ctrl+P |
+| `palette.open` | Quick open… | Ctrl+O |
+| `file.open` | Open file… | |
+| `file.open_url` | Open URL… | |
+| `sources.list` | Browse STAC sources… | |
 | `mode.explore`, `mode.subcloud` | Explore or Subcloud mode | |
 | `subcloud.tool_line`, `subcloud.tool_circle`, `subcloud.tool_square` | Draw a line, circle or square subcloud | |
 | `subcloud.cancel_tool` | Cancel the subcloud tool | Esc while a tool is picked |
@@ -193,44 +210,47 @@ commands are:
 | `view.reset` | Reset view | |
 | `view.retry_failed_nodes` | Retry failed nodes | |
 | `view.toggle_diagnostics` | Toggle diagnostics | Ctrl+Shift+D |
-| `palette.commands` | Show all commands (the command palette) | Ctrl+Shift+P |
-| `palette.open` | Quick open a source | Ctrl+P |
 | `display.toggle_edl` | Toggle eye-dome lighting | |
 | `display.color_height`, `display.color_rgb`, `display.color_class` | Colour by height, RGB, classification | |
 | `export.save_image` | Save image… | Ctrl+S |
 | `export.copy_command` | Copy render command | |
+| `settings.open` | Settings… (the Settings window) | |
 | `settings.open_user` | Open user settings | |
 | `settings.open_workspace` | Open workspace settings | |
 | `settings.reload` | Reload settings | |
-| `settings.save_display_defaults` | Save current display settings as defaults | |
+| `settings.save_display_defaults` | Save current rendering settings as defaults | |
 | `settings.select_theme` | Select theme… | |
 | `sources.add_stac` | Add STAC source… | |
-| `sources.add_folder` | Add folder source… | |
-| `sources.remove` | Remove data source… | |
+| `sources.remove` | Remove STAC source… | |
 | `sources.clear_cache` | Clear data source cache | |
 
 Connectors are places to open clouds from: STAC catalogs and APIs (`url`, `http` or
-`https`) and folders (`path`). A relative folder path is relative to the folder holding
-the `.copcat` directory that declares it, so `"path": "."` in a workspace file is the
-workspace. Each needs a `name`. See [Data sources](#data-sources) for browsing them.
+`https`). Each needs a `name`. See [Data sources](#data-sources) for browsing them.
+Folder sources (`connectors.folders`) have been removed; a file that still has them
+loads with an "unknown setting" warning, and the key is left in the file. Open local
+files with **Open file…** or **Open URL…** instead.
 
 The files are the source of truth: changing a setting in the window lasts until you
-close it. The settings commands (in the command palette, or bound to a shortcut):
+close it, unless you save it. The settings commands (in the command palette, the
+**File** menu or the Settings window, or bound to a shortcut):
 
+- **Settings…** opens the Settings window.
 - **Open user settings** and **Open workspace settings** create the file with a
   commented template if it's missing, and open it in your editor for `.json` files.
 - **Reload settings** reads the files again and applies them.
-- **Save current display settings as defaults** writes the display and performance
-  settings (colour, point size mode, fill, smallest and largest adaptive sizes, fixed
-  point size, eye-dome lighting, projection, point budget and spacing) into the user
-  file, keeping its other keys. The file is rewritten as plain
-  JSON, so its comments are lost.
+- **Save current rendering settings as defaults** (also **Save as defaults** at the
+  foot of the Rendering section) writes the display and performance settings
+  (colour, point size mode, fill, smallest and largest adaptive sizes, fixed point
+  size, eye-dome lighting, projection, point budget and spacing) into the user file,
+  keeping its other keys. The file is rewritten as plain JSON, so its comments are
+  lost.
 - **Select theme…** lists the themes, Graphite Dark (the default) and Graphite Light,
   in the command palette. The arrow keys show each theme as they reach it; Enter
   keeps it and saves it as `theme` in the user file (rewritten as plain JSON, like
   the command above), and Esc or a click outside goes back to the theme you had. A
   workspace file that sets `theme` still wins the next time the settings are loaded.
   `"theme": "graphite"`, from before there was a light theme, means Graphite Dark.
+  The Settings window's **Theme** drop-down sets and saves the theme the same way.
 
 `COPCAT_CONFIG_DIR` moves the user settings directory (from `~/.copcat`), and
 `COPCAT_WORKSPACE` sets the workspace folder (from the current directory).
@@ -240,35 +260,28 @@ arguments.
 ## Data sources
 
 Data sources (connectors) let you browse to a cloud without leaving the viewer. Press
-Ctrl+P (quick open): each source is listed by name, marked **STAC source** or
-**Folder source**. Choose one to browse into it, type to filter, and press Enter on a
-cloud to open it. Esc, or Backspace in an empty field, goes back up a level. The
-**Open > From STAC…** menu item lists the sources too, with **Add STAC source…**
-at the foot.
+Ctrl+O (quick open): each source is listed by name, marked **STAC source**. Choose
+one to browse into it, type to filter, and press Enter on a cloud to open it. Esc, or
+Backspace in an empty field, goes back up a level. The **Open > From STAC…** menu
+item (or **From STAC…** in quick open) lists the sources too, with **Add STAC
+source…** at the foot. To open a local file, use **From file…** or **From URL…** in
+the **Open** menu or quick open.
 
-- **STAC sources** browse a [STAC](https://stacspec.org) catalog: its catalogs and
-  collections, then their items, showing each item's title and date. Choosing an item
-  opens its COPC point cloud (an asset of type `application/vnd.laszip+copc`, or
-  whose file ends `.copc.laz`); an item with several lists them to choose from. Items
-  without one are greyed out. Assets must be at `http` or `https` URLs; `s3://` links
-  are shown but can't be opened yet.
+Each source browses a [STAC](https://stacspec.org) catalog: its catalogs and
+collections, then their items, showing each item's title and date. Choosing an item
+opens its COPC point cloud (an asset of type `application/vnd.laszip+copc`, or whose
+file ends `.copc.laz`); an item with several lists them to choose from. Items without
+one are greyed out. Assets must be at `http` or `https` URLs; `s3://` links are shown
+but can't be opened yet.
 
-  Both kinds of STAC work: a *static catalog* (JSON files linked to each other, such
-  as on an object store; give the URL of its `catalog.json`, or of the folder it's in)
-  and a *STAC API* (give its landing page). A list keeps fetching in the background,
-  page after page (250 items a page from an API, 24 item files at a time from a static
-  catalog), until it has 1000 items, so typing filters a small catalog in full; the
-  count so far shows at the top while it does. Past 1000, choose **Load more…** at the
-  foot of the list for each further page. Items with a PNG or JPEG thumbnail show it,
-  small, at the left of their row.
-- **Folder sources** list every COPC file (`*.copc.laz`) under a folder, searched on
-  a background thread. Hidden folders (starting with `.`), `target`, `node_modules`
-  and links to folders are skipped, and the search stops at 16 folders deep, 2000
-  files listed (the rest are counted) and 200000 entries looked at.
-- **Workspace**: the folder you start Copcat in (or `COPCAT_WORKSPACE`) is always
-  offered as a folder source named "Workspace: *folder name*", without any settings,
-  unless it's your home folder or a drive or filesystem root, which would take too
-  long to search.
+Both kinds of STAC work: a *static catalog* (JSON files linked to each other, such as
+on an object store; give the URL of its `catalog.json`, or of the folder it's in) and
+a *STAC API* (give its landing page). A list keeps fetching in the background, page
+after page (250 items a page from an API, 24 item files at a time from a static
+catalog), until it has 1000 items, so typing filters a small catalog in full; the
+count so far shows at the top while it does. Past 1000, choose **Load more…** at the
+foot of the list for each further page. Items with a PNG or JPEG thumbnail show it,
+small, at the left of their row.
 
 What's been fetched is kept until you close the viewer, so going back is instant.
 Going back to a list fetched more than 5 minutes ago shows it at once and fetches it
@@ -302,14 +315,13 @@ list stays, with a note saying how old it is, such as "Offline: showing the list
 
 Copcat started without a settings directory (as in its tests) keeps nothing on disk.
 
-Add and remove sources from the command palette (Ctrl+Shift+P); **Open > From
+Add and remove sources from the command palette (Ctrl+P); **Open > From
 STAC…** can add a STAC source too. These change your user settings file, keeping its other keys (it's
 rewritten as plain JSON, so comments are lost), and take effect at once:
 
 - **Add STAC source…** asks for the catalog's URL, checks it's a STAC catalog, then
   asks for a name, offering the catalog's title (or the URL's host) as the default.
-- **Add folder source…** asks for a folder, then a name, offering the folder's name.
-- **Remove data source…** lists the sources in the user settings file to remove one.
+- **Remove STAC source…** lists the sources in the user settings file to remove one.
   Sources declared in a workspace file are shown but must be removed from that file.
 
 Or write them in a settings file:
@@ -319,8 +331,7 @@ Or write them in a settings file:
   "stac": [
     { "name": "NatureScan", "url": "https://stacapi.naturescan.earth/" },
     { "name": "AEO workshop", "url": "https://example.com/stac/catalog.json" }
-  ],
-  "folders": [{ "name": "Surveys", "path": "D:/data/surveys" }]
+  ]
 }
 ```
 

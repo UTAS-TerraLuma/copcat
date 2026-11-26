@@ -11,12 +11,14 @@
 //! - [`subcloud_mode`]: Subcloud mode's map panel and 3D view.
 //! - [`subcloud_tool`]: drawing a subcloud on the explore view.
 //! - [`export_ui`]: the Save image section and its job.
-//! - [`open_ui`]: the menu bar, and opening a file.
+//! - [`open_ui`]: the menu bar (File, Open and View), and opening a file.
+//! - [`settings_window`]: the Settings window: the theme, the default
+//!   rendering settings and the settings files.
 //! - [`tool_strip`]: the subcloud tools floating over the explore view, and
 //!   icon buttons.
-//! - [`connectors`]: data sources (STAC catalogs and folders) to browse to
+//! - [`connectors`]: data sources (STAC catalogs) to browse to
 //!   clouds in, and [`feed`], their listings fetched in the background.
-//! - [`palette`]: the command palette (Ctrl+Shift+P) and quick open (Ctrl+P).
+//! - [`palette`]: the command palette (Ctrl+P) and quick open (Ctrl+O).
 //! - [`panels`]: the settings panel's sections and the status bar.
 //! - [`user_config`]: the settings files applied, and the settings commands.
 //! - [`toasts`]: messages floating above the status bar.
@@ -32,6 +34,7 @@ mod panels;
 mod scene;
 mod session;
 mod settings;
+mod settings_window;
 mod subcloud_mode;
 mod subcloud_tool;
 mod thumbnails;
@@ -61,8 +64,8 @@ use connectors::ConnectorHub;
 use export_ui::{ExportContext, ExportJob, ImageExport, export_ui};
 use palette::{Palette, PaletteMode};
 use panels::{
-    Fold, HeightsAction, cloud_summary, diagnostics_ui, folding_section, heights_ui, rendering_ui,
-    section, spinner, status_bar, view_ui,
+    CloudFacts, Fold, HeightsAction, cloud_summary, diagnostics_ui, folding_section, heights_ui,
+    prop_control, rendering_ui, save_defaults_button, section, spinner, status_bar, view_ui,
 };
 use scene::{Scene, Viewports, explore_view};
 use session::Session;
@@ -104,6 +107,8 @@ pub struct ViewerApp {
     connector_hub: ConnectorHub,
     /// The data sources, as of the last time the settings were read.
     sources: Vec<connectors::DataSource>,
+    /// Whether the Settings window is showing. Closed by its X.
+    settings_window_open: bool,
     /// The 3D view's size in physical pixels, as of the last frame with a
     /// cloud open.
     view_size_px: [u32; 2],
@@ -186,6 +191,7 @@ impl ViewerApp {
             palette,
             connector_hub: ConnectorHub::new(cc.egui_ctx.clone(), caches, cache::system_clock()),
             sources: Vec::new(),
+            settings_window_open: false,
             view_size_px: [1, 1],
         };
         app.load_user_config(&cc.egui_ctx);
@@ -291,7 +297,11 @@ impl ViewerApp {
             | Command::SetTheme(_)
             | Command::ShowCommands
             | Command::QuickOpen
-            | Command::Connector(_) => true,
+            | Command::Connector(_)
+            // Settings, which the settings window sets as defaults with no
+            // cloud open.
+            | Command::ToggleEdl
+            | Command::SetColorMode(_) => true,
             Command::SaveImage => is_open && !self.export.is_busy(),
             // There's nothing to return to until a subcloud has been drawn.
             Command::SetMode(Mode::Subcloud) => is_open && self.subcloud.is_some(),
@@ -303,8 +313,6 @@ impl ViewerApp {
             | Command::SetProjection(_)
             | Command::ToggleProjection
             | Command::ResetView
-            | Command::ToggleEdl
-            | Command::SetColorMode(_)
             | Command::CopyCommandLine => is_open,
             Command::RetryFailedNodes => {
                 matches!(&self.state, LoadState::Open(session) if !session.failed.is_empty())
@@ -422,6 +430,7 @@ impl ViewerApp {
         let settings = &mut self.settings;
         let commands = &mut self.pending;
         let keymap = &self.keymap;
+        let user_file = self.user_config.user_file_name();
         let mut heights_action = None;
         // Side panels are laid out before the central panel, so a size that
         // follows the view shows the last frame's, which is the same unless
@@ -440,7 +449,11 @@ impl ViewerApp {
                         section(ui, theme, |ui| cloud_summary(ui, &session.info));
                         let rendering = Fold::new("rendering", "Rendering").default_open(true);
                         folding_section(ui, theme, rendering, |ui| {
-                            rendering_ui(ui, &mut settings.view, session, commands);
+                            let cloud = CloudFacts::of(session);
+                            rendering_ui(ui, &mut settings.view, Some(cloud), commands);
+                            prop_control(ui, "save_defaults", |ui| {
+                                save_defaults_button(ui, true, user_file.as_deref(), commands);
+                            });
                         });
                         let projection = Fold::new("projection", "Projection").default_open(true);
                         folding_section(ui, theme, projection, |ui| {
@@ -655,6 +668,7 @@ impl eframe::App for ViewerApp {
             None => {}
         }
 
+        self.settings_window_ui(ui.ctx());
         self.palette_ui(ui.ctx());
         for command in mem::take(&mut self.pending) {
             self.run(ui.ctx(), command);

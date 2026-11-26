@@ -4,7 +4,9 @@
 //! with the files show as toasts ([`super::toasts`]).
 //!
 //! The files are the source of truth: changes made in the UI last for the
-//! session unless saved with [`SettingsCommand::SaveDisplayDefaults`].
+//! session unless saved with [`SettingsCommand::SaveDisplayDefaults`]
+//! ("Save current rendering settings as defaults"), or, for the theme,
+//! chosen with [`Command::SetTheme`].
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -62,6 +64,12 @@ impl UserConfig {
     /// Something done, such as a file saved. Goes by itself.
     pub(crate) fn inform(&mut self, text: impl Into<String>) {
         self.messages.push(Severity::Info, text);
+    }
+
+    /// Where the user settings file is, to show, if this session has one.
+    pub(crate) fn user_file_name(&self) -> Option<String> {
+        let file = self.locations.as_ref()?.user_file()?;
+        Some(file.display().to_string())
     }
 }
 
@@ -355,12 +363,20 @@ impl ViewerApp {
     }
 
     pub(super) fn run_settings_command(&mut self, ctx: &egui::Context, command: SettingsCommand) {
-        // Choosing a theme works without settings files: it just isn't saved.
-        if command == SettingsCommand::SelectTheme {
-            self.palette.open(PaletteMode::Open);
-            self.palette
-                .browse(Box::new(ThemeSelector::new(self.theme.id())));
-            return;
+        match command {
+            // Choosing a theme works without settings files: it just isn't
+            // saved. So does the window, which edits this session's settings.
+            SettingsCommand::SelectTheme => {
+                self.palette.open(PaletteMode::Commands);
+                self.palette
+                    .browse(Box::new(ThemeSelector::new(self.theme.id())));
+                return;
+            }
+            SettingsCommand::OpenWindow => {
+                self.settings_window_open = true;
+                return;
+            }
+            _ => {}
         }
         let Some(locations) = self.user_config.locations.clone() else {
             self.user_config
@@ -403,7 +419,7 @@ impl ViewerApp {
                             ""
                         };
                         self.user_config.inform(format!(
-                            "Saved the display settings to {}{note}",
+                            "Saved the rendering settings to {}{note}",
                             file.display()
                         ));
                     }
@@ -412,7 +428,9 @@ impl ViewerApp {
                         .error(format!("{}: {problem}", file.display())),
                 }
             }
-            SettingsCommand::SelectTheme => unreachable!("handled above"),
+            SettingsCommand::SelectTheme | SettingsCommand::OpenWindow => {
+                unreachable!("handled above")
+            }
         }
     }
 
@@ -425,7 +443,7 @@ impl ViewerApp {
     }
 
     /// Shows the built-in theme `id` and saves it as the user settings
-    /// file's `theme`, as Save current display settings as defaults saves
+    /// file's `theme`, as Save current rendering settings as defaults saves
     /// its settings.
     pub(super) fn set_theme(&mut self, ctx: &egui::Context, id: &str) {
         self.show_theme(ctx, id);

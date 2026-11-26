@@ -15,8 +15,10 @@ mod widgets;
 
 pub(crate) use cloud_info::cloud_summary;
 pub(crate) use diagnostics::diagnostics_ui;
-pub(crate) use display::rendering_ui;
+pub(crate) use display::{CloudFacts, rendering_ui, save_defaults_button};
 pub(crate) use heights::{HeightsAction, heights_ui};
 pub(crate) use status::{spinner, status_bar};
 pub(crate) use view::view_ui;
-pub(crate) use widgets::{Fold, NumberField, folding_section, prop_control, prop_row, section};
+pub(crate) use widgets::{
+    Fold, NumberField, choice_combo, folding_section, prop_control, prop_row, section,
+};

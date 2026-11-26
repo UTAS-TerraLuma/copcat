@@ -352,7 +352,7 @@ fn an_unknown_theme_and_bad_shortcut_should_warn_without_a_cloud() {
     let user_dir = scratch.join("home");
     write(
         &user_dir.join("settings.json"),
-        r#"{ "theme": "neon", "keybindings": { "file.open": "Ctrl+Banana", "file.open_url": "Ctrl+U" } }"#,
+        r#"{ "theme": "neon", "keybindings": { "palette.commands": "Ctrl+Banana", "file.open_url": "Ctrl+U" } }"#,
     );
     let (mut harness, _woken) = viewer(&user_dir, &scratch.join("nowhere"), None);
     harness.run_ok();
@@ -362,17 +362,32 @@ fn an_unknown_theme_and_bad_shortcut_should_warn_without_a_cloud() {
     assert!(shown.iter().any(|w| w.contains("\"neon\"")), "{shown:#?}");
     assert!(shown.iter().any(|w| w.contains("Banana")), "{shown:#?}");
     // The good binding is shown in the Open menu, and the bad one keeps its
-    // default.
+    // default, shown in the View menu.
     harness
         .get_by_role_and_label(egui::accesskit::Role::Button, "Open")
         .click();
     harness.run_ok();
-    let open_url = harness.get_by_label_contains("From URL");
-    let text = format!("{:?}", open_url.accesskit_node());
-    assert!(text.contains("Ctrl+U"), "{text}");
-    let open_file = harness.get_by_label_contains("From file");
-    let text = format!("{:?}", open_file.accesskit_node());
-    assert!(text.contains("Ctrl+O"), "{text}");
+    // A menu item's label is its title, then its shortcut.
+    let label = |harness: &Harness<'_, _>, title: &str| {
+        harness
+            .get_by_label_contains(title)
+            .accesskit_node()
+            .label()
+            .unwrap()
+    };
+    assert_eq!(label(&harness, "From URL"), "From URL… Ctrl+U");
+    assert_eq!(
+        label(&harness, "From file"),
+        "From file…",
+        "no shortcut by default"
+    );
+    harness.key_press(egui::Key::Escape);
+    harness.run_ok();
+    harness
+        .get_by_role_and_label(egui::accesskit::Role::Button, "View")
+        .click();
+    harness.run_ok();
+    assert_eq!(label(&harness, "Command palette"), "Command palette Ctrl+P");
 }
 
 #[test]
@@ -435,7 +450,7 @@ fn save_and_reload_should_round_trip_through_the_user_file() {
         harness
             .query_all_by_role(egui::accesskit::Role::Label)
             .filter_map(|node| node.value())
-            .any(|text| text.starts_with("Saved the display settings")),
+            .any(|text| text.starts_with("Saved the rendering settings")),
         "saving should say so"
     );
 
@@ -458,6 +473,98 @@ fn save_and_reload_should_round_trip_through_the_user_file() {
         "the saved colour mode"
     );
     assert_eq!(warnings(&harness), Vec::<String>::new());
+}
+
+#[test]
+fn the_settings_window_should_set_the_theme_and_save_the_defaults() {
+    if !has_adapter() {
+        common::skip_or_fail_without_gpu("couldn't find a GPU: no wgpu adapters");
+        return;
+    }
+    let _gpu = ONE_VIEWER_AT_A_TIME
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let scratch = common::scratch_dir("the_settings_window_should_set_the_theme");
+    let user_dir = scratch.join("home");
+    let user_file = user_dir.join("settings.json");
+    write(
+        &user_file,
+        r#"{ "display": { "pointSizeMode": "fixed", "pointSize": 3.0 } }"#,
+    );
+    // No cloud open: the window sets defaults for the next one.
+    let (mut harness, _woken) = viewer(&user_dir, &scratch.join("nowhere"), None);
+    harness.run_ok();
+    assert!(
+        harness
+            .query_by_label("Default rendering settings")
+            .is_none()
+    );
+
+    // File > Settings… opens it.
+    harness
+        .get_by_role_and_label(egui::accesskit::Role::Button, "File")
+        .click();
+    harness.run_ok();
+    harness.get_by_label("Settings…").click();
+    harness.run_ok();
+    assert!(
+        harness
+            .query_by_label("Default rendering settings")
+            .is_some(),
+        "the window should show"
+    );
+    assert!(
+        harness.query_by_label_contains("Settings…").is_none(),
+        "the menu closed"
+    );
+
+    // Choosing a theme applies it and saves it.
+    assert!(harness.ctx.global_style().visuals.dark_mode);
+    assert_eq!(chosen(&harness, "Theme"), "Graphite Dark");
+    choose(&mut harness, "Theme", "Graphite Light");
+    assert!(
+        !harness.ctx.global_style().visuals.dark_mode,
+        "Graphite Light should show"
+    );
+    assert_eq!(chosen(&harness, "Theme"), "Graphite Light");
+
+    // The rendering controls work with no cloud open, and the button saves
+    // them as the defaults, keeping the theme just saved.
+    assert_eq!(chosen(&harness, "Point size"), "Fixed");
+    assert_eq!(field_value(&harness, "Size (px)"), 3.0);
+    click(&mut harness, "Increase Size (px)");
+    choose(&mut harness, "Colour", "Class");
+    assert_eq!(chosen(&harness, "Colour"), "Class");
+    let save = "Save current rendering settings as defaults";
+    let buttons = harness
+        .query_all_by_label(save)
+        .filter(|node| node.accesskit_node().role() == egui::accesskit::Role::Button)
+        .count();
+    assert_eq!(buttons, 1, "one save button in the window");
+    by_role_and_label(&harness, egui::accesskit::Role::Button, save).click();
+    harness.run_ok();
+    let saved: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&user_file).unwrap()).unwrap();
+    assert_eq!(saved["theme"], "graphite-light");
+    assert_eq!(saved["display"]["pointSizeMode"], "fixed");
+    assert_eq!(saved["display"]["pointSize"], 3.5);
+    assert_eq!(saved["display"]["colorMode"], "classification");
+    assert!(
+        harness
+            .query_all_by_role(egui::accesskit::Role::Label)
+            .filter_map(|node| node.value())
+            .any(|text| text.starts_with("Saved the rendering settings")),
+        "saving should say so"
+    );
+
+    // Its X closes it.
+    harness.get_by_label("Close window").click();
+    harness.run_ok();
+    assert!(
+        harness
+            .query_by_label("Default rendering settings")
+            .is_none()
+    );
 }
 
 #[test]

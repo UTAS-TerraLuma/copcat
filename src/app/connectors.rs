@@ -1,14 +1,11 @@
 //! Data sources (connectors): places to browse to clouds from without
-//! leaving the viewer, in quick open (Ctrl+P) and from the menu bar's
+//! leaving the viewer, in quick open (Ctrl+O) and from the menu bar's
 //! Open > From STAC….
 //!
-//! - A **STAC source** browses a STAC catalog or API ([`crate::stac`]):
-//!   catalogs and collections, then items, then an item's COPC assets.
-//! - A **folder source** lists every COPC file under a folder
-//!   ([`crate::folder_scan`]).
+//! A **STAC source** browses a STAC catalog or API ([`crate::stac`]):
+//! catalogs and collections, then items, then an item's COPC assets.
 //!
-//! Sources come from the settings files' `connectors`, plus the workspace
-//! folder as an implicit folder source. Listings are fetched on threads into
+//! Sources come from the settings files' `connectors`. Listings are fetched on threads into
 //! [`Feed`]s that [`ConnectorHub`] keeps for the session, so browsing back
 //! into something shows it at once. STAC listings are also kept on disk
 //! ([`crate::cache::stac`]) once fetched whole, so they show at once in the
@@ -17,7 +14,7 @@
 //! cache.
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, mpsc};
 use std::time::SystemTime;
 
@@ -26,8 +23,7 @@ use serde_json::json;
 
 use crate::cache::stac::CachedListing;
 use crate::cache::{Caches, Clock, Removed, StacCache};
-use crate::config::{self, ConnectorList, Connectors};
-use crate::folder_scan::{self, Limits};
+use crate::config::{self, Connectors};
 use crate::format::file_name;
 use crate::stac::{self, Entry, Href, Item};
 
@@ -45,22 +41,13 @@ use super::thumbnails;
 pub(crate) enum SourceKind {
     /// A STAC catalog or API, by URL.
     Stac(String),
-    Folder(PathBuf),
 }
 
 impl SourceKind {
-    fn list(&self) -> ConnectorList {
-        match self {
-            Self::Stac(_) => ConnectorList::Stac,
-            Self::Folder(_) => ConnectorList::Folders,
-        }
-    }
-
-    /// "STAC" or "Folder", and where.
+    /// What kind of source, and where.
     fn describe(&self) -> String {
         match self {
             Self::Stac(url) => format!("STAC source · {url}"),
-            Self::Folder(path) => format!("Folder source · {}", path.display()),
         }
     }
 }
@@ -75,45 +62,16 @@ pub(crate) struct DataSource {
 /// A source to add to the user settings file.
 pub(crate) type NewSource = DataSource;
 
-/// The configured sources, STAC first, then the workspace folder, unless
-/// it's too big to scan or a configured source has its name.
-pub(crate) fn data_sources(connectors: &Connectors, workspace: Option<&Path>) -> Vec<DataSource> {
-    let mut sources: Vec<_> = connectors
+/// The configured sources, in the settings' order.
+pub(crate) fn data_sources(connectors: &Connectors) -> Vec<DataSource> {
+    connectors
         .stac
         .iter()
         .map(|stac| DataSource {
             name: stac.name.clone(),
             kind: SourceKind::Stac(stac.url.clone()),
         })
-        .chain(connectors.folders.iter().map(|folder| DataSource {
-            name: folder.name.clone(),
-            kind: SourceKind::Folder(folder.path.clone()),
-        }))
-        .collect();
-    let home = config::home_dir();
-    if let Some(workspace) = workspace.and_then(|dir| workspace_source(dir, home.as_deref()))
-        && !sources.iter().any(|source| source.name == workspace.name)
-    {
-        sources.push(workspace);
-    }
-    sources
-}
-
-/// The workspace folder as a folder source, unless it's the home folder or
-/// a drive or filesystem root, which would take too long to scan, or isn't
-/// a folder.
-pub(crate) fn workspace_source(workspace: &Path, home: Option<&Path>) -> Option<DataSource> {
-    let canonical = |path: &Path| path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-    let dir = canonical(workspace);
-    let is_home = home.is_some_and(|home| canonical(home) == dir);
-    if is_home || dir.parent().is_none() || !dir.is_dir() {
-        return None;
-    }
-    let name = dir.file_name()?.to_string_lossy().into_owned();
-    Some(DataSource {
-        name: format!("Workspace: {name}"),
-        kind: SourceKind::Folder(workspace.to_path_buf()),
-    })
+        .collect()
 }
 
 /// A name for a new STAC source: the catalog's title, or the URL's host.
@@ -129,13 +87,6 @@ pub(crate) fn default_stac_name(title: Option<&str>, url: &str) -> String {
                 .map(|host| host.trim_start_matches("www.").to_owned())
         })
         .unwrap_or_else(|| "STAC source".to_owned())
-}
-
-/// A name for a new folder source: the folder's name.
-pub(crate) fn default_folder_name(path: &Path) -> String {
-    path.file_name()
-        .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_else(|| path.display().to_string())
 }
 
 /// The palette row for a STAC item: opens its point cloud if it has one,
@@ -200,43 +151,6 @@ fn disabled(title: impl Into<String>) -> PaletteItem {
         enabled: false,
         ..PaletteItem::new(title, ItemAction::Run(Command::ResetView))
     }
-}
-
-/// The rows for a folder scan of `root`.
-pub(crate) fn folder_rows(root: &Path, scan: &folder_scan::Scan) -> Vec<PaletteItem> {
-    let mut rows: Vec<_> = scan
-        .files
-        .iter()
-        .map(|relative| {
-            let path = root.join(relative).display().to_string();
-            let name = relative
-                .file_name()
-                .map(|name| name.to_string_lossy().into_owned())
-                .unwrap_or_else(|| path.clone());
-            let folder = relative
-                .parent()
-                .map(|parent| parent.to_string_lossy().replace('\\', "/"))
-                .unwrap_or_default();
-            PaletteItem::new(name, ItemAction::Run(Command::OpenSource(path))).with_detail(folder)
-        })
-        .collect();
-    if scan.files.is_empty() && scan.not_listed == 0 {
-        rows.push(disabled("No COPC files (*.copc.laz) in this folder"));
-    }
-    if scan.not_listed > 0 {
-        rows.push(
-            disabled(format!("{} more not shown", scan.not_listed)).with_detail(format!(
-                "only the first {} are listed; add a source for a folder further in",
-                scan.files.len()
-            )),
-        );
-    }
-    if scan.incomplete {
-        rows.push(disabled("The search stopped early").with_detail(
-            "some folders were too deep or too many to search; add a source further in",
-        ));
-    }
-    rows
 }
 
 /// Makes the providers for data sources, keeping what they fetch for the
@@ -324,24 +238,6 @@ impl ConnectorHub {
     pub(crate) fn browse(&self, source: &DataSource) -> Box<dyn Provider> {
         match &source.kind {
             SourceKind::Stac(url) => self.stac_listing(url, None, &source.name),
-            SourceKind::Folder(path) => {
-                let path = path.clone();
-                self.feed(
-                    format!("folder:{}", path.display()),
-                    &source.name,
-                    || None,
-                    move || {
-                        let path = path.clone();
-                        Box::new(move || {
-                            let scan =
-                                folder_scan::scan(&path, Limits::default()).map_err(|error| {
-                                    format!("couldn't read {}: {error}", path.display())
-                                })?;
-                            Ok(Chunk::all(folder_rows(&path, &scan)))
-                        })
-                    },
-                )
-            }
         }
     }
 
@@ -581,21 +477,12 @@ impl NameProvider {
             taken,
         }
     }
-
-    fn for_folder(path: PathBuf, taken: Vec<String>) -> Self {
-        Self {
-            default: DefaultName::Ready(default_folder_name(&path)),
-            kind: SourceKind::Folder(path),
-            taken,
-        }
-    }
 }
 
 impl Provider for NameProvider {
     fn title(&self) -> String {
         match &self.kind {
             SourceKind::Stac(url) => format!("Name the STAC source {url}"),
-            SourceKind::Folder(path) => format!("Name the folder source {}", path.display()),
         }
     }
 
@@ -655,19 +542,9 @@ impl Provider for NameProvider {
 }
 
 impl ViewerApp {
-    /// The data sources: the settings' connectors and the workspace.
-    fn read_sources(&self) -> Vec<DataSource> {
-        let workspace = self
-            .user_config
-            .locations
-            .as_ref()
-            .and_then(|locations| locations.workspace.as_deref());
-        data_sources(&self.user_config.connectors, workspace)
-    }
-
     /// Lists the data sources in quick open, after the settings change.
     pub(super) fn refresh_connectors(&mut self) {
-        self.sources = self.read_sources();
+        self.sources = data_sources(&self.user_config.connectors);
         let rows = self.connector_hub.source_rows(&self.sources);
         self.palette.set_connectors(rows);
     }
@@ -677,7 +554,7 @@ impl ViewerApp {
     pub(super) fn browse_sources(&mut self) {
         let mut items = self.connector_hub.source_rows(&self.sources);
         let hub = self.connector_hub.clone();
-        let taken = self.source_names(ConnectorList::Stac);
+        let taken = self.source_names();
         let add = Command::Connector(ConnectorCommand::AddStac);
         items.push(
             PaletteItem::new(
@@ -703,40 +580,28 @@ impl ViewerApp {
             ConnectorCommand::AddStac => {
                 let provider = AddStacProvider {
                     hub: self.connector_hub.clone(),
-                    taken: self.source_names(ConnectorList::Stac),
+                    taken: self.source_names(),
                 };
-                self.palette.open(PaletteMode::Open);
+                self.palette.open(PaletteMode::Commands);
                 self.palette.browse(Box::new(provider));
-            }
-            ConnectorCommand::AddFolder => {
-                let Some(path) = rfd::FileDialog::new().pick_folder() else {
-                    return;
-                };
-                let taken = self.source_names(ConnectorList::Folders);
-                self.palette.open(PaletteMode::Open);
-                self.palette
-                    .browse(Box::new(NameProvider::for_folder(path, taken)));
             }
             ConnectorCommand::Remove => {
                 let items = self.removable_rows();
-                self.palette.open(PaletteMode::Open);
+                self.palette.open(PaletteMode::Commands);
                 self.palette.browse(Box::new(ListProvider {
-                    title: "Remove data source".to_owned(),
+                    title: "Remove STAC source".to_owned(),
                     items,
                 }));
             }
             ConnectorCommand::Save(source) => self.save_source(source),
-            ConnectorCommand::Delete(list, name) => self.delete_source(list, &name),
+            ConnectorCommand::Delete(name) => self.delete_source(&name),
             ConnectorCommand::ClearCache => self.clear_source_cache(),
         }
     }
 
-    fn source_names(&self, list: ConnectorList) -> Vec<String> {
+    fn source_names(&self) -> Vec<String> {
         let connectors = &self.user_config.connectors;
-        match list {
-            ConnectorList::Stac => connectors.stac.iter().map(|c| c.name.clone()).collect(),
-            ConnectorList::Folders => connectors.folders.iter().map(|c| c.name.clone()).collect(),
-        }
+        connectors.stac.iter().map(|c| c.name.clone()).collect()
     }
 
     /// The configured sources, those in the user file removable, those only
@@ -749,22 +614,17 @@ impl ViewerApp {
             .and_then(config::Locations::user_file)
             .map(|file| config::read_file(&file).0.connectors)
             .unwrap_or_default();
-        let user_names = data_sources(&in_user_file, None);
-        let configured = data_sources(&self.user_config.connectors, None);
+        let user_names = data_sources(&in_user_file);
+        let configured = data_sources(&self.user_config.connectors);
         let rows: Vec<_> = configured
             .into_iter()
             .map(|source| {
-                let in_user = user_names
-                    .iter()
-                    .any(|user| user.name == source.name && user.kind.list() == source.kind.list());
+                let in_user = user_names.iter().any(|user| user.name == source.name);
                 let detail = source.kind.describe();
                 if in_user {
                     PaletteItem::new(
                         source.name.clone(),
-                        ItemAction::Run(Command::Connector(ConnectorCommand::Delete(
-                            source.kind.list(),
-                            source.name,
-                        ))),
+                        ItemAction::Run(Command::Connector(ConnectorCommand::Delete(source.name))),
                     )
                     .with_detail(detail)
                 } else {
@@ -785,11 +645,8 @@ impl ViewerApp {
         };
         let entry = match &source.kind {
             SourceKind::Stac(url) => json!({ "name": source.name, "url": url }),
-            SourceKind::Folder(path) => {
-                json!({ "name": source.name, "path": path.display().to_string() })
-            }
         };
-        match config::add_connector(&file, source.kind.list(), entry) {
+        match config::add_connector(&file, entry) {
             Ok(_) => {
                 self.reload_config();
                 self.user_config.inform(format!(
@@ -804,17 +661,15 @@ impl ViewerApp {
         }
     }
 
-    fn delete_source(&mut self, list: ConnectorList, name: &str) {
+    fn delete_source(&mut self, name: &str) {
         let Some(file) = self.user_settings_file() else {
             return;
         };
         let removed_url = self.sources.iter().find_map(|source| match &source.kind {
-            SourceKind::Stac(url) if source.name == name && list == ConnectorList::Stac => {
-                Some(url.clone())
-            }
-            _ => None,
+            SourceKind::Stac(url) if source.name == name => Some(url.clone()),
+            SourceKind::Stac(_) => None,
         });
-        match config::remove_connector(&file, list, name) {
+        match config::remove_connector(&file, name) {
             Ok(_) => {
                 self.reload_config();
                 // Its cached listings go too, unless a source left (in the
@@ -884,7 +739,7 @@ impl ViewerApp {
 
 #[cfg(test)]
 mod tests {
-    use crate::config::{FolderConnector, StacConnector};
+    use crate::config::StacConnector;
     use crate::stac::{Asset, AssetKind};
 
     use super::*;
@@ -972,41 +827,6 @@ mod tests {
     }
 
     #[test]
-    fn folder_rows_should_name_files_and_note_whats_not_shown() {
-        let scan = folder_scan::Scan {
-            files: vec![
-                PathBuf::from("a.copc.laz"),
-                Path::new("site").join("b.copc.laz"),
-            ],
-            not_listed: 3,
-            incomplete: false,
-        };
-        let rows = folder_rows(Path::new("data"), &scan);
-        let shown: Vec<_> = rows
-            .iter()
-            .map(|row| (row.title.as_str(), row.detail.as_str(), row.enabled))
-            .collect();
-        assert_eq!(shown[0], ("a.copc.laz", "", true));
-        assert_eq!(shown[1], ("b.copc.laz", "site", true));
-        assert_eq!(shown[2].0, "3 more not shown");
-        assert!(!shown[2].2);
-        let ItemAction::Run(Command::OpenSource(path)) = &rows[1].action else {
-            panic!("a file row opens the file");
-        };
-        assert_eq!(
-            Path::new(path),
-            Path::new("data").join("site").join("b.copc.laz")
-        );
-    }
-
-    #[test]
-    fn an_empty_folder_should_say_so() {
-        let rows = folder_rows(Path::new("data"), &folder_scan::Scan::default());
-        assert_eq!(rows.len(), 1);
-        assert!(!rows[0].enabled);
-    }
-
-    #[test]
     fn stac_names_should_default_to_the_title_then_the_host() {
         assert_eq!(
             default_stac_name(Some(" NatureScan STAC API "), "https://x.example/"),
@@ -1072,50 +892,20 @@ mod tests {
     }
 
     #[test]
-    fn folder_names_should_default_to_the_folders_name() {
-        assert_eq!(default_folder_name(Path::new("/data/surveys")), "surveys");
-    }
-
-    #[test]
-    fn the_workspace_should_be_a_source_unless_its_home_or_a_root() {
-        let temp = tempfile::tempdir().unwrap();
-        let project = temp.path().join("project");
-        std::fs::create_dir(&project).unwrap();
-        let source = workspace_source(&project, None).unwrap();
-        assert_eq!(source.name, "Workspace: project");
-        assert_eq!(source.kind, SourceKind::Folder(project.clone()));
-        assert_eq!(workspace_source(&project, Some(&project)), None);
-        let root = project.ancestors().last().unwrap();
-        assert_eq!(workspace_source(root, None), None);
-        assert_eq!(workspace_source(&temp.path().join("missing"), None), None);
-    }
-
-    #[test]
-    fn data_sources_should_list_stac_then_folders_then_the_workspace() {
-        let temp = tempfile::tempdir().unwrap();
-        let connectors = Connectors {
-            stac: vec![StacConnector {
-                name: "S".to_owned(),
-                url: "https://s.example/".to_owned(),
-            }],
-            folders: vec![FolderConnector {
-                name: "F".to_owned(),
-                path: PathBuf::from("f"),
-            }],
+    fn data_sources_should_list_the_stac_connectors_in_order() {
+        let stac = |name: &str| StacConnector {
+            name: name.to_owned(),
+            url: format!("https://{name}.example/"),
         };
-        let names: Vec<_> = data_sources(&connectors, Some(temp.path()))
-            .into_iter()
-            .map(|source| source.name)
-            .collect();
-        let workspace = format!(
-            "Workspace: {}",
-            temp.path()
-                .canonicalize()
-                .unwrap()
-                .file_name()
-                .unwrap()
-                .to_string_lossy()
+        let connectors = Connectors {
+            stac: vec![stac("b"), stac("a")],
+        };
+        let sources = data_sources(&connectors);
+        let names: Vec<_> = sources.iter().map(|source| source.name.as_str()).collect();
+        assert_eq!(names, ["b", "a"]);
+        assert_eq!(
+            sources[0].kind,
+            SourceKind::Stac("https://b.example/".to_owned())
         );
-        assert_eq!(names, ["S".to_owned(), "F".to_owned(), workspace]);
     }
 }

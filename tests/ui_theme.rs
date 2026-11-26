@@ -80,7 +80,7 @@ fn press(harness: &mut Harness<'_, impl eframe::App>, key: Key) {
 
 /// Opens the command palette and runs Select theme… from it.
 fn open_theme_selector(harness: &mut Harness<'_, impl eframe::App>) {
-    harness.key_press_modifiers(Modifiers::COMMAND | Modifiers::SHIFT, Key::P);
+    harness.key_press_modifiers(Modifiers::COMMAND, Key::P);
     harness.run_ok();
     harness.event(egui::Event::Text("select theme".to_owned()));
     harness.run_ok();

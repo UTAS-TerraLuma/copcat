@@ -2,13 +2,13 @@
 //! bad value costs only itself, and writing a [`Config`] back as JSON.
 
 use std::ops::RangeInclusive;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use serde_json::{Map, Value, json};
 
 use super::{
-    Binding, ColorModeName, Config, FolderConnector, PointSizeModeName, StacConnector, Warning,
-    jsonc, projection_name, ranges,
+    Binding, ColorModeName, Config, PointSizeModeName, StacConnector, Warning, jsonc,
+    projection_name, ranges,
 };
 use crate::camera::Projection;
 
@@ -163,7 +163,9 @@ impl Reader<'_> {
         if let Some(bindings) = top.get("keybindings").filter(|value| !value.is_null()) {
             self.keybindings(bindings, &mut config);
         }
-        if let Some(connectors) = self.child(top, "", "connectors", &["stac", "folders"]) {
+        // Folder sources (`connectors.folders`) are gone: one left in an old
+        // file is an unknown setting, warned about and otherwise left alone.
+        if let Some(connectors) = self.child(top, "", "connectors", &["stac"]) {
             self.connectors(connectors, &mut config);
         }
         config
@@ -228,28 +230,6 @@ impl Reader<'_> {
                 vec![StacConnector { name, url }],
             );
         }
-        for (index, entry) in self.list(connectors, "connectors", "folders") {
-            let path = format!("connectors.folders[{index}]");
-            let Some(entry) = self.object(entry, &path, &["name", "path"]) else {
-                continue;
-            };
-            let (Some(name), Some(folder)) = (
-                self.required_string(entry, &path, "name"),
-                self.required_string(entry, &path, "path"),
-            ) else {
-                continue;
-            };
-            let path = self.resolve(PathBuf::from(folder));
-            self.check_unique(
-                config.connectors.folders.iter().map(|c| &c.name),
-                &name,
-                "folders",
-            );
-            config.connectors.folders = super::merge_by_name(
-                std::mem::take(&mut config.connectors.folders),
-                vec![FolderConnector { name, path }],
-            );
-        }
     }
 
     fn check_unique<'n>(
@@ -262,17 +242,6 @@ impl Reader<'_> {
             self.warn(format!(
                 "connectors.{list} has two entries named {name:?}; the last one is used"
             ));
-        }
-    }
-
-    /// Relative to the folder holding the file's `.copcat` directory.
-    fn resolve(&self, path: PathBuf) -> PathBuf {
-        if path.is_absolute() {
-            return path;
-        }
-        match self.file.and_then(Path::parent).and_then(Path::parent) {
-            Some(base) => base.join(path),
-            None => path,
         }
     }
 
@@ -571,15 +540,6 @@ pub(super) fn to_json(config: &Config) -> Value {
             .map(|c| json!({"name": c.name, "url": c.url}))
             .collect();
         connectors.insert("stac".to_owned(), Value::Array(stac));
-    }
-    if !config.connectors.folders.is_empty() {
-        let folders = config
-            .connectors
-            .folders
-            .iter()
-            .map(|c| json!({"name": c.name, "path": c.path.display().to_string()}))
-            .collect();
-        connectors.insert("folders".to_owned(), Value::Array(folders));
     }
     put_object(&mut top, "connectors", connectors);
     Value::Object(top)

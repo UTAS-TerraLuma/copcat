@@ -4,14 +4,15 @@
 //!
 //! Each command has metadata ([`CommandInfo`]): a stable id, a title for
 //! people and an optional default shortcut. [`Command::all`] lists every
-//! command that needs no argument, so a command palette can offer them, and
-//! [`Keymap`] maps shortcuts to commands by id, so a settings file can
-//! rebind them.
+//! command that needs no argument, so a settings file (or a tool) can name
+//! any of them by id, and [`Keymap`] maps shortcuts to commands by id, so a
+//! settings file can rebind them. The command palette lists only a curated
+//! subset, [`Command::palette`]: the rest (modes, subcloud tools, the views
+//! from each side) have buttons or shortcuts of their own.
 
 use eframe::egui::{self, Key, KeyboardShortcut, Modifiers};
 
 use crate::camera::{Projection, ViewPreset};
-use crate::config::ConnectorList;
 use crate::subcloud::ShapeKind;
 
 use super::Mode;
@@ -57,11 +58,12 @@ pub(crate) enum Command {
     RetryFailedNodes,
     /// Show or hide the Diagnostics section.
     ToggleDiagnostics,
-    /// Show the command palette, listing every command.
+    /// Show the command palette, listing the commands in
+    /// [`Command::palette`].
     ShowCommands,
-    /// Show the command palette's quick open list of sources.
+    /// Show quick open: sources to open, and ways to open more.
     QuickOpen,
-    /// Open, reload or save the settings files.
+    /// Open the settings window, or open, reload or save the settings files.
     Settings(SettingsCommand),
     /// Show the built-in theme with this id, for now: the theme selector
     /// previews the theme under its selection with this.
@@ -78,14 +80,12 @@ pub(crate) enum Command {
 pub(crate) enum ConnectorCommand {
     /// Ask for a STAC catalog's URL and a name, then save it.
     AddStac,
-    /// Choose a folder and ask for a name, then save it.
-    AddFolder,
     /// Choose a data source to remove from the user settings.
     Remove,
     /// Add a data source to the user settings file.
     Save(NewSource),
     /// Remove the data source with this name from the user settings file.
-    Delete(ConnectorList, String),
+    Delete(String),
     /// Delete the data sources' listings and thumbnails kept on disk.
     ClearCache,
 }
@@ -93,20 +93,24 @@ pub(crate) enum ConnectorCommand {
 /// What to do with the settings files (see `crate::config`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum SettingsCommand {
+    /// Show the settings window.
+    OpenWindow,
     /// Open the user settings file, creating it if it's missing.
     OpenUser,
     /// Open the workspace settings file, creating it if it's missing.
     OpenWorkspace,
     /// Read the settings files again and apply them.
     Reload,
-    /// Write the display and performance settings into the user file.
+    /// Write the rendering (display and performance) settings into the user
+    /// file.
     SaveDisplayDefaults,
     /// List the themes in the palette, previewing the one selected.
     SelectTheme,
 }
 
 impl SettingsCommand {
-    pub(crate) const ALL: [Self; 5] = [
+    pub(crate) const ALL: [Self; 6] = [
+        Self::OpenWindow,
         Self::OpenUser,
         Self::OpenWorkspace,
         Self::Reload,
@@ -147,8 +151,9 @@ const fn info(
 }
 
 impl Command {
-    /// Every command that needs no argument, in the order a palette might
-    /// list them. Leaves out [`Command::OpenSource`], which needs a source.
+    /// Every command that needs no argument: what a settings file's
+    /// keybindings can name. Leaves out [`Command::OpenSource`], which needs
+    /// a source.
     pub(crate) fn all() -> Vec<Self> {
         let mut commands = vec![
             Self::OpenFileDialog,
@@ -180,7 +185,51 @@ impl Command {
         commands.extend(
             [
                 ConnectorCommand::AddStac,
-                ConnectorCommand::AddFolder,
+                ConnectorCommand::Remove,
+                ConnectorCommand::ClearCache,
+            ]
+            .map(Self::Connector),
+        );
+        commands
+    }
+
+    /// The commands the command palette lists, in its order: a curated
+    /// subset of [`Command::all`]. The rest still have ids and shortcuts,
+    /// but are reached from their own buttons (modes, subcloud tools, the
+    /// gizmo's views from each side) or keys.
+    pub(crate) fn palette() -> Vec<Self> {
+        let mut commands = vec![
+            Self::QuickOpen,
+            Self::OpenFileDialog,
+            Self::OpenUrlDialog,
+            Self::BrowseSources,
+            Self::SetProjection(Projection::Perspective),
+            Self::SetProjection(Projection::Orthographic),
+            Self::ToggleProjection,
+            Self::ResetView,
+            Self::ToggleEdl,
+        ];
+        commands.extend(ColorMode::ALL.map(Self::SetColorMode));
+        commands.extend([
+            Self::SaveImage,
+            Self::CopyCommandLine,
+            Self::RetryFailedNodes,
+            Self::ToggleDiagnostics,
+        ]);
+        commands.extend(
+            [
+                SettingsCommand::OpenWindow,
+                SettingsCommand::OpenUser,
+                SettingsCommand::OpenWorkspace,
+                SettingsCommand::Reload,
+                SettingsCommand::SaveDisplayDefaults,
+                SettingsCommand::SelectTheme,
+            ]
+            .map(Self::Settings),
+        );
+        commands.extend(
+            [
+                ConnectorCommand::AddStac,
                 ConnectorCommand::Remove,
                 ConnectorCommand::ClearCache,
             ]
@@ -206,9 +255,9 @@ impl Command {
     pub(crate) fn info(&self) -> CommandInfo {
         match self {
             Self::OpenSource(_) => info("file.open_source", "Open source", None),
-            Self::OpenFileDialog => info("file.open", "Open file…", command_key(Key::O)),
-            Self::OpenUrlDialog => info("file.open_url", "Open URL…", command_key(Key::L)),
-            Self::BrowseSources => info("sources.list", "Browse data sources…", None),
+            Self::OpenFileDialog => info("file.open", "Open file…", None),
+            Self::OpenUrlDialog => info("file.open_url", "Open URL…", None),
+            Self::BrowseSources => info("sources.list", "Browse STAC sources…", None),
             Self::SetMode(Mode::Explore) => info("mode.explore", "Explore mode", None),
             Self::SetMode(Mode::Subcloud) => info("mode.subcloud", "Return to the subcloud", None),
             Self::SubcloudTool(ShapeKind::Line) => {
@@ -268,16 +317,10 @@ impl Command {
                     Key::D,
                 )),
             ),
-            Self::ShowCommands => info(
-                "palette.commands",
-                "Show all commands",
-                Some(KeyboardShortcut::new(
-                    Modifiers::COMMAND.plus(Modifiers::SHIFT),
-                    Key::P,
-                )),
-            ),
-            Self::QuickOpen => info("palette.open", "Quick open…", command_key(Key::P)),
+            Self::ShowCommands => info("palette.commands", "Command palette", command_key(Key::P)),
+            Self::QuickOpen => info("palette.open", "Quick open…", command_key(Key::O)),
             Self::Settings(command) => match command {
+                SettingsCommand::OpenWindow => info("settings.open", "Settings…", None),
                 SettingsCommand::OpenUser => info("settings.open_user", "Open user settings", None),
                 SettingsCommand::OpenWorkspace => {
                     info("settings.open_workspace", "Open workspace settings", None)
@@ -285,7 +328,7 @@ impl Command {
                 SettingsCommand::Reload => info("settings.reload", "Reload settings", None),
                 SettingsCommand::SaveDisplayDefaults => info(
                     "settings.save_display_defaults",
-                    "Save current display settings as defaults",
+                    "Save current rendering settings as defaults",
                     None,
                 ),
                 SettingsCommand::SelectTheme => {
@@ -296,15 +339,12 @@ impl Command {
             Self::SetTheme(_) => info("settings.set_theme", "Set theme", None),
             Self::Connector(command) => match command {
                 ConnectorCommand::AddStac => info("sources.add_stac", "Add STAC source…", None),
-                ConnectorCommand::AddFolder => {
-                    info("sources.add_folder", "Add folder source…", None)
-                }
-                ConnectorCommand::Remove => info("sources.remove", "Remove data source…", None),
+                ConnectorCommand::Remove => info("sources.remove", "Remove STAC source…", None),
                 ConnectorCommand::ClearCache => {
                     info("sources.clear_cache", "Clear data source cache", None)
                 }
                 ConnectorCommand::Save(_) => info("sources.save", "Save data source", None),
-                ConnectorCommand::Delete(..) => info("sources.delete", "Delete data source", None),
+                ConnectorCommand::Delete(_) => info("sources.delete", "Delete data source", None),
             },
         }
     }
@@ -406,7 +446,7 @@ mod tests {
                     name: "S".to_owned(),
                     kind: super::super::connectors::SourceKind::Stac("https://s/".to_owned()),
                 }),
-                ConnectorCommand::Delete(ConnectorList::Stac, "S".to_owned()),
+                ConnectorCommand::Delete("S".to_owned()),
             ]
             .map(Command::Connector),
         );
@@ -499,5 +539,91 @@ mod tests {
     #[test]
     fn bind_should_reject_an_unknown_id() {
         assert!(!Keymap::default().bind("view.nonsense", None));
+    }
+
+    fn in_palette(command: &Command) -> bool {
+        Command::palette().contains(command)
+    }
+
+    #[test]
+    fn ctrl_p_should_show_the_command_palette_and_ctrl_o_quick_open() {
+        let keymap = Keymap::default();
+        assert_eq!(
+            keymap.shortcut("palette.commands"),
+            Some(KeyboardShortcut::new(Modifiers::COMMAND, Key::P))
+        );
+        assert_eq!(
+            keymap.shortcut("palette.open"),
+            Some(KeyboardShortcut::new(Modifiers::COMMAND, Key::O))
+        );
+        // Quick open is the way to open a file or URL by key.
+        assert_eq!(keymap.shortcut("file.open"), None);
+        assert_eq!(keymap.shortcut("file.open_url"), None);
+        assert_eq!(keymap.shortcut("settings.open"), None);
+    }
+
+    #[test]
+    fn the_palette_should_list_a_subset_of_every_command_once() {
+        let all = Command::all();
+        let listed = Command::palette();
+        for command in &listed {
+            assert!(all.contains(command), "{command:?} isn't in Command::all");
+        }
+        let ids: HashSet<_> = listed.iter().map(Command::id).collect();
+        assert_eq!(ids.len(), listed.len(), "listed twice");
+        assert_eq!(listed[0], Command::QuickOpen, "quick open comes first");
+    }
+
+    #[test]
+    fn the_palette_should_leave_out_modes_tools_side_views_and_itself() {
+        let unlisted = [
+            "mode.explore",
+            "mode.subcloud",
+            "subcloud.tool_line",
+            "subcloud.tool_circle",
+            "subcloud.tool_square",
+            "subcloud.cancel_tool",
+            "subcloud.close",
+            "view.top",
+            "view.bottom",
+            "view.front",
+            "view.back",
+            "view.right",
+            "view.left",
+            "palette.commands",
+        ];
+        for id in unlisted {
+            let command = Command::from_id(id).unwrap_or_else(|| panic!("no command {id}"));
+            assert!(!in_palette(&command), "{id} is listed");
+        }
+        // Every other argument-free command is listed.
+        for command in Command::all() {
+            assert_eq!(
+                in_palette(&command),
+                !unlisted.contains(&command.id()),
+                "{}",
+                command.id()
+            );
+        }
+    }
+
+    #[test]
+    fn unlisted_commands_should_keep_their_ids_and_shortcuts() {
+        let keymap = Keymap::default();
+        for (id, key) in [
+            ("view.top", Key::Num7),
+            ("view.front", Key::Num1),
+            ("view.right", Key::Num3),
+        ] {
+            assert!(Command::from_id(id).is_some_and(|command| !in_palette(&command)));
+            assert_eq!(
+                keymap.shortcut(id),
+                Some(KeyboardShortcut::new(Modifiers::NONE, key))
+            );
+        }
+        assert_eq!(
+            keymap.shortcut("view.bottom"),
+            Some(KeyboardShortcut::new(Modifiers::COMMAND, Key::Num7))
+        );
     }
 }

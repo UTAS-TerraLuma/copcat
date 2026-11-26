@@ -1,17 +1,18 @@
-//! Opening a cloud: the menu bar and the file dialog. Each asks for a [`Command`] rather than opening anything itself;
-//! a URL is asked for in the command palette.
+//! Opening a cloud: the menu bar and the file dialog. Each asks for a
+//! [`Command`] rather than doing anything itself; a URL is asked for in the
+//! command palette.
 
 use eframe::egui;
 
-use super::commands::{Command, Keymap};
+use super::commands::{Command, Keymap, SettingsCommand};
 
 /// What the file dialog offers. COPC files end `.copc.laz`, which the
 /// dialog can't match as one extension, so it shows every `.laz`.
 const FILE_FILTER: (&str, &[&str]) = ("COPC point cloud (*.copc.laz)", &["laz"]);
 
 /// The menu bar along the top of the window: File, for `.copcat` files
-/// still to come, and Open, which opens a file or URL or browses the data
-/// sources.
+/// still to come and the settings; Open, which opens a file or URL or
+/// browses the data sources; and View, which shows the command palette.
 pub(crate) fn menu_bar(ui: &mut egui::Ui, keymap: &Keymap, commands: &mut Vec<Command>) {
     egui::MenuBar::new().ui(ui, |ui| {
         ui.menu_button("File", |ui| {
@@ -20,6 +21,31 @@ pub(crate) fn menu_bar(ui: &mut egui::Ui, keymap: &Keymap, commands: &mut Vec<Co
             for title in ["Open .copcat file…", "Save .copcat file…"] {
                 ui.add_enabled(false, egui::Button::new(title))
                     .on_disabled_hover_text(later);
+            }
+            ui.separator();
+            let settings = [
+                (
+                    SettingsCommand::OpenWindow,
+                    "The theme, the default rendering settings and the settings files",
+                ),
+                (
+                    SettingsCommand::OpenUser,
+                    "Your settings file, for every folder, in the system's editor",
+                ),
+                (
+                    SettingsCommand::OpenWorkspace,
+                    "This folder's settings file, over yours, in the system's editor",
+                ),
+            ];
+            for (command, hover) in settings {
+                let command = Command::Settings(command);
+                if titled_button(ui, keymap, command.title(), &command)
+                    .on_hover_text(hover)
+                    .clicked()
+                {
+                    commands.push(command);
+                    ui.close();
+                }
             }
         });
         ui.menu_button("Open", |ui| {
@@ -48,6 +74,16 @@ pub(crate) fn menu_bar(ui: &mut egui::Ui, keymap: &Keymap, commands: &mut Vec<Co
                     commands.push(command);
                     ui.close();
                 }
+            }
+        });
+        ui.menu_button("View", |ui| {
+            let command = Command::ShowCommands;
+            if titled_button(ui, keymap, command.title(), &command)
+                .on_hover_text("Search the commands, and run one")
+                .clicked()
+            {
+                commands.push(command);
+                ui.close();
             }
         });
     });

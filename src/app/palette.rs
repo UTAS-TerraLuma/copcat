@@ -1,11 +1,15 @@
-//! The command palette: one overlay, opened in two modes, as in VS Code.
+//! The command palette and quick open: one overlay, with two roots.
 //!
-//! - **Command mode** (Ctrl+Shift+P, `palette.commands`) lists every
-//!   [`Command`], greying out those that can't run now.
-//! - **Open mode** (Ctrl+P, `palette.open`) lists sources: an "Open …" item
-//!   for a typed URL or existing file, the sources opened this session, and
-//!   the ways to open something else. Typing `>` switches to command mode;
-//!   command mode is just open mode with a `>` in front.
+//! - **The command palette** (Ctrl+P, `palette.commands`) lists the
+//!   curated commands in [`Command::palette`], greying out those that can't
+//!   run now. Every other command still has an id and maybe a shortcut.
+//! - **Quick open** (Ctrl+O, `palette.open`) lists sources: an "Open …" item
+//!   for a typed URL or existing file, the sources opened this session, the
+//!   user's STAC sources, and the ways to open something else (From file…,
+//!   From URL…, From STAC…).
+//!
+//! Which root is showing is kept in the [`Palette`] ([`PaletteMode`]), not
+//! in the text typed: each shortcut opens its own root.
 //!
 //! The logic (filtering, ranking, selection, levels) is plain data and
 //! functions, tested without egui; [`ViewerApp::palette_ui`] only draws it.
@@ -32,13 +36,13 @@
 //! back the one that was showing if nothing is chosen.
 //!
 //! A connector (a STAC catalog's collections, then a collection's items,
-//! then an item's COPC assets; or the files in a folder) is a provider whose
+//! then an item's COPC assets) is a provider whose
 //! items `Browse` into further providers, ending in items that
 //! `Run(Command::OpenSource(url))`. Providers whose items take a while to
 //! fetch return [`Listing::loading`] until they're ready, polled each frame;
 //! [`FeedProvider`](super::feed::FeedProvider) does that for loads run on a
 //! thread, with paging and refreshing, and [`ListProvider`] lists items
-//! already in hand. Connectors' roots are offered in open mode through
+//! already in hand. Connectors' roots are offered in quick open through
 //! [`Palette::set_connectors`]; see [`super::connectors`].
 
 use std::path::Path;
@@ -283,7 +287,7 @@ pub(crate) trait Provider: Send {
     }
 }
 
-/// Every command, as listed in command mode.
+/// The command palette's list: the commands in [`Command::palette`].
 #[derive(Default)]
 pub(crate) struct CommandProvider;
 
@@ -298,7 +302,7 @@ impl Provider for CommandProvider {
 
     fn items(&mut self, _query: &str, env: &Env<'_>) -> Listing {
         Listing::ready(
-            Command::all()
+            Command::palette()
                 .into_iter()
                 .map(|command| PaletteItem::command(command, env))
                 .collect(),
@@ -306,10 +310,19 @@ impl Provider for CommandProvider {
     }
 }
 
-/// How many sources open mode remembers.
+/// How many sources quick open remembers.
 const RECENT_LIMIT: usize = 20;
 
-/// Open mode's list: a typed source, recent sources, and ways to open more.
+/// Quick open's ways to open something else, after the sources: a title for
+/// each and the command it runs.
+const OPEN_WAYS: [(&str, Command); 3] = [
+    ("From file…", Command::OpenFileDialog),
+    ("From URL…", Command::OpenUrlDialog),
+    ("From STAC…", Command::BrowseSources),
+];
+
+/// Quick open's list: a typed source, recent sources, the data sources, and
+/// ways to open more.
 #[derive(Default)]
 pub(crate) struct SourceProvider {
     /// Most recent first, without repeats.
@@ -347,7 +360,7 @@ impl Provider for SourceProvider {
     }
 
     fn hint(&self) -> String {
-        "Search recent sources, type a path or URL, or > for commands".to_owned()
+        "Search recent sources, or type a path or URL".to_owned()
     }
 
     fn items(&mut self, query: &str, env: &Env<'_>) -> Listing {
@@ -359,8 +372,10 @@ impl Provider for SourceProvider {
             )
             .with_detail(source.clone())
         });
-        let more = [Command::OpenFileDialog, Command::OpenUrlDialog]
-            .map(|command| PaletteItem::command(command, env));
+        let more = OPEN_WAYS.map(|(title, command)| PaletteItem {
+            title: title.to_owned(),
+            ..PaletteItem::command(command, env)
+        });
         let mut items: Vec<_> = typed.map(open_typed_item).into_iter().collect();
         let listed = recent.chain(self.connectors.iter().cloned()).chain(more);
         items.extend(rank(listed.collect(), query));
@@ -510,22 +525,15 @@ pub(crate) fn step_selection(
     Some(at)
 }
 
-/// Which list the palette shows at its root.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// Which list the palette shows at its root, below any sub-lists and
+/// prompts.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) enum PaletteMode {
-    /// Every command.
+    /// The command palette: the commands in [`Command::palette`].
     Commands,
-    /// Sources to open.
+    /// Quick open: sources to open.
+    #[default]
     Open,
-}
-
-/// The mode for the text in the field at the root, and the text to filter
-/// by: a leading `>` means commands.
-pub(crate) fn split_mode(query: &str) -> (PaletteMode, &str) {
-    match query.strip_prefix('>') {
-        Some(rest) => (PaletteMode::Commands, rest.trim_start()),
-        None => (PaletteMode::Open, query),
-    }
 }
 
 /// A level above the root: a sub-list or a prompt, and the text that was in
@@ -547,6 +555,8 @@ pub(crate) struct View {
 #[derive(Default)]
 pub(crate) struct Palette {
     open: bool,
+    /// The list at the root: the command palette or quick open.
+    root: PaletteMode,
     /// The field's text.
     pub(crate) query: String,
     /// The query the selection was made for: a new query resets it.
@@ -579,14 +589,13 @@ impl Palette {
         self.open
     }
 
-    /// Shows the palette at its root, in `mode`, with an empty filter.
+    /// Shows the palette with `mode`'s list at its root, with an empty
+    /// filter.
     pub(crate) fn open(&mut self, mode: PaletteMode) {
         self.open = true;
         self.leave_levels();
-        self.query = match mode {
-            PaletteMode::Commands => ">".to_owned(),
-            PaletteMode::Open => String::new(),
-        };
+        self.root = mode;
+        self.query.clear();
         self.selected_for = None;
         self.cursor_to_end = true;
     }
@@ -641,7 +650,7 @@ impl Palette {
         self.sources.remember(source);
     }
 
-    /// Lists `items`, each browsing into a data source, in open mode.
+    /// Lists `items`, each browsing into a data source, in quick open.
     pub(crate) fn set_connectors(&mut self, items: Vec<PaletteItem>) {
         self.sources.connectors = items;
     }
@@ -656,8 +665,8 @@ impl Palette {
         self.cursor_to_end = true;
     }
 
-    /// Shows the palette asking for `prompt`'s text, above open mode's
-    /// root, as choosing an item that prompts would.
+    /// Shows the palette asking for `prompt`'s text, above quick open, as
+    /// choosing an item that prompts would.
     pub(crate) fn ask(&mut self, prompt: ArgPrompt) {
         self.open(PaletteMode::Open);
         self.levels
@@ -700,7 +709,7 @@ impl Palette {
         match self.levels.last() {
             Some((Level::Browse(provider), _)) => provider.hint(),
             Some((Level::Prompt(prompt), _)) => prompt.hint.to_owned(),
-            None => match split_mode(&self.query).0 {
+            None => match self.root {
                 PaletteMode::Commands => self.commands.hint(),
                 PaletteMode::Open => self.sources.hint(),
             },
@@ -712,12 +721,11 @@ impl Palette {
     pub(crate) fn view(&mut self, env: &Env<'_>) -> View {
         let view = match self.levels.last_mut() {
             None => {
-                let (mode, filter) = split_mode(&self.query);
-                let provider: &mut dyn Provider = match mode {
+                let provider: &mut dyn Provider = match self.root {
                     PaletteMode::Commands => &mut self.commands,
                     PaletteMode::Open => &mut self.sources,
                 };
-                listing_view(provider, filter, env)
+                listing_view(provider, &self.query, env)
             }
             Some((Level::Browse(provider), _)) => listing_view(provider.as_mut(), &self.query, env),
             Some((Level::Prompt(prompt), _)) => View {
@@ -866,9 +874,8 @@ impl ViewerApp {
 
 impl Palette {
     fn show(&mut self, ctx: &egui::Context, theme: &Theme, env: &Env<'_>) -> Option<Command> {
-        // The palette's own shortcuts switch it between modes, as in VS
-        // Code; other shortcuts don't fire while it's open. Ctrl+Shift+P
-        // first, as Ctrl+P would match it too.
+        // The palette's own shortcuts open their list in its place, as in
+        // VS Code; other shortcuts don't fire while it's open.
         let switch_to = [
             ("palette.commands", PaletteMode::Commands),
             ("palette.open", PaletteMode::Open),
@@ -1160,9 +1167,8 @@ fn same_size_rows(ui: &mut egui::Ui) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::Mode;
     use crate::app::settings::ColorMode;
-    use crate::camera::ViewPreset;
+    use crate::camera::{Projection, ViewPreset};
 
     fn env_with<'a>(can_run: &'a dyn Fn(&Command) -> bool, keymap: &'a Keymap) -> Env<'a> {
         Env { can_run, keymap }
@@ -1298,12 +1304,6 @@ mod tests {
     }
 
     #[test]
-    fn split_mode_should_treat_a_leading_chevron_as_command_mode() {
-        assert_eq!(split_mode("> top"), (PaletteMode::Commands, "top"));
-        assert_eq!(split_mode("top"), (PaletteMode::Open, "top"));
-    }
-
-    #[test]
     fn looks_like_url_should_want_a_scheme() {
         assert!(looks_like_url("https://example.com/a.copc.laz"));
         assert!(looks_like_url("s3://bucket/a.copc.laz"));
@@ -1323,21 +1323,44 @@ mod tests {
     }
 
     #[test]
-    fn command_mode_should_list_every_command() {
+    fn the_command_palette_should_list_just_the_curated_commands_in_order() {
         let mut palette = Palette::default();
         palette.open(PaletteMode::Commands);
-        assert_eq!(view_of(&mut palette).items.len(), Command::all().len());
+        let view = view_of(&mut palette);
+        let listed: Vec<_> = Command::palette()
+            .iter()
+            .map(|command| command.title())
+            .collect();
+        assert_eq!(titles(&view.items), listed);
+        assert!(listed.len() < Command::all().len());
+    }
+
+    #[test]
+    fn the_command_palette_should_not_find_unlisted_commands() {
+        let mut palette = Palette::default();
+        palette.open(PaletteMode::Commands);
+        for typed in ["view from top", "return to the subcloud", "command palette"] {
+            palette.query.clear();
+            let view = type_text(&mut palette, typed);
+            assert!(
+                view.items
+                    .iter()
+                    .all(|item| !item.title.eq_ignore_ascii_case(typed)),
+                "{typed}: {:?}",
+                titles(&view.items)
+            );
+        }
     }
 
     #[test]
     fn command_mode_should_grey_out_commands_that_cant_run() {
         let mut palette = Palette::default();
         palette.open(PaletteMode::Commands);
-        palette.query.push_str("view from top");
+        palette.query.push_str("reset view");
         let keymap = Keymap::default();
-        let can_run = |command: &Command| !matches!(command, Command::SetView(_));
+        let can_run = |command: &Command| *command != Command::ResetView;
         let view = palette.view(&env_with(&can_run, &keymap));
-        assert_eq!(titles(&view.items)[0], "View from top");
+        assert_eq!(titles(&view.items)[0], "Reset view");
         assert!(!view.items[0].enabled);
         assert_eq!(palette.selected, None);
     }
@@ -1365,7 +1388,7 @@ mod tests {
     fn arrow_keys_should_move_the_selection() {
         let mut palette = Palette::default();
         palette.open(PaletteMode::Commands);
-        let view = type_text(&mut palette, "view from");
+        let view = type_text(&mut palette, "colour by");
         assert_eq!(palette.selected, Some(0));
         palette.move_selection(&view.items, 1);
         assert_eq!(palette.selected, Some(1));
@@ -1382,8 +1405,11 @@ mod tests {
         palette.open(PaletteMode::Commands);
         let view = view_of(&mut palette);
         palette.move_selection(&view.items, 3);
-        type_text(&mut palette, "return to the subcloud");
-        assert_eq!(enter(&mut palette), Some(Command::SetMode(Mode::Subcloud)));
+        type_text(&mut palette, "orthographic projection");
+        assert_eq!(
+            enter(&mut palette),
+            Some(Command::SetProjection(Projection::Orthographic))
+        );
     }
 
     #[test]
@@ -1434,8 +1460,30 @@ mod tests {
         let view = view_of(&mut palette);
         assert_eq!(
             titles(&view.items),
-            ["a.copc.laz", "b.copc.laz", "Open file…", "Open URL…"]
+            [
+                "a.copc.laz",
+                "b.copc.laz",
+                "From file…",
+                "From URL…",
+                "From STAC…"
+            ]
         );
+    }
+
+    #[test]
+    fn quick_opens_ways_to_open_should_run_their_commands() {
+        let mut palette = Palette::default();
+        palette.open(PaletteMode::Open);
+        type_text(&mut palette, "from file");
+        assert_eq!(enter(&mut palette), Some(Command::OpenFileDialog));
+        palette.open(PaletteMode::Open);
+        type_text(&mut palette, "from stac");
+        assert_eq!(enter(&mut palette), Some(Command::BrowseSources));
+        // From URL… asks for it in the palette.
+        palette.open(PaletteMode::Open);
+        type_text(&mut palette, "from url");
+        assert_eq!(enter(&mut palette), None);
+        assert_eq!(palette.breadcrumb().as_deref(), Some("Open URL"));
     }
 
     #[test]
@@ -1455,16 +1503,31 @@ mod tests {
             palette.remember(&format!("https://example.com/{at}.copc.laz"));
         }
         palette.open(PaletteMode::Open);
-        assert_eq!(view_of(&mut palette).items.len(), RECENT_LIMIT + 2);
+        assert_eq!(
+            view_of(&mut palette).items.len(),
+            RECENT_LIMIT + OPEN_WAYS.len()
+        );
     }
 
     #[test]
-    fn typing_a_chevron_should_switch_open_mode_to_commands() {
+    fn a_chevron_should_not_switch_quick_open_to_commands() {
         let mut palette = Palette::default();
         palette.open(PaletteMode::Open);
         let view = type_text(&mut palette, ">");
-        assert_eq!(view.items.len(), Command::all().len());
+        assert!(view.items.is_empty(), "{:?}", titles(&view.items));
+        assert_ne!(palette.hint(), "Type a command");
+    }
+
+    #[test]
+    fn each_root_should_open_with_an_empty_field_and_its_own_hint() {
+        let mut palette = Palette::default();
+        palette.open(PaletteMode::Commands);
+        assert_eq!(palette.query, "");
         assert_eq!(palette.hint(), "Type a command");
+        palette.query.push_str("reset");
+        palette.open(PaletteMode::Open);
+        assert_eq!(palette.query, "");
+        assert_eq!(palette.hint(), SourceProvider::default().hint());
     }
 
     #[test]
@@ -1514,13 +1577,14 @@ mod tests {
         enter(&mut palette);
         palette.back();
         assert!(palette.is_open());
-        assert_eq!(palette.query, ">open url");
+        assert_eq!(palette.query, "open url");
+        assert_eq!(palette.hint(), "Type a command", "back in the commands");
         palette.back();
         assert!(!palette.is_open());
     }
 
-    /// A connector: folders browse into sub-lists of sources.
-    fn folder(name: &'static str, files: &'static [&'static str]) -> PaletteItem {
+    /// A connector: catalogs browse into sub-lists of sources.
+    fn catalog(name: &'static str, files: &'static [&'static str]) -> PaletteItem {
         PaletteItem::new(
             name,
             ItemAction::Browse(Browse::new(move || {
@@ -1545,7 +1609,7 @@ mod tests {
         let mut palette = Palette::default();
         palette.open(PaletteMode::Open);
         palette.query.push_str("sit");
-        let chosen = palette.choose(folder("sites", &["north.copc.laz", "south.copc.laz"]));
+        let chosen = palette.choose(catalog("sites", &["north.copc.laz", "south.copc.laz"]));
         assert_eq!(chosen, None);
         assert_eq!(palette.breadcrumb().as_deref(), Some("sites"));
         let view = view_of(&mut palette);
@@ -1563,7 +1627,7 @@ mod tests {
     fn browse_should_open_a_source_from_a_sub_list() {
         let mut palette = Palette::default();
         palette.open(PaletteMode::Open);
-        palette.choose(folder("sites", &["north.copc.laz"]));
+        palette.choose(catalog("sites", &["north.copc.laz"]));
         assert_eq!(
             enter(&mut palette),
             Some(Command::OpenSource("sites/north.copc.laz".to_owned()))
@@ -1615,7 +1679,7 @@ mod tests {
     fn open_mode_should_list_connectors_by_name() {
         let mut palette = Palette::default();
         palette.set_connectors(vec![
-            folder("Survey data", &["a.copc.laz"]).with_detail("Folder source"),
+            catalog("Survey data", &["a.copc.laz"]).with_detail("STAC source"),
         ]);
         palette.open(PaletteMode::Open);
         let view = type_text(&mut palette, "survey");

@@ -29,8 +29,7 @@ pub(crate) const USER_TEMPLATE: &str = r#"// Copcat user settings. Every key is 
   // "export": { "matchView": true, "width": 1920, "height": 1080 },
   // "keybindings": { "view.top": "7", "view.reset": "Ctrl+R" },
   // "connectors": {
-  //   "stac": [{ "name": "My STAC API", "url": "https://example.com/stac/" }],
-  //   "folders": [{ "name": "Survey data", "path": "D:/data/surveys" }]
+  //   "stac": [{ "name": "My STAC API", "url": "https://example.com/stac/" }]
   // }
 }
 "#;
@@ -38,13 +37,11 @@ pub(crate) const USER_TEMPLATE: &str = r#"// Copcat user settings. Every key is 
 /// What a new workspace settings file says.
 pub(crate) const WORKSPACE_TEMPLATE: &str = r#"// Copcat workspace settings, for when Copcat is started in this folder.
 // They override the user settings (~/.copcat/settings.json) key by key, and
-// take the same keys. Relative folder connector paths are relative to this
-// folder's parent (the folder holding .copcat). See "Settings" in Copcat's
-// README.
+// take the same keys. See "Settings" in Copcat's README.
 {
   // "display": { "colorMode": "classification" },
   // "connectors": {
-  //   "folders": [{ "name": "This project", "path": "." }]
+  //   "stac": [{ "name": "Project STAC", "url": "https://example.com/stac/" }]
   // }
 }
 "#;
@@ -100,34 +97,14 @@ pub(crate) fn save_over(file: &Path, updates: &Value) -> Result<bool, String> {
     })
 }
 
-/// Which connector list in a settings file.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum ConnectorList {
-    Stac,
-    Folders,
-}
-
-impl ConnectorList {
-    fn key(self) -> &'static str {
-        match self {
-            Self::Stac => "stac",
-            Self::Folders => "folders",
-        }
-    }
-}
-
-/// Adds `entry` (an object with a `name`) to `connectors.<list>` in the
+/// Adds `entry` (an object with a `name`) to `connectors.stac` in the
 /// settings file `file`, in place of an entry with the same name, keeping
 /// everything else. Returns whether comments were dropped, as
 /// [`save_over`] does.
-pub(crate) fn add_connector(
-    file: &Path,
-    list: ConnectorList,
-    entry: Value,
-) -> Result<bool, String> {
+pub(crate) fn add_connector(file: &Path, entry: Value) -> Result<bool, String> {
     let name = entry.get("name").cloned();
     edit_file(file, |current| {
-        let entries = connector_list(current, list)?;
+        let entries = stac_list(current)?;
         match entries
             .iter_mut()
             .find(|old| old.get("name") == name.as_ref())
@@ -139,29 +116,24 @@ pub(crate) fn add_connector(
     })
 }
 
-/// Removes the entry named `name` from `connectors.<list>` in `file`.
+/// Removes the entry named `name` from `connectors.stac` in `file`.
 /// Fails, leaving the file alone, if there's no such entry.
-pub(crate) fn remove_connector(
-    file: &Path,
-    list: ConnectorList,
-    name: &str,
-) -> Result<bool, String> {
+pub(crate) fn remove_connector(file: &Path, name: &str) -> Result<bool, String> {
     edit_file(file, |current| {
-        let entries = connector_list(current, list)?;
+        let entries = stac_list(current)?;
         let before = entries.len();
         entries.retain(|entry| entry.get("name").and_then(Value::as_str) != Some(name));
         if entries.len() == before {
             return Err(format!(
-                "there's no connectors.{} entry named {name:?} in it",
-                list.key()
+                "there's no connectors.stac entry named {name:?} in it"
             ));
         }
         Ok(())
     })
 }
 
-/// `connectors.<list>` in `root`, created empty if it's missing.
-fn connector_list(root: &mut Value, list: ConnectorList) -> Result<&mut Vec<Value>, String> {
+/// `connectors.stac` in `root`, created empty if it's missing.
+fn stac_list(root: &mut Value) -> Result<&mut Vec<Value>, String> {
     let wrong = |what: &str| format!("{what} isn't what Copcat expects, so it wasn't changed");
     let connectors = root
         .as_object_mut()
@@ -171,10 +143,10 @@ fn connector_list(root: &mut Value, list: ConnectorList) -> Result<&mut Vec<Valu
         .as_object_mut()
         .ok_or_else(|| wrong("its \"connectors\""))?;
     connectors
-        .entry(list.key())
+        .entry("stac")
         .or_insert_with(|| Value::Array(Vec::new()))
         .as_array_mut()
-        .ok_or_else(|| wrong(&format!("its \"connectors.{}\"", list.key())))
+        .ok_or_else(|| wrong("its \"connectors.stac\""))
 }
 
 /// Reads the settings file `file` (a missing one is `{}`), lets `edit`

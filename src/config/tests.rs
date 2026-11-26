@@ -44,8 +44,7 @@ const FULL: &str = r#"{
   "export": { "matchView": false, "width": 800, "height": 600 },
   "keybindings": { "view.top": "Ctrl+7", "view.reset": null },
   "connectors": {
-    "stac": [{ "name": "NatureScan", "url": "https://stacapi.naturescan.earth/" }],
-    "folders": [{ "name": "Data", "path": "/abs/data" }]
+    "stac": [{ "name": "NatureScan", "url": "https://stacapi.naturescan.earth/" }]
   }
 }"#;
 
@@ -86,7 +85,6 @@ fn a_full_file_should_set_everything() {
             url: "https://stacapi.naturescan.earth/".to_owned(),
         }]
     );
-    assert_eq!(config.connectors.folders[0].name, "Data");
 }
 
 #[test]
@@ -140,10 +138,10 @@ fn templates_should_be_valid_once_uncommented() {
     assert!(user.display.min_point_size.is_some());
     assert!(user.display.max_point_size.is_some());
     assert!(user.display.point_size.is_some());
-    assert_eq!(user.connectors.folders.len(), 1);
+    assert_eq!(user.connectors.stac.len(), 1);
     assert_eq!(user.keybindings.len(), 2);
     let workspace = parse_clean(&uncomment(WORKSPACE_TEMPLATE));
-    assert_eq!(workspace.connectors.folders.len(), 1);
+    assert_eq!(workspace.connectors.stac.len(), 1);
 }
 
 #[test]
@@ -318,8 +316,7 @@ fn bad_connectors_should_be_skipped_with_warnings() {
                 {"url": "https://example.com"},
                 "just a string",
                 {"name": "Extra", "url": "http://e.com", "token": "x"}
-            ],
-            "folders": {"name": "not a list"}
+            ]
         }}"#,
     );
     let names: Vec<_> = config
@@ -329,7 +326,6 @@ fn bad_connectors_should_be_skipped_with_warnings() {
         .map(|c| c.name.as_str())
         .collect();
     assert_eq!(names, ["Good", "Extra"]);
-    assert!(config.connectors.folders.is_empty());
     let messages = messages(&warnings);
     assert!(
         messages.contains(&"connectors.stac[1].name is missing; skipped this entry".to_owned())
@@ -341,8 +337,21 @@ fn bad_connectors_should_be_skipped_with_warnings() {
         )
     );
     assert!(messages.contains(&"unknown setting connectors.stac[5].token".to_owned()));
-    assert!(messages.contains(&"connectors.folders should be a list, not an object".to_owned()));
-    assert_eq!(messages.len(), 6, "{messages:#?}");
+    assert_eq!(messages.len(), 5, "{messages:#?}");
+}
+
+#[test]
+fn an_old_folders_list_should_be_an_unknown_setting() {
+    // Folder sources were removed; a file that still lists them loads its
+    // STAC sources and warns about the rest, without failing.
+    let (config, warnings) = parse(
+        r#"{"connectors": {
+            "stac": [{"name": "S", "url": "https://s.example/"}],
+            "folders": [{"name": "Data", "path": "D:/data"}]
+        }}"#,
+    );
+    assert_eq!(config.connectors.stac.len(), 1);
+    assert_eq!(messages(&warnings), ["unknown setting connectors.folders"]);
 }
 
 #[test]
@@ -356,35 +365,6 @@ fn duplicate_connector_names_in_one_file_should_keep_the_last() {
     assert_eq!(config.connectors.stac.len(), 1);
     assert_eq!(config.connectors.stac[0].url, "https://two.example");
     assert_eq!(warnings.len(), 1);
-}
-
-#[test]
-fn relative_folder_paths_should_resolve_from_the_folder_holding_dot_copcat() {
-    let project = Path::new(if cfg!(windows) {
-        "C:\\work\\project"
-    } else {
-        "/work/project"
-    });
-    let file = project.join(DIR_NAME).join(FILE_NAME);
-    let (config, warnings) = Config::parse(
-        r#"{"connectors": {"folders": [{"name": "Here", "path": "."}, {"name": "Sub", "path": "data/clouds"}]}}"#,
-        Some(&file),
-    );
-    assert!(warnings.is_empty(), "{warnings:?}");
-    assert_eq!(config.connectors.folders[0].path, project.join("."));
-    assert_eq!(
-        config.connectors.folders[1].path,
-        project.join("data/clouds")
-    );
-}
-
-#[test]
-fn absolute_folder_paths_should_stay() {
-    let absolute = if cfg!(windows) { "D:\\data" } else { "/data" };
-    let file = Path::new("/w/.copcat/settings.json");
-    let text = json!({"connectors": {"folders": [{"name": "D", "path": absolute}]}}).to_string();
-    let (config, _) = Config::parse(&text, Some(file));
-    assert_eq!(config.connectors.folders[0].path, Path::new(absolute));
 }
 
 #[test]
@@ -489,7 +469,7 @@ fn load_should_layer_the_workspace_over_the_user_file() {
     write(
         &workspace,
         ".copcat/settings.json",
-        r#"{"display": {"pointSize": 5}, "connectors": {"folders": [{"name": "P", "path": "clouds"}]}}"#,
+        r#"{"display": {"pointSize": 5}, "connectors": {"stac": [{"name": "P", "url": "https://p.example/"}]}}"#,
     );
     let loaded = Locations {
         user_dir: Some(user_dir),
@@ -502,10 +482,7 @@ fn load_should_layer_the_workspace_over_the_user_file() {
         loaded.config.display.color_mode,
         Some(ColorModeName::Height)
     );
-    assert_eq!(
-        loaded.config.connectors.folders[0].path,
-        workspace.join("clouds")
-    );
+    assert_eq!(loaded.config.connectors.stac[0].name, "P");
 }
 
 #[test]
@@ -625,27 +602,17 @@ fn add_connector_should_append_and_keep_other_keys() {
     let file = write(
         temp.path(),
         FILE_NAME,
-        r#"{"theme": "graphite", "connectors": {"folders": [{"name": "F", "path": "."}],
+        r#"{"theme": "graphite", "connectors": {"other": [{"name": "F", "path": "."}],
             "stac": [{"name": "A", "url": "https://a.example/"}]}}"#,
     );
-    add_connector(
-        &file,
-        ConnectorList::Stac,
-        json!({"name": "B", "url": "https://b.example/"}),
-    )
-    .unwrap();
+    add_connector(&file, json!({"name": "B", "url": "https://b.example/"})).unwrap();
     // The same name replaces the old one, in its place.
-    add_connector(
-        &file,
-        ConnectorList::Stac,
-        json!({"name": "A", "url": "https://a2.example/"}),
-    )
-    .unwrap();
+    add_connector(&file, json!({"name": "A", "url": "https://a2.example/"})).unwrap();
     let saved: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(&file).unwrap()).unwrap();
     assert_eq!(
         saved,
-        json!({"theme": "graphite", "connectors": {"folders": [{"name": "F", "path": "."}],
+        json!({"theme": "graphite", "connectors": {"other": [{"name": "F", "path": "."}],
             "stac": [{"name": "A", "url": "https://a2.example/"}, {"name": "B", "url": "https://b.example/"}]}})
     );
 }
@@ -654,15 +621,10 @@ fn add_connector_should_append_and_keep_other_keys() {
 fn add_connector_should_create_the_file_and_list() {
     let temp = tempfile::tempdir().unwrap();
     let file = temp.path().join("home").join(FILE_NAME);
-    add_connector(
-        &file,
-        ConnectorList::Folders,
-        json!({"name": "Data", "path": "D:/data"}),
-    )
-    .unwrap();
+    add_connector(&file, json!({"name": "Data", "url": "https://d.example/"})).unwrap();
     let (config, warnings) = read_file(&file);
     assert!(warnings.is_empty(), "{warnings:?}");
-    assert_eq!(config.connectors.folders[0].name, "Data");
+    assert_eq!(config.connectors.stac[0].name, "Data");
 }
 
 #[test]
@@ -670,7 +632,7 @@ fn add_connector_should_refuse_a_connectors_key_of_the_wrong_type() {
     let temp = tempfile::tempdir().unwrap();
     let file = write(temp.path(), FILE_NAME, r#"{"connectors": {"stac": "x"}}"#);
     let entry = json!({"name": "B", "url": "https://b.example/"});
-    assert!(add_connector(&file, ConnectorList::Stac, entry).is_err());
+    assert!(add_connector(&file, entry).is_err());
     assert_eq!(
         fs::read_to_string(&file).unwrap(),
         r#"{"connectors": {"stac": "x"}}"#
@@ -686,10 +648,10 @@ fn remove_connector_should_remove_by_name_or_say_it_isnt_there() {
         r#"{"connectors": {"stac": [{"name": "A", "url": "https://a.example/"},
             {"name": "B", "url": "https://b.example/"}]}}"#,
     );
-    remove_connector(&file, ConnectorList::Stac, "A").unwrap();
-    let error = remove_connector(&file, ConnectorList::Folders, "B").unwrap_err();
+    remove_connector(&file, "A").unwrap();
+    let error = remove_connector(&file, "C").unwrap_err();
     assert!(
-        error.contains("no connectors.folders entry named \"B\""),
+        error.contains("no connectors.stac entry named \"C\""),
         "{error}"
     );
     let names: Vec<_> = read_file(&file)
@@ -766,7 +728,6 @@ prop_compose! {
             0..4,
         ),
         stac in proptest::collection::btree_map(name(), "[a-z]{1,8}", 0..3),
-        folders in proptest::collection::btree_map(name(), "[a-z]{1,8}", 0..3),
     ) -> Config {
         Config {
             theme,
@@ -790,14 +751,6 @@ prop_compose! {
                 stac: stac
                     .into_iter()
                     .map(|(name, host)| StacConnector { name, url: format!("https://{host}.example/") })
-                    .collect(),
-                // Absolute, so they read back unchanged.
-                folders: folders
-                    .into_iter()
-                    .map(|(name, dir)| FolderConnector {
-                        name,
-                        path: PathBuf::from(if cfg!(windows) { "C:\\" } else { "/" }).join(dir),
-                    })
                     .collect(),
             },
         }
@@ -848,7 +801,6 @@ fn arb_json() -> impl Strategy<Value = serde_json::Value> {
             Just("edl".to_owned()),
             Just("connectors".to_owned()),
             Just("stac".to_owned()),
-            Just("folders".to_owned()),
             Just("name".to_owned()),
             Just("keybindings".to_owned()),
             Just("pointSize".to_owned()),

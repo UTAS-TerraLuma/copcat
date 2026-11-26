@@ -82,12 +82,14 @@ fn press(harness: &mut Harness<'_, impl eframe::App>, modifiers: Modifiers, key:
     harness.run_ok();
 }
 
+/// Ctrl+P.
 fn command_palette(harness: &mut Harness<'_, impl eframe::App>) {
-    press(harness, Modifiers::COMMAND | Modifiers::SHIFT, Key::P);
+    press(harness, Modifiers::COMMAND, Key::P);
 }
 
+/// Ctrl+O.
 fn quick_open(harness: &mut Harness<'_, impl eframe::App>) {
-    press(harness, Modifiers::COMMAND, Key::P);
+    press(harness, Modifiers::COMMAND, Key::O);
 }
 
 /// Types `text` into the palette's field, which has the keyboard focus.
@@ -145,22 +147,34 @@ fn palette_should_run_commands_and_open_a_typed_path() {
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let (mut harness, woken) = idle_viewer();
 
-    // Command mode lists commands, filtered by what's typed, greying out
-    // what can't run with nothing open.
+    // The command palette lists commands, filtered by what's typed, greying
+    // out what can't run with nothing open.
     command_palette(&mut harness);
-    assert_eq!(palette_text(&harness).as_deref(), Some(">"));
+    assert_eq!(palette_text(&harness).as_deref(), Some(""));
     assert!(has_row(&harness, "Toggle diagnostics"));
-    type_text(&mut harness, "subcloud");
-    assert_eq!(palette_text(&harness).as_deref(), Some(">subcloud"));
-    assert_eq!(row_enabled(&harness, "Return to the subcloud"), Some(false));
+    assert!(has_row(&harness, "Settings…"));
+    // Only the curated commands: not the views from each side, say.
+    assert!(!has_row(&harness, "View from top"));
+    assert!(!has_row(&harness, "Command palette"));
+    type_text(&mut harness, "retry");
+    assert_eq!(palette_text(&harness).as_deref(), Some("retry"));
+    assert_eq!(row_enabled(&harness, "Retry failed nodes"), Some(false));
     assert!(!has_row(&harness, "Toggle diagnostics"));
     press(&mut harness, Modifiers::NONE, Key::Escape);
     assert!(
-        !has_row(&harness, "Return to the subcloud"),
+        !has_row(&harness, "Retry failed nodes"),
         "Esc should close it"
     );
 
-    // Open mode opens a path typed into it.
+    // Quick open lists the ways to open a cloud.
+    quick_open(&mut harness);
+    for way in ["From file…", "From URL…", "From STAC…"] {
+        assert_eq!(row_enabled(&harness, way), Some(true), "{way}");
+    }
+    assert!(!has_row(&harness, "Toggle diagnostics"));
+    press(&mut harness, Modifiers::NONE, Key::Escape);
+
+    // Quick open opens a path typed into it.
     let fixture = fixture_path();
     quick_open(&mut harness);
     assert_eq!(palette_text(&harness).as_deref(), Some(""));
@@ -195,7 +209,7 @@ fn palette_should_run_commands_and_open_a_typed_path() {
 
     // Arrow keys move down the list.
     command_palette(&mut harness);
-    type_text(&mut harness, "view from");
+    type_text(&mut harness, "projection");
     // The frame the key arrives on must look like the one after it: the
     // field once lost the focus for that frame, so its outline flashed.
     harness.key_press(Key::ArrowDown);
@@ -209,8 +223,7 @@ fn palette_should_run_commands_and_open_a_typed_path() {
     );
     harness.run_ok();
     press(&mut harness, Modifiers::NONE, Key::Enter);
-    // The second view, Bottom, is axis-aligned, which switches to
-    // orthographic.
+    // The second, after Perspective projection.
     assert!(is_selected(&harness, "Orthographic"));
 
     // Clicking a row runs it.
@@ -228,15 +241,21 @@ fn palette_should_run_commands_and_open_a_typed_path() {
     harness.run_ok();
     assert!(text_after(&harness, "Nodes drawn").is_some());
 
-    // Open mode remembers what was opened.
+    // Quick open remembers what was opened.
     quick_open(&mut harness);
     assert_eq!(row_enabled(&harness, "fixture.copc.laz"), Some(true));
-    // Its shortcuts switch the open palette between modes.
+    // Each shortcut shows its own list in place of the other's.
+    type_text(&mut harness, "fix");
     command_palette(&mut harness);
-    assert_eq!(palette_text(&harness).as_deref(), Some(">"));
+    assert_eq!(palette_text(&harness).as_deref(), Some(""));
     assert!(!has_row(&harness, "fixture.copc.laz"));
+    assert!(has_row(&harness, "Toggle diagnostics"));
     quick_open(&mut harness);
     assert_eq!(palette_text(&harness).as_deref(), Some(""));
+    assert!(has_row(&harness, "fixture.copc.laz"));
+    // `>` is just text in quick open, not a switch to commands.
+    type_text(&mut harness, ">");
+    assert!(!has_row(&harness, "Toggle diagnostics"));
     press(&mut harness, Modifiers::NONE, Key::Escape);
     assert!(palette_text(&harness).is_none());
 }
@@ -261,22 +280,22 @@ fn palette_rows_should_not_move_as_the_selection_or_hover_moves() {
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let (mut harness, woken) = idle_viewer();
-    // With a cloud open, so the view commands can be selected.
+    // With a cloud open, as the palette is used most.
     quick_open(&mut harness);
     type_text(&mut harness, &fixture_path());
     press(&mut harness, Modifiers::NONE, Key::Enter);
     wait_for_fixture(&mut harness, &woken);
     harness.remove_cursor();
     command_palette(&mut harness);
-    type_text(&mut harness, "view from");
+    type_text(&mut harness, "settings");
     let before = row_rects(&harness);
 
     // Selected and plain rows are the same height.
     let palette_rows: Vec<_> = before
         .iter()
-        .filter(|(label, _)| label.starts_with("View from"))
+        .filter(|(label, _)| label.to_lowercase().contains("settings"))
         .collect();
-    assert_eq!(row_enabled(&harness, "View from top"), Some(true));
+    assert_eq!(row_enabled(&harness, "Reload settings"), Some(true));
     assert!(palette_rows.len() > 3, "{before:#?}");
     let height = palette_rows[0].1.height();
     for (label, rect) in &palette_rows {
@@ -309,9 +328,8 @@ fn palette_should_ask_for_open_urls_argument_itself() {
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let (mut harness, woken) = idle_viewer();
 
-    // `>` in open mode switches to commands.
-    quick_open(&mut harness);
-    type_text(&mut harness, ">open url");
+    command_palette(&mut harness);
+    type_text(&mut harness, "open url");
     press(&mut harness, Modifiers::NONE, Key::Enter);
     // Still open, asking for the URL in its own field.
     assert_eq!(palette_text(&harness).as_deref(), Some(""));
@@ -326,7 +344,7 @@ fn palette_should_ask_for_open_urls_argument_itself() {
 }
 
 #[test]
-fn menu_bar_should_have_file_and_open_menus() {
+fn menu_bar_should_have_file_open_and_view_menus() {
     if !has_adapter() {
         common::skip_or_fail_without_gpu("couldn't find a GPU: no wgpu adapters");
         return;
@@ -336,13 +354,19 @@ fn menu_bar_should_have_file_and_open_menus() {
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let (mut harness, _woken) = idle_viewer();
 
-    // File only holds what's to come, greyed out.
+    // File holds what's to come, greyed out, then the settings.
     harness.get_by_role_and_label(Role::Button, "File").click();
     harness.run_ok();
     for item in ["Open .copcat file…", "Save .copcat file…"] {
         assert!(
             harness.get_by_label(item).accesskit_node().is_disabled(),
             "{item} should wait for .copcat files"
+        );
+    }
+    for item in ["Settings…", "Open user settings", "Open workspace settings"] {
+        assert!(
+            !harness.get_by_label(item).accesskit_node().is_disabled(),
+            "{item}"
         );
     }
     press(&mut harness, Modifiers::NONE, Key::Escape);
@@ -358,16 +382,28 @@ fn menu_bar_should_have_file_and_open_menus() {
             "{item}"
         );
     }
-    let from_url = format!(
-        "{:?}",
-        harness.get_by_label_contains("From URL").accesskit_node()
-    );
-    assert!(from_url.contains("Ctrl+L"), "{from_url}");
-    let from_file = format!(
-        "{:?}",
-        harness.get_by_label_contains("From file").accesskit_node()
-    );
-    assert!(from_file.contains("Ctrl+O"), "{from_file}");
+    // A menu item's label is its title, then its shortcut. These have none:
+    // Ctrl+O is quick open, which lists them too.
+    let label = |harness: &Harness<'_, _>, title: &str| {
+        harness
+            .get_by_label_contains(title)
+            .accesskit_node()
+            .label()
+            .unwrap()
+    };
+    for item in ["From file…", "From URL…", "From STAC…"] {
+        assert_eq!(label(&harness, item), item);
+    }
+    press(&mut harness, Modifiers::NONE, Key::Escape);
+
+    // View shows the command palette, with its shortcut.
+    harness.get_by_role_and_label(Role::Button, "View").click();
+    harness.run_ok();
+    assert_eq!(label(&harness, "Command palette"), "Command palette Ctrl+P");
+    harness.get_by_label_contains("Command palette").click();
+    harness.run_ok();
+    assert_eq!(palette_text(&harness).as_deref(), Some(""));
+    assert!(has_row(&harness, "Toggle diagnostics"));
 }
 
 #[test]
@@ -406,7 +442,7 @@ fn open_from_url_should_ask_for_it_in_the_palette() {
 }
 
 #[test]
-fn ctrl_l_should_ask_for_a_url_in_the_palette() {
+fn quick_opens_from_url_should_ask_for_a_url_in_the_palette() {
     if !has_adapter() {
         common::skip_or_fail_without_gpu("couldn't find a GPU: no wgpu adapters");
         return;
@@ -416,15 +452,18 @@ fn ctrl_l_should_ask_for_a_url_in_the_palette() {
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let (mut harness, _woken) = idle_viewer();
 
-    press(&mut harness, Modifiers::COMMAND, Key::L);
+    quick_open(&mut harness);
+    type_text(&mut harness, "from url");
+    press(&mut harness, Modifiers::NONE, Key::Enter);
     assert_eq!(palette_text(&harness).as_deref(), Some(""));
     assert!(
         harness.query_by_label("Open URL").is_some(),
         "the breadcrumb"
     );
-    // Esc goes back to quick open, then closes.
+    // Esc goes back to quick open, as it was, then closes.
     press(&mut harness, Modifiers::NONE, Key::Escape);
     assert!(harness.query_by_label("Open URL").is_none());
+    assert_eq!(palette_text(&harness).as_deref(), Some("from url"));
     press(&mut harness, Modifiers::NONE, Key::Escape);
     assert!(palette_text(&harness).is_none());
 }

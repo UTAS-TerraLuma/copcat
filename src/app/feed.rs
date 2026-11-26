@@ -32,6 +32,7 @@ pub(crate) struct Chunk {
     pub(crate) more: Option<More>,
 }
 
+#[cfg(test)]
 impl Chunk {
     /// Everything there is.
     pub(crate) fn all(items: Vec<PaletteItem>) -> Self {

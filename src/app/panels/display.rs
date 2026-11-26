@@ -9,9 +9,28 @@ use crate::format::format_count;
 use crate::lod::LodSettings;
 
 use super::widgets::{Fold, NumberField, choice_combo, legend_color, prop_control, prop_row};
-use crate::app::commands::Command;
+use crate::app::commands::{Command, SettingsCommand};
 use crate::app::session::Session;
 use crate::app::settings::{ColorMode, PointSizeMode, ViewSettings};
+
+/// What the Rendering controls need to know about the open cloud, if one
+/// is open.
+#[derive(Clone, Copy)]
+pub(crate) struct CloudFacts<'a> {
+    /// Whether its points have colours: Colour by RGB is greyed out if not.
+    pub(crate) has_rgb: bool,
+    /// The classes seen so far, for Colour by classification's legend.
+    pub(crate) classes_seen: &'a [bool; 256],
+}
+
+impl<'a> CloudFacts<'a> {
+    pub(crate) fn of(session: &'a Session) -> Self {
+        Self {
+            has_rgb: session.info.has_rgb,
+            classes_seen: &session.classes_seen,
+        }
+    }
+}
 
 /// A settings row for a number field, labelled with its name.
 fn number_row(ui: &mut egui::Ui, field: NumberField<'_>) -> egui::Response {
@@ -19,18 +38,21 @@ fn number_row(ui: &mut egui::Ui, field: NumberField<'_>) -> egui::Response {
     prop_row(ui, name, |ui| ui.add(field))
 }
 
-/// The Rendering section's contents. Colour mode and eye-dome lighting ask
-/// for commands; the other controls change `settings` directly.
+/// The Rendering controls: in the Rendering section for the open cloud,
+/// and in the settings window, where `cloud` may be `None`. Colour mode and
+/// eye-dome lighting ask for commands; the other controls change `settings`
+/// directly.
 pub(crate) fn rendering_ui(
     ui: &mut egui::Ui,
     settings: &mut ViewSettings,
-    session: &Session,
+    cloud: Option<CloudFacts<'_>>,
     commands: &mut Vec<Command>,
 ) {
     prop_row(ui, "Colour", |ui| {
         choice_combo(ui, "color_mode", settings.color_mode.label(), |ui| {
             for mode in ColorMode::ALL {
-                let available = mode != ColorMode::Rgb || session.info.has_rgb;
+                // With no cloud open, any mode can be the default.
+                let available = mode != ColorMode::Rgb || cloud.is_none_or(|cloud| cloud.has_rgb);
                 let option = ui
                     .add_enabled(
                         available,
@@ -43,8 +65,10 @@ pub(crate) fn rendering_ui(
             }
         })
     });
-    if settings.color_mode == ColorMode::Classification {
-        class_legend_ui(ui, &session.classes_seen);
+    if settings.color_mode == ColorMode::Classification
+        && let Some(cloud) = cloud
+    {
+        class_legend_ui(ui, cloud.classes_seen);
     }
     point_size_ui(ui, settings);
 
@@ -75,6 +99,33 @@ pub(crate) fn rendering_ui(
         );
     }
     level_of_detail_ui(ui, &mut settings.lod);
+}
+
+/// Asks to save the rendering settings as the defaults, in the user
+/// settings file at `user_file` if known: a small "Save as defaults" at the
+/// foot of the Rendering section, or a full-size button with the command's
+/// own title in the settings window.
+pub(crate) fn save_defaults_button(
+    ui: &mut egui::Ui,
+    small: bool,
+    user_file: Option<&str>,
+    commands: &mut Vec<Command>,
+) -> egui::Response {
+    let command = Command::Settings(SettingsCommand::SaveDisplayDefaults);
+    let hover = match user_file {
+        Some(file) => format!("{}, in the user settings file, {file}", command.title()),
+        None => format!("{}, in the user settings file", command.title()),
+    };
+    let button = if small {
+        egui::Button::new("Save as defaults").small()
+    } else {
+        egui::Button::new(command.title())
+    };
+    let button = ui.add(button).on_hover_text(hover);
+    if button.clicked() {
+        commands.push(command);
+    }
+    button
 }
 
 /// Point size: Fixed (one size) or Adaptive (a fill factor, with the

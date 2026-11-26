@@ -9,7 +9,6 @@ mod cloud;
 mod config;
 mod crs;
 mod export;
-mod folder_scan;
 mod format;
 mod gizmo;
 mod heights;

@@ -1,6 +1,6 @@
 //! Data sources (connectors) in the real viewer, driven headlessly by
 //! egui_kittest through the keyboard: a STAC catalog served by the test
-//! server, or a folder, browsed in quick open down to the fixture, which
+//! server, browsed in quick open down to the fixture, which
 //! then opens and loads. Settings come from scratch directories, never the
 //! real home.
 //!
@@ -263,7 +263,7 @@ fn a_static_stac_catalog_should_browse_down_to_a_cloud_and_open_it() {
     let (mut harness, woken) = viewer(&user_dir, &scratch.join("nowhere"));
 
     // Quick open lists the source by name, marked as STAC.
-    press(&mut harness, Modifiers::COMMAND, Key::P);
+    press(&mut harness, Modifiers::COMMAND, Key::O);
     assert_eq!(row_enabled(&harness, "Fixture catalog"), Some(true));
     assert!(
         rows(&harness)
@@ -350,7 +350,7 @@ fn a_stac_api_should_list_every_page_by_itself_and_open_a_cloud() {
     );
     let (mut harness, woken) = viewer(&user_dir, &scratch.join("nowhere"));
 
-    press(&mut harness, Modifiers::COMMAND, Key::P);
+    press(&mut harness, Modifiers::COMMAND, Key::O);
     type_text(&mut harness, "fixture api");
     enter(&mut harness);
     wait_for_row(&mut harness, &woken, "Fixture flights");
@@ -403,51 +403,6 @@ fn a_stac_api_should_list_every_page_by_itself_and_open_a_cloud() {
 }
 
 #[test]
-fn a_folder_source_should_list_its_clouds_and_open_one() {
-    let Some(_gpu) = lock_gpu() else { return };
-    let scratch = common::scratch_dir("a_folder_source_should_list_its_clouds");
-    let surveys = scratch.join("surveys");
-    let copy = surveys.join("site").join("2026").join("fixture.copc.laz");
-    fs::create_dir_all(copy.parent().unwrap()).unwrap();
-    fs::copy(common::fixture(), &copy).unwrap();
-    // Hidden folders aren't searched.
-    write(&surveys.join(".cache").join("hidden.copc.laz"), "");
-    let workspace = scratch.join("project");
-    fs::create_dir_all(&workspace).unwrap();
-    let user_dir = user_settings(
-        &scratch,
-        serde_json::json!({ "folders": [{ "name": "Surveys", "path": surveys.to_str().unwrap() }] }),
-    );
-    let (mut harness, woken) = viewer(&user_dir, &workspace);
-
-    // The workspace is offered too, without any settings.
-    press(&mut harness, Modifiers::COMMAND, Key::P);
-    assert_eq!(row_enabled(&harness, "Workspace: project"), Some(true));
-    assert!(
-        rows(&harness)
-            .iter()
-            .any(|row| row.starts_with("Surveys Folder source")),
-        "{:#?}",
-        rows(&harness)
-    );
-    type_text(&mut harness, "surveys");
-    enter(&mut harness);
-    wait_for_row(&mut harness, &woken, "fixture.copc.laz");
-    assert!(
-        rows(&harness)
-            .iter()
-            .any(|row| row == "fixture.copc.laz site/2026"),
-        "with its folder: {:#?}",
-        rows(&harness)
-    );
-    assert_eq!(row_enabled(&harness, "hidden.copc.laz"), None);
-    enter(&mut harness);
-
-    wait_until_drawn(&mut harness, &woken);
-    assert_fixture_is_open(&harness);
-}
-
-#[test]
 fn add_stac_source_should_save_it_and_list_it_in_quick_open() {
     let Some(_gpu) = lock_gpu() else { return };
     let server = FileServer::serve(common::data_dir());
@@ -460,7 +415,7 @@ fn add_stac_source_should_save_it_and_list_it_in_quick_open() {
     );
     let (mut harness, woken) = viewer(&user_dir, &scratch.join("nowhere"));
 
-    press(&mut harness, Modifiers::COMMAND | Modifiers::SHIFT, Key::P);
+    press(&mut harness, Modifiers::COMMAND, Key::P);
     type_text(&mut harness, "add stac");
     enter(&mut harness);
     assert!(
@@ -490,13 +445,13 @@ fn add_stac_source_should_save_it_and_list_it_in_quick_open() {
         "it should say so"
     );
 
-    press(&mut harness, Modifiers::COMMAND, Key::P);
+    press(&mut harness, Modifiers::COMMAND, Key::O);
     assert_eq!(row_enabled(&harness, "Fixture catalog"), Some(true));
 
     // And it can be removed again.
-    // Switching modes in the open palette leaves the cursor after the `>`.
-    press(&mut harness, Modifiers::COMMAND | Modifiers::SHIFT, Key::P);
-    type_text(&mut harness, "remove data source");
+    // The command palette opens in place of quick open, its field empty.
+    press(&mut harness, Modifiers::COMMAND, Key::P);
+    type_text(&mut harness, "remove stac source");
     enter(&mut harness);
     assert_eq!(
         row_enabled(&harness, "Fixture catalog"),
@@ -508,7 +463,7 @@ fn add_stac_source_should_save_it_and_list_it_in_quick_open() {
     let saved: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(&user_file).unwrap()).unwrap();
     assert_eq!(saved["connectors"]["stac"], serde_json::json!([]));
-    press(&mut harness, Modifiers::COMMAND, Key::P);
+    press(&mut harness, Modifiers::COMMAND, Key::O);
     assert_eq!(row_enabled(&harness, "Fixture catalog"), None);
 }
 
@@ -525,13 +480,10 @@ fn open_from_stac_should_list_the_sources_to_browse_or_add_one() {
     let Some(_gpu) = lock_gpu() else { return };
     let server = FileServer::serve(common::data_dir());
     let scratch = common::scratch_dir("open_from_stac_should_list_the_sources");
-    let surveys = scratch.join("surveys");
-    fs::create_dir_all(&surveys).unwrap();
     let user_dir = user_settings(
         &scratch,
         serde_json::json!({
             "stac": [{ "name": "Fixture catalog", "url": server.url("stac/static/") }],
-            "folders": [{ "name": "Surveys", "path": surveys.to_str().unwrap() }],
         }),
     );
     let (mut harness, woken) = viewer(&user_dir, &scratch.join("nowhere"));
@@ -542,11 +494,7 @@ fn open_from_stac_should_list_the_sources_to_browse_or_add_one() {
         "the breadcrumb"
     );
     let listed = rows(&harness);
-    for start in [
-        "Fixture catalog STAC source",
-        "Surveys Folder source",
-        "Add STAC source…",
-    ] {
+    for start in ["Fixture catalog STAC source", "Add STAC source…"] {
         assert!(
             listed.iter().any(|row| row.starts_with(start)),
             "no {start:?} in {listed:#?}"
@@ -681,7 +629,7 @@ fn a_stac_list_should_show_from_the_cache_at_once_then_update() {
 
     // The first session fetches the lists, and keeps them once whole.
     let (mut harness, woken) = viewer(&user_dir, &scratch.join("nowhere"));
-    press(&mut harness, Modifiers::COMMAND, Key::P);
+    press(&mut harness, Modifiers::COMMAND, Key::O);
     type_text(&mut harness, "fixture api");
     enter(&mut harness);
     wait_for_row(&mut harness, &woken, "Fixture flights");
@@ -710,7 +658,7 @@ fn a_stac_list_should_show_from_the_cache_at_once_then_update() {
     // The next session lists them at once, from the cache, and says it's
     // updating them.
     let (mut harness, woken) = viewer(&user_dir, &scratch.join("nowhere"));
-    press(&mut harness, Modifiers::COMMAND, Key::P);
+    press(&mut harness, Modifiers::COMMAND, Key::O);
     type_text(&mut harness, "fixture api");
     enter(&mut harness);
     assert_eq!(row_enabled(&harness, "Fixture flights"), Some(true));
@@ -740,7 +688,7 @@ fn a_stac_list_should_show_from_the_cache_at_once_then_update() {
 
     // Clearing the cache deletes the files and says so.
     press(&mut harness, Modifiers::NONE, Key::Escape);
-    press(&mut harness, Modifiers::COMMAND | Modifiers::SHIFT, Key::P);
+    press(&mut harness, Modifiers::COMMAND, Key::P);
     type_text(&mut harness, "clear data source cache");
     enter(&mut harness);
     assert!(
@@ -761,7 +709,7 @@ fn a_cached_stac_list_should_stay_when_the_server_fails() {
         serde_json::json!({ "stac": [{ "name": "Fixture API", "url": server.url("stac/api/") }] }),
     );
     let (mut harness, woken) = viewer(&user_dir, &scratch.join("nowhere"));
-    press(&mut harness, Modifiers::COMMAND, Key::P);
+    press(&mut harness, Modifiers::COMMAND, Key::O);
     type_text(&mut harness, "fixture api");
     enter(&mut harness);
     wait_for_row(&mut harness, &woken, "Fixture flights");
@@ -769,7 +717,7 @@ fn a_cached_stac_list_should_stay_when_the_server_fails() {
 
     server.fail_all(true);
     let (mut harness, woken) = viewer(&user_dir, &scratch.join("nowhere"));
-    press(&mut harness, Modifiers::COMMAND, Key::P);
+    press(&mut harness, Modifiers::COMMAND, Key::O);
     type_text(&mut harness, "fixture api");
     enter(&mut harness);
     wait_for_label(&mut harness, &woken, "Offline: showing the list from");
@@ -785,8 +733,8 @@ fn a_cached_stac_list_should_stay_when_the_server_fails() {
     // Removing the source deletes its cached lists.
     assert!(!cached_lists(&user_dir).is_empty());
     press(&mut harness, Modifiers::NONE, Key::Escape);
-    press(&mut harness, Modifiers::COMMAND | Modifiers::SHIFT, Key::P);
-    type_text(&mut harness, "remove data source");
+    press(&mut harness, Modifiers::COMMAND, Key::P);
+    type_text(&mut harness, "remove stac source");
     enter(&mut harness);
     assert_eq!(row_enabled(&harness, "Fixture API"), Some(true));
     enter(&mut harness);

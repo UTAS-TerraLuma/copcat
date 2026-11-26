@@ -35,8 +35,8 @@ use std::path::{Path, PathBuf};
 use crate::camera::Projection;
 
 pub(crate) use save::{
-    ConnectorList, USER_TEMPLATE, WORKSPACE_TEMPLATE, add_connector, create_if_missing,
-    open_in_editor, remove_connector, save_over,
+    USER_TEMPLATE, WORKSPACE_TEMPLATE, add_connector, create_if_missing, open_in_editor,
+    remove_connector, save_over,
 };
 
 /// Every settings file's name.
@@ -188,7 +188,6 @@ pub struct Binding {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Connectors {
     pub stac: Vec<StacConnector>,
-    pub folders: Vec<FolderConnector>,
 }
 
 /// A STAC catalog, static or an API, to browse for clouds.
@@ -199,27 +198,11 @@ pub struct StacConnector {
     pub url: String,
 }
 
-/// A folder of clouds.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct FolderConnector {
-    pub name: String,
-    /// Relative paths in a file are resolved against the folder holding
-    /// that file's `.copcat` directory, so this is absolute when it came
-    /// from a file.
-    pub path: PathBuf,
-}
-
 trait Named {
     fn name(&self) -> &str;
 }
 
 impl Named for StacConnector {
-    fn name(&self) -> &str {
-        &self.name
-    }
-}
-
-impl Named for FolderConnector {
     fn name(&self) -> &str {
         &self.name
     }
@@ -277,14 +260,12 @@ impl Config {
             keybindings,
             connectors: Connectors {
                 stac: merge_by_name(self.connectors.stac, over.connectors.stac),
-                folders: merge_by_name(self.connectors.folders, over.connectors.folders),
             },
         }
     }
 
-    /// Reads a settings file's text. `file` names it in warnings and is
-    /// where relative folder paths are resolved from; `None` leaves them
-    /// relative.
+    /// Reads a settings file's text. `file` names it in warnings and in the
+    /// shortcuts it binds.
     pub fn parse(text: &str, file: Option<&Path>) -> (Config, Vec<Warning>) {
         parse::parse(text, file)
     }

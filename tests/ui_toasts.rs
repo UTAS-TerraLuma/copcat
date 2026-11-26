@@ -30,7 +30,7 @@ fn has_adapter() -> bool {
     !pollster::block_on(instance.enumerate_adapters(wgpu::Backends::all())).is_empty()
 }
 
-/// A user settings file binding F9 to Save display settings as defaults
+/// A user settings file binding F9 to Save current rendering settings as defaults
 /// (which says "Saved …") and F8 to Open workspace settings (which warns,
 /// as there's no workspace).
 fn write_settings(user_dir: &Path) {
@@ -88,7 +88,7 @@ fn labels(harness: &Harness<'_, impl eframe::App>) -> Vec<String> {
 fn saved_toasts(harness: &Harness<'_, impl eframe::App>) -> usize {
     labels(harness)
         .iter()
-        .filter(|text| text.starts_with("Saved the display settings"))
+        .filter(|text| text.starts_with("Saved the rendering settings"))
         .count()
 }
 
@@ -163,7 +163,7 @@ fn a_toast_should_float_over_the_view_without_moving_anything_and_go() {
     // Over the bottom-left of the 3D view, above the status bar.
     let (view, _, status) = before;
     let toast = harness
-        .get_by_label_contains("Saved the display settings")
+        .get_by_label_contains("Saved the rendering settings")
         .rect();
     assert!(view.contains_rect(toast), "{toast:?} in {view:?}");
     assert!(toast.bottom() < status.y && toast.left() - view.left() < 20.0);
@@ -200,7 +200,7 @@ fn a_hovered_toast_should_stay_and_a_warning_until_dismissed() {
     assert!(harness.query_by_label(warning).is_some());
     assert_eq!(saved_toasts(&harness), 1);
     // The newest is nearest the status bar.
-    let saved = harness.get_by_label_contains("Saved the display").rect();
+    let saved = harness.get_by_label_contains("Saved the rendering").rect();
     assert!(harness.get_by_label(warning).rect().bottom() <= saved.top());
 
     // Hovered, the information stays.
