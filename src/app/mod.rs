@@ -572,7 +572,8 @@ impl eframe::App for ViewerApp {
             egui::CentralPanel::default()
                 .frame(frame)
                 .show(ui, |ui| match &mut self.state {
-                    LoadState::Idle => open_ui::idle_ui(ui, &self.keymap, &mut self.pending),
+                    // Blank: the menu bar opens a cloud.
+                    LoadState::Idle => {}
                     LoadState::Opening { source, .. } => {
                         ui.horizontal(|ui| {
                             spinner(ui, &self.theme, self.theme.fonts.body_size);

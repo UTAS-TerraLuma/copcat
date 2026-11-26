@@ -542,7 +542,10 @@ impl Theme {
 
     /// A panel that's a header strip, such as the menu bar.
     pub fn header_frame(&self) -> egui::Frame {
-        self.panel_frame().fill(self.colors.header)
+        // Like the status bar: unfilled, so it reads as part of the gutter,
+        // with its items lined up with the panels' contents.
+        let side = self.spacing.panel_gap / 2.0 + self.spacing.panel_padding;
+        egui::Frame::new().inner_margin(Margin::symmetric(side.round() as i8, 1))
     }
 
     /// The status bar along the foot of the window: unfilled, so it reads as

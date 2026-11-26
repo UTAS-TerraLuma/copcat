@@ -1,5 +1,4 @@
-//! Opening a cloud: the menu bar, the idle screen's buttons and the file
-//! dialog. Each asks for a [`Command`] rather than opening anything itself;
+//! Opening a cloud: the menu bar and the file dialog. Each asks for a [`Command`] rather than opening anything itself;
 //! a URL is asked for in the command palette.
 
 use eframe::egui;
@@ -9,15 +8,6 @@ use super::commands::{Command, Keymap};
 /// What the file dialog offers. COPC files end `.copc.laz`, which the
 /// dialog can't match as one extension, so it shows every `.laz`.
 const FILE_FILTER: (&str, &[&str]) = ("COPC point cloud (*.copc.laz)", &["laz"]);
-
-/// A button for `command`, titled as the command is, with its shortcut.
-pub(crate) fn command_button(
-    ui: &mut egui::Ui,
-    keymap: &Keymap,
-    command: &Command,
-) -> egui::Response {
-    titled_button(ui, keymap, command.title(), command)
-}
 
 /// The menu bar along the top of the window: File, for `.copcat` files
 /// still to come, and Open, which opens a file or URL or browses the data
@@ -75,22 +65,6 @@ fn titled_button(
         button = button.shortcut_text(ui.ctx().format_shortcut(&shortcut));
     }
     ui.add(button)
-}
-
-/// What the main area shows before a cloud is open: how to open one.
-pub(crate) fn idle_ui(ui: &mut egui::Ui, keymap: &Keymap, commands: &mut Vec<Command>) {
-    ui.heading("No point cloud open");
-    ui.label(
-        "Open a COPC file (.copc.laz) from disk, or stream one from a URL. You can also \
-         give a path or URL on the command line.",
-    );
-    ui.horizontal(|ui| {
-        for command in [Command::OpenFileDialog, Command::OpenUrlDialog] {
-            if command_button(ui, keymap, &command).clicked() {
-                commands.push(command);
-            }
-        }
-    });
 }
 
 /// Asks for a COPC file to open, blocking until the dialog closes.

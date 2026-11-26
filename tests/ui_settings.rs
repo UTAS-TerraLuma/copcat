@@ -361,12 +361,16 @@ fn an_unknown_theme_and_bad_shortcut_should_warn_without_a_cloud() {
     assert_eq!(shown.len(), 2, "{shown:#?}");
     assert!(shown.iter().any(|w| w.contains("\"neon\"")), "{shown:#?}");
     assert!(shown.iter().any(|w| w.contains("Banana")), "{shown:#?}");
-    // The good binding is shown on its button, and the bad one keeps its
+    // The good binding is shown in the Open menu, and the bad one keeps its
     // default.
-    let open_url = harness.get_by_label_contains("Open URL");
+    harness
+        .get_by_role_and_label(egui::accesskit::Role::Button, "Open")
+        .click();
+    harness.run_ok();
+    let open_url = harness.get_by_label_contains("From URL");
     let text = format!("{:?}", open_url.accesskit_node());
     assert!(text.contains("Ctrl+U"), "{text}");
-    let open_file = harness.get_by_label_contains("Open file");
+    let open_file = harness.get_by_label_contains("From file");
     let text = format!("{:?}", open_file.accesskit_node());
     assert!(text.contains("Ctrl+O"), "{text}");
 }
