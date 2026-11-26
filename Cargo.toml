@@ -1,6 +1,6 @@
 [package]
 name = "copcat"
-version = "0.4.1"
+version = "0.5.0"
 edition = "2024"
 description = "A viewer for COPC LiDAR point clouds, local or streamed over HTTP"
 repository = "https://github.com/UTAS-TerraLuma/copcat"
